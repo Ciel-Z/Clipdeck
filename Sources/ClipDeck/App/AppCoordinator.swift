@@ -4,17 +4,17 @@ private final class StatusItemInteractionView: NSView {
     var onLeftClick: (() -> Void)?
     var onRightClick: ((NSEvent) -> Void)?
 
-    override func mouseDown(with event: NSEvent) {}
-
-    override func mouseUp(with event: NSEvent) {
+    override func mouseDown(with event: NSEvent) {
         onLeftClick?()
     }
 
-    override func rightMouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {}
 
-    override func rightMouseUp(with event: NSEvent) {
+    override func rightMouseDown(with event: NSEvent) {
         onRightClick?(event)
     }
+
+    override func rightMouseUp(with event: NSEvent) {}
 }
 
 @MainActor
