@@ -12,24 +12,19 @@ final class ClassificationService: @unchecked Sendable {
         guard case let .text(text, _) = item.payload else {
             return try repository.assignCategory(nil, to: item)
         }
-        let input: [String: Any] = [
-            "text": text,
-            "textLength": text.count,
-            "sourceApplication": [
-                "bundleId": item.sourceApplication.bundleIdentifier ?? "",
-                "name": item.sourceApplication.name,
-            ],
-            "copiedAt": Int64(item.copiedAt.timeIntervalSince1970 * 1_000),
-        ]
+        let input = Self.makeInput(
+            text: text,
+            sourceBundleIdentifier: item.sourceApplication.bundleIdentifier ?? "",
+            sourceName: item.sourceApplication.name,
+            copiedAt: item.copiedAt
+        )
 
         for category in try repository.fetchCategories() {
-            var categoryInput = input
-            if category.previewLanguage?.lowercased() == "code" {
-                let detection = CodeDetectionEngine.shared.detect(text)
-                categoryInput["codeEngineMatched"] = detection != nil
-                categoryInput["detectedLanguage"] = detection?.language ?? ""
-                categoryInput["codeScore"] = detection?.score ?? 0
-            }
+            let categoryInput = Self.input(
+                input,
+                enrichedFor: category.previewLanguage,
+                text: text
+            )
             let result = Self.evaluate(category.script, input: categoryInput)
             try repository.recordCategoryError(result.error, for: category.id)
             if result.matches {
@@ -40,19 +35,45 @@ final class ClassificationService: @unchecked Sendable {
     }
 
     static func test(script: String, text: String, previewLanguage: String? = nil) -> (matches: Bool, error: String?) {
-        var input: [String: Any] = [
+        let baseInput = makeInput(
+            text: text,
+            sourceBundleIdentifier: "app.clipdeck.script-test",
+            sourceName: "脚本测试",
+            copiedAt: Date()
+        )
+        let input = input(baseInput, enrichedFor: previewLanguage, text: text)
+        return evaluate(script, input: input)
+    }
+
+    private static func makeInput(
+        text: String,
+        sourceBundleIdentifier: String,
+        sourceName: String,
+        copiedAt: Date
+    ) -> [String: Any] {
+        [
             "text": text,
             "textLength": text.count,
-            "sourceApplication": ["bundleId": "app.clipdeck.script-test", "name": "脚本测试"],
-            "copiedAt": Int64(Date().timeIntervalSince1970 * 1_000),
+            "sourceApplication": [
+                "bundleId": sourceBundleIdentifier,
+                "name": sourceName,
+            ],
+            "copiedAt": Int64(copiedAt.timeIntervalSince1970 * 1_000),
         ]
-        if previewLanguage?.lowercased() == "code" {
-            let detection = CodeDetectionEngine.shared.detect(text)
-            input["codeEngineMatched"] = detection != nil
-            input["detectedLanguage"] = detection?.language ?? ""
-            input["codeScore"] = detection?.score ?? 0
-        }
-        return evaluate(script, input: input)
+    }
+
+    private static func input(
+        _ base: [String: Any],
+        enrichedFor previewLanguage: String?,
+        text: String
+    ) -> [String: Any] {
+        guard previewLanguage?.lowercased() == "code" else { return base }
+        let detection = CodeDetectionEngine.shared.detect(text)
+        var result = base
+        result["codeEngineMatched"] = detection != nil
+        result["detectedLanguage"] = detection?.language ?? ""
+        result["codeScore"] = detection?.score ?? 0
+        return result
     }
 
     private static func evaluate(_ script: String, input: [String: Any]) -> (matches: Bool, error: String?) {

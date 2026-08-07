@@ -334,6 +334,16 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 ]
             )
         }
+        migrator.registerMigration("supportBareHexColors") { database in
+            try database.execute(
+                sql: "UPDATE category SET script = ?, updated_at = ? WHERE name = '色彩' AND script = ?",
+                arguments: [
+                    DefaultCategoryScripts.color,
+                    Int64(Date().timeIntervalSince1970 * 1_000),
+                    DefaultCategoryScripts.hashPrefixedColor,
+                ]
+            )
+        }
         return migrator
     }
 }

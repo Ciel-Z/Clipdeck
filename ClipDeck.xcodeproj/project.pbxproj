@@ -25,6 +25,9 @@
 		A10000000000000000000011 /* CodeHighlightService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* CodeHighlightService.swift */; };
 		A10000000000000000000012 /* highlight.min.js in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* highlight.min.js */; };
 		A10000000000000000000013 /* highlight-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000015 /* highlight-LICENSE.txt */; };
+		A10000000000000000000014 /* ClipboardColorParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000016 /* ClipboardColorParser.swift */; };
+		A10000000000000000000015 /* DefaultCategoryScripts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* DefaultCategoryScripts.swift */; };
+		A10000000000000000000016 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* AppPreferences.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +52,9 @@
 		B10000000000000000000013 /* CodeHighlightService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Services/CodeHighlightService.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000014 /* highlight.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Sources/ClipDeck/Resources/highlight.min.js; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000015 /* highlight-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = Sources/ClipDeck/Resources/highlight-LICENSE.txt; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000016 /* ClipboardColorParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Services/ClipboardColorParser.swift; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000017 /* DefaultCategoryScripts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Persistence/DefaultCategoryScripts.swift; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000018 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/App/AppPreferences.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -92,6 +98,9 @@
 				B10000000000000000000011 /* CategoryManagementView.swift */,
 				B10000000000000000000014 /* highlight.min.js */,
 				B10000000000000000000015 /* highlight-LICENSE.txt */,
+				B10000000000000000000016 /* ClipboardColorParser.swift */,
+				B10000000000000000000017 /* DefaultCategoryScripts.swift */,
+				B10000000000000000000018 /* AppPreferences.swift */,
 			);
 			name = ClipDeck;
 			sourceTree = "<group>";
@@ -180,6 +189,9 @@
 				A1000000000000000000000E /* ClassificationService.swift in Sources */,
 				A1000000000000000000000F /* CategoryManagementView.swift in Sources */,
 				A10000000000000000000011 /* CodeHighlightService.swift in Sources */,
+				A10000000000000000000014 /* ClipboardColorParser.swift in Sources */,
+				A10000000000000000000015 /* DefaultCategoryScripts.swift in Sources */,
+				A10000000000000000000016 /* AppPreferences.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

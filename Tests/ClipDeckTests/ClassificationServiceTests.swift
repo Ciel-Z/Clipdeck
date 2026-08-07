@@ -123,6 +123,7 @@ final class ClassificationServiceTests: XCTestCase {
             ("def greet(name):\n    return f\"Hello {name}\"", "代码"),
             ("func greet(name: String) -> String { return \"Hello \\(name)\" }", "代码"),
             ("#34c759", "色彩"),
+            ("F54927", "色彩"),
             ("rgb(52, 199, 89)", "色彩"),
         ]
         for (text, expectedCategory) in samples {
@@ -138,6 +139,14 @@ final class ClassificationServiceTests: XCTestCase {
             sourceApplication: source
         )))
         XCTAssertNotEqual(invalidColor.category?.name, "色彩")
+    }
+
+    func testClipboardColorParserSupportsBareHexWithoutAcceptingShortBareWords() throws {
+        let color = try XCTUnwrap(ClipboardColorParser.color(from: "F54927"))
+        XCTAssertEqual(color.redComponent, 0xF5 / 255, accuracy: 0.001)
+        XCTAssertEqual(color.greenComponent, 0x49 / 255, accuracy: 0.001)
+        XCTAssertEqual(color.blueComponent, 0x27 / 255, accuracy: 0.001)
+        XCTAssertNil(ClipboardColorParser.color(from: "face"))
     }
 
     func testUniversalCodeHighlighterDetectsCommonLanguagesAndPreservesText() {

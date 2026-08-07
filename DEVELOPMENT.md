@@ -1,49 +1,103 @@
-# ClipDeck 开发进度
+# ClipDeck 开发说明
 
-本文件按 [readme.md](readme.md) 第 19 节的推荐顺序跟踪实现。需求与产品边界始终以 `readme.md` 为准。
+本文档记录当前代码边界、核心约束和验证方式。产品能力以 [readme.md](readme.md) 为准。
 
-## 第一阶段：系统能力原型
+## 技术栈
 
-- [x] 原生 Swift/AppKit + SwiftUI 工程骨架
-- [x] 使用 `NSPasteboard.changeCount` 每 400ms 监听剪贴板
-- [x] 读取纯文本和 RTF
-- [x] 读取 PNG/TIFF 图片，并执行 60,000,000 像素安全限制
-- [x] 忽略文件剪贴板内容
-- [x] 内存历史、横向卡片与键盘选择/删除
-- [x] 记录来源应用名称、Bundle ID 和图标
-- [x] 鼠标所在屏幕底部的 `NSPanel`
-- [x] Carbon 全局快捷键 `Command + Shift + V`
-- [x] 标准 Xcode `.app` target 与本地 ad-hoc 签名
-- [x] 写回文本或原格式图片、激活原应用并触发粘贴
-- [x] 无辅助功能权限时降级为仅写入剪贴板
-- [x] 核心单元测试
+- Swift 6
+- AppKit + SwiftUI
+- SQLite + GRDB.swift + FTS5
+- JavaScriptCore
+- 本地打包的 highlight.js
+- Carbon 全局快捷键
 
-## 第二阶段：本地历史
+最低系统版本为 macOS 14。
 
-- [x] 引入 GRDB.swift 与 SQLite migration
-- [x] Application、Content 表和 Repository 层
-- [x] 10 秒哈希去重与持久化历史列表
-- [x] 文本、RTF、图片 BLOB 存储
-- [x] 图片记录开关与 1/2/5/10/20 MB 字节大小设置
-- [x] 删除与默认 30 天分批过期清理
-- [x] 数据库占用、过期缓存清理、WAL checkpoint 与 VACUUM
+## 目录职责
 
-## 第三阶段：分类
+### App
 
-- [x] Category 表与默认分类
-- [x] JavaScriptCore 分类器和错误隔离
-- [x] 首个命中停止、排序和删除回退
-- [x] 分类管理、JS 语法高亮编辑与脚本测试界面
+- `ClipDeckApp.swift`：应用入口。
+- `AppCoordinator.swift`：组装服务、窗口和菜单栏交互，不承载内容解析规则。
+- `AppPreferences.swift`：设置键、默认值、快捷键匹配和偏好读取。
 
-## 第四阶段：搜索与预览
+### Models
 
-- [x] FTS5 文本索引和搜索
-- [x] 完整预览与轻量语法高亮
-- [x] 默认纯文本/保留 RTF 粘贴设置
+- `ClipboardItem.swift`：剪贴板内容、来源应用和分类模型。
 
-## 第五阶段：体验优化
+### Persistence
 
-- [ ] NSCollectionView、缩略图缓存和预加载
-- [ ] 快捷键自定义、搜索键盘流和完整预览键盘流
-- [ ] 多屏幕、全屏与 Space 场景验证
-- [ ] 动画、数据库性能、内存和 CPU 分析
+- `ClipDeckDatabase.swift`：数据库初始化与仅追加的 schema/data migration。
+- `HistoryRepository.swift`：历史、分类和应用记录的数据访问。
+- `DefaultCategoryScripts.swift`：系统预制分类与兼容旧版本所需的规则快照。
+
+### Services
+
+- `ClipboardReader.swift`：读取系统剪贴板并执行类型、体积和像素限制。
+- `ClipboardMonitor.swift`：监听 changeCount、调度保存和网页元数据补全。
+- `ClassificationService.swift`：构造分类脚本输入、依次执行分类并隔离错误。
+- `CodeHighlightService.swift`：加权代码检测与 highlight.js 高亮桥接。
+- `ClipboardColorParser.swift`：Hex、RGB、RGBA 的统一解析。
+- `PasteService.swift`：写回剪贴板、恢复目标应用并触发粘贴。
+- `GlobalHotKeyController.swift`：注册和释放全局快捷键。
+- `InMemoryHistoryStore.swift`：Deck 当前列表、过滤、选中和预览状态。
+
+### UI
+
+- `HistoryPanelView.swift`：Deck、卡片、预览和内容编辑界面。
+- `PanelController.swift`：NSPanel 生命周期、焦点、键盘事件、多屏定位和高度调整。
+- `CategoryManagementView.swift`：设置、分类 CRUD、脚本编辑和快捷键配置。
+
+## 必须保持的行为
+
+调整结构或优化性能时，以下行为不得退化：
+
+- Deck 在鼠标所在显示器底部弹出，并记住用户调整后的高度。
+- 默认焦点位于卡片；开始输入或按回退键后进入搜索框。
+- 搜索实时更新；结束搜索后焦点返回卡片。
+- 编辑器持有焦点时，回车、回退和方向键只操作编辑内容。
+- 粘贴目标是呼出 Deck 前持有焦点的外部应用。
+- 菜单栏图标左键切换 Deck，右键仅打开菜单。
+- 预览以 Deck 上方浮层展示，切换卡片或粘贴后消失。
+- 图片和颜色卡片保持沉浸式头部，不压缩主要展示区域。
+- 分类按用户顺序执行，第一个命中项生效；系统分类与自定义分类具有同等可编辑性。
+- 所有历史默认保存在本机；代码检测与语法高亮不请求网络。
+
+## 分类与迁移约束
+
+- 分类规则由用户编辑，不能在启动时无条件覆盖。
+- 修改系统默认规则时，新增数据库 migration，只更新与旧预设脚本完全相同的分类。
+- 用户自定义过的同名分类必须保持不变。
+- 新安装使用 `DefaultCategoryScripts.presets`；“恢复预制分类”同样以该列表为准。
+- 图片不进入文本分类；文本分类首个命中后停止继续执行。
+
+## 验证
+
+运行全部单元测试：
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/clipdeck-clang-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/clipdeck-swiftpm-cache \
+swift test
+```
+
+验证 Xcode 应用 target：
+
+```bash
+xcodebuild \
+  -project ClipDeck.xcodeproj \
+  -scheme ClipDeck \
+  -configuration Debug \
+  -derivedDataPath .build/XcodeDerivedData \
+  build
+```
+
+新增 Swift 文件时必须同时确认 Swift Package 与 Xcode Sources Build Phase 均能编译。
+
+## 后续整理方向
+
+- 继续拆分 `HistoryPanelView.swift` 中的卡片、编辑器和预览组件。
+- 继续拆分 `CategoryManagementView.swift` 中的设置页、快捷键录制器和脚本编辑器。
+- 将网页元数据解析从 `ClipboardMonitor.swift` 移入独立服务文件。
+- 为 Panel 焦点、菜单栏左右键和多显示器定位补充可自动化的集成测试。
+- 使用 Instruments 持续检查拖动 Deck 时的布局、CPU 和图片解码开销。
