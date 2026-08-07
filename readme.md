@@ -1,4 +1,18 @@
-# ClipDeck
+<p align="center">
+  <img src="Assets.xcassets/AppIcon.appiconset/icon-256.png" width="128" height="128" alt="ClipDeck 图标">
+</p>
+
+<h1 align="center">ClipDeck</h1>
+
+<p align="center">
+  原生 macOS 剪贴板历史工具，以横向卡片 Deck 让复制、查找和粘贴保持顺畅。
+</p>
+
+<p align="center">
+  <img src="docs/images/deck-expanded.png" alt="ClipDeck 展开模式实机渲染">
+</p>
+
+<p align="center"><sub>真实应用界面渲染；卡片文字、链接、代码与颜色均为虚拟演示内容。</sub></p>
 
 ClipDeck 是一款原生 macOS 剪贴板历史工具。它以屏幕底部的横向卡片 Deck 呈现最近复制的内容，在保留快速搜索、预览和键盘粘贴体验的同时，针对代码、链接和颜色等内容提供自动识别与专属展示。
 
@@ -14,6 +28,12 @@ ClipDeck 是一款原生 macOS 剪贴板历史工具。它以屏幕底部的横�
 - 卡片随高度在紧凑模式和展开模式之间自适应切换
 - 横向滚动浏览历史，键盘左右键快速切换选中内容
 - 右键点击菜单栏图标打开设置或退出 ClipDeck
+
+<p align="center">
+  <img src="docs/images/deck-compact.png" alt="ClipDeck 紧凑模式实机渲染">
+</p>
+
+<p align="center"><sub>紧凑高度下仍保留分类、语法高亮与横向浏览；展示内容均为虚拟数据。</sub></p>
 
 ### 快速查找与粘贴
 
@@ -49,6 +69,12 @@ ClipDeck 是一款原生 macOS 剪贴板历史工具。它以屏幕底部的横�
 - 色彩
 
 分类按顺序匹配，支持拖动排序。所有内置分类与用户创建的分类使用相同的数据模型，均可修改名称、图标、预览语言和 JavaScript 分类规则，也可以恢复为系统预设。
+
+<p align="center">
+  <img src="docs/images/categories.png" alt="ClipDeck 自动分类与自定义分类管理实机渲染">
+</p>
+
+<p align="center"><sub>内置分类和自建分类可混合排序；示例中的“工作片段”是使用虚拟 JavaScript 规则创建的自定义分类。</sub></p>
 
 分类管理器提供：
 
@@ -136,4 +162,4 @@ ClipDeck 的历史内容默认仅保存在本机数据库中。应用不会上�
 
 ## License
 
-项目暂未声明开源许可证。在许可证补充前，保留所有权利。
+ClipDeck 使用 [MIT License](LICENSE) 开源。
