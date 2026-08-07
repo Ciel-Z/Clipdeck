@@ -1,0 +1,123 @@
+import Foundation
+import XCTest
+@testable import ClipDeck
+
+final class HistoryRepositoryTests: XCTestCase {
+    private let source = SourceApplication(
+        bundleIdentifier: "com.example.editor",
+        name: "Editor",
+        iconData: Data([1, 2, 3])
+    )
+
+    func testTextAndImageRoundTripAndDelete() throws {
+        let repository = try makeRepository()
+        let text = try repository.save(ClipboardItem(
+            payload: .text(plainText: "hello", rtfData: Data([4, 5])),
+            sourceApplication: source
+        ))
+        _ = try repository.save(ClipboardItem(
+            payload: .image(data: Data([6, 7]), width: 2, height: 1, format: .png),
+            sourceApplication: source
+        ))
+
+        let items = try repository.fetchRecent()
+        XCTAssertEqual(items.count, 2)
+        XCTAssertTrue(items.contains { $0.payload == text.payload })
+
+        try repository.delete(text)
+        XCTAssertEqual(try repository.fetchRecent().count, 1)
+    }
+
+    func testRecentDuplicateUpdatesExistingRow() throws {
+        let repository = try makeRepository()
+        _ = try repository.save(ClipboardItem(payload: .text(plainText: "same", rtfData: nil), sourceApplication: source))
+        _ = try repository.save(ClipboardItem(payload: .text(plainText: "same", rtfData: nil), sourceApplication: source))
+
+        XCTAssertEqual(try repository.fetchRecent().count, 1)
+    }
+
+    func testExpiredHistoryIsDeleted() throws {
+        let repository = try makeRepository()
+        _ = try repository.save(ClipboardItem(
+            payload: .text(plainText: "old", rtfData: nil),
+            sourceApplication: source,
+            copiedAt: Date().addingTimeInterval(-31 * 86_400)
+        ))
+
+        XCTAssertEqual(try repository.deleteExpired(retentionDays: 30), 1)
+        XCTAssertTrue(try repository.fetchRecent().isEmpty)
+    }
+
+    func testFullTextSearchIndexesTextButNotImages() throws {
+        let repository = try makeRepository()
+        _ = try repository.save(ClipboardItem(
+            payload: .text(plainText: "SELECT user_name FROM accounts", rtfData: nil),
+            sourceApplication: source
+        ))
+        _ = try repository.save(ClipboardItem(
+            payload: .text(plainText: "unrelated markdown", rtfData: nil),
+            sourceApplication: source
+        ))
+        _ = try repository.save(ClipboardItem(
+            payload: .image(data: Data("SELECT".utf8), width: 1, height: 1, format: .png),
+            sourceApplication: source
+        ))
+
+        let matches = try repository.searchText("sel user")
+        XCTAssertEqual(matches.count, 1)
+        XCTAssertEqual(matches.first?.payload, .text(plainText: "SELECT user_name FROM accounts", rtfData: nil))
+        XCTAssertTrue(try repository.searchText("missing").isEmpty)
+    }
+
+    func testUpdatingTextRefreshesStoredPayloadAndFullTextIndex() throws {
+        let repository = try makeRepository()
+        let saved = try repository.save(ClipboardItem(
+            payload: .text(plainText: "old searchable value", rtfData: Data([1, 2])),
+            sourceApplication: source
+        ))
+        let updated = ClipboardItem(
+            databaseID: saved.databaseID,
+            payload: .text(plainText: "new replacement value", rtfData: nil),
+            sourceApplication: saved.sourceApplication,
+            copiedAt: saved.copiedAt
+        )
+
+        try repository.update(updated)
+
+        XCTAssertEqual(try repository.fetchRecent().first?.payload, updated.payload)
+        XCTAssertTrue(try repository.searchText("old searchable").isEmpty)
+        XCTAssertEqual(try repository.searchText("new replacement").first?.payload, updated.payload)
+    }
+
+    func testTitlesDefaultPersistRenameAndAreSearchableForImages() throws {
+        let repository = try makeRepository()
+        let text = try repository.save(ClipboardItem(
+            payload: .text(plainText: "body", rtfData: nil),
+            sourceApplication: source
+        ))
+        let image = try repository.save(ClipboardItem(
+            payload: .image(data: Data([9, 8, 7]), width: 3, height: 1, format: .png),
+            sourceApplication: source
+        ))
+
+        XCTAssertEqual(text.title, "文本")
+        XCTAssertEqual(image.title, "图片")
+
+        let renamed = ClipboardItem(
+            id: image.id,
+            databaseID: image.databaseID,
+            title: "发布页设计稿",
+            payload: image.payload,
+            sourceApplication: image.sourceApplication,
+            copiedAt: image.copiedAt
+        )
+        try repository.update(renamed)
+
+        XCTAssertEqual(try repository.fetchRecent().first?.title, "发布页设计稿")
+        XCTAssertEqual(try repository.searchText("发布页").first?.title, "发布页设计稿")
+    }
+
+    private func makeRepository() throws -> HistoryRepository {
+        try HistoryRepository(database: ClipDeckDatabase(path: ":memory:"))
+    }
+}
