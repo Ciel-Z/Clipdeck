@@ -3,8 +3,10 @@ import GRDB
 
 final class ClipDeckDatabase: @unchecked Sendable {
     let writer: any DatabaseWriter
+    let path: String
 
     init(path: String) throws {
+        self.path = path
         var configuration = Configuration()
         if path != ":memory:" {
             configuration.journalMode = .wal
@@ -194,6 +196,143 @@ final class ClipDeckDatabase: @unchecked Sendable {
                     VALUES (new.id, new.title, new.plain_text);
                 END;
                 """)
+        }
+        migrator.registerMigration("addLinkIconData") { database in
+            try database.alter(table: "content") { table in
+                table.add(column: "link_icon_data", .blob)
+            }
+        }
+        migrator.registerMigration("refreshDefaultCategoriesV2") { database in
+            let hadCategories = (try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM category") ?? 0) > 0
+            let now = Int64(Date().timeIntervalSince1970 * 1_000)
+            let replacements: [(String, String, String)] = [
+                ("URL", DefaultCategoryScripts.legacyURL, DefaultCategoryScripts.url),
+                ("SQL", DefaultCategoryScripts.legacySQL, DefaultCategoryScripts.sql),
+                ("Markdown", DefaultCategoryScripts.legacyMarkdown, DefaultCategoryScripts.markdown),
+            ]
+            for (name, legacyScript, formattedScript) in replacements {
+                try database.execute(
+                    sql: "UPDATE category SET script = ?, updated_at = ? WHERE name = ? AND script = ?",
+                    arguments: [formattedScript, now, name, legacyScript]
+                )
+            }
+
+            try database.execute(
+                sql: "DELETE FROM category WHERE name = 'Shell' AND script = ?",
+                arguments: [DefaultCategoryScripts.legacyShell]
+            )
+
+            let additions = hadCategories ? DefaultCategoryScripts.presets.filter {
+                ["Java", "JavaScript", "色彩"].contains($0.name)
+            } : []
+            var nextOrder = (try Int.fetchOne(database, sql: "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM category")) ?? 0
+            for preset in additions {
+                guard try Int.fetchOne(
+                    database,
+                    sql: "SELECT COUNT(*) FROM category WHERE name = ?",
+                    arguments: [preset.name]
+                ) == 0 else { continue }
+                try database.execute(
+                    sql: "INSERT INTO category (name, icon, script, preview_language, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    arguments: [preset.name, preset.icon, preset.script, preset.previewLanguage, nextOrder, now, now]
+                )
+                nextOrder += 1
+            }
+        }
+        migrator.registerMigration("tightenDefaultColorRule") { database in
+            try database.execute(
+                sql: "UPDATE category SET script = ?, updated_at = ? WHERE name = '色彩' AND script = ?",
+                arguments: [
+                    DefaultCategoryScripts.color,
+                    Int64(Date().timeIntervalSince1970 * 1_000),
+                    DefaultCategoryScripts.permissiveColor,
+                ]
+            )
+        }
+        migrator.registerMigration("mergeDefaultDevelopmentCategories") { database in
+            guard (try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM category") ?? 0) > 0 else {
+                return
+            }
+            let now = Int64(Date().timeIntervalSince1970 * 1_000)
+            let legacyRows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT id, sort_order FROM category
+                    WHERE (name = 'Java' AND script = ?)
+                       OR (name = 'JavaScript' AND script = ?)
+                    ORDER BY sort_order, id
+                    """,
+                arguments: [DefaultCategoryScripts.java, DefaultCategoryScripts.javaScript]
+            )
+            let appendedOrder = try Int.fetchOne(
+                database,
+                sql: "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM category"
+            ) ?? 0
+            let suggestedOrder = legacyRows.compactMap { $0["sort_order"] as Int? }.min()
+                ?? appendedOrder
+            let codePreset = DefaultCategoryScripts.presets.first { $0.name == "代码" }!
+            let codeID: Int64
+            if let existingID = try Int64.fetchOne(
+                database,
+                sql: "SELECT id FROM category WHERE name = '代码' LIMIT 1"
+            ) {
+                codeID = existingID
+            } else {
+                try database.execute(
+                    sql: "INSERT INTO category (name, icon, script, preview_language, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    arguments: [codePreset.name, codePreset.icon, codePreset.script, codePreset.previewLanguage, suggestedOrder, now, now]
+                )
+                codeID = database.lastInsertedRowID
+            }
+
+            for row in legacyRows {
+                let legacyID: Int64 = row["id"]
+                try database.execute(
+                    sql: "UPDATE content SET category_id = ?, updated_at = ? WHERE category_id = ?",
+                    arguments: [codeID, now, legacyID]
+                )
+                try database.execute(sql: "DELETE FROM category WHERE id = ?", arguments: [legacyID])
+            }
+
+            let orderedIDs = try Int64.fetchAll(
+                database,
+                sql: "SELECT id FROM category ORDER BY CASE WHEN name = '色彩' THEN 1 ELSE 0 END, sort_order, id"
+            )
+            for (index, id) in orderedIDs.enumerated() {
+                try database.execute(
+                    sql: "UPDATE category SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    arguments: [index, now, id]
+                )
+            }
+        }
+        migrator.registerMigration("mergeFormattedDefaultShellIntoCode") { database in
+            guard let codeID = try Int64.fetchOne(
+                database,
+                sql: "SELECT id FROM category WHERE name = '代码' LIMIT 1"
+            ) else { return }
+            let shellIDs = try Int64.fetchAll(
+                database,
+                sql: "SELECT id FROM category WHERE name = 'Shell' AND script IN (?, ?)",
+                arguments: [DefaultCategoryScripts.legacyShell, DefaultCategoryScripts.formattedLegacyShell]
+            )
+            let now = Int64(Date().timeIntervalSince1970 * 1_000)
+            for shellID in shellIDs {
+                try database.execute(
+                    sql: "UPDATE content SET category_id = ?, updated_at = ? WHERE category_id = ?",
+                    arguments: [codeID, now, shellID]
+                )
+                try database.execute(sql: "DELETE FROM category WHERE id = ?", arguments: [shellID])
+            }
+        }
+        migrator.registerMigration("useWeightedCodeDetectionEngine") { database in
+            try database.execute(
+                sql: "UPDATE category SET script = ?, updated_at = ? WHERE name = '代码' AND script = ?",
+                arguments: [
+                    DefaultCategoryScripts.code,
+                    Int64(Date().timeIntervalSince1970 * 1_000),
+                    DefaultCategoryScripts.relevanceBasedCode,
+                ]
+            )
         }
         return migrator
     }

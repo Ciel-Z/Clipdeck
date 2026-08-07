@@ -3,7 +3,7 @@ import SwiftUI
 
 struct HistoryPanelView: View {
     @ObservedObject var store: InMemoryHistoryStore
-    let onPaste: (ClipboardItem) -> Void
+    let onPaste: (ClipboardItem, Bool) -> Void
     let onClose: () -> Void
     let onManageCategories: () -> Void
     let onSearch: (String) -> Void
@@ -73,12 +73,16 @@ struct HistoryPanelView: View {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 24) {
-                            ForEach(store.displayedItems) { item in
+                            ForEach(Array(store.displayedItems.enumerated()), id: \.element.id) { entry in
+                                let item = entry.element
                                 ClipboardCardView(
                                     item: item,
                                     isSelected: item.id == store.selectedItemID,
                                     width: cardSide,
-                                    height: cardSide
+                                    height: cardSide,
+                                    quickPasteNumber: store.isQuickPasteOverlayVisible && entry.offset < 9
+                                        ? entry.offset + 1
+                                        : nil
                                 )
                                 .id(item.id)
                                 .onTapGesture {
@@ -87,7 +91,12 @@ struct HistoryPanelView: View {
                                 }
                                 .onTapGesture(count: 2) {
                                     store.selectedItemID = item.id
-                                    paste(item)
+                                    paste(
+                                        item,
+                                        forcePlainText: AppPreferences.isPlainTextModifierActive(
+                                            in: NSApp.currentEvent?.modifierFlags ?? []
+                                        )
+                                    )
                                 }
                                 .popover(
                                     isPresented: floatingContentBinding(for: item),
@@ -186,9 +195,9 @@ struct HistoryPanelView: View {
         }
     }
 
-    private func paste(_ item: ClipboardItem) {
+    private func paste(_ item: ClipboardItem, forcePlainText: Bool = false) {
         store.dismissPreview()
-        onPaste(item)
+        onPaste(item, forcePlainText)
     }
 
     private func floatingContentBinding(for item: ClipboardItem) -> Binding<Bool> {
@@ -449,13 +458,22 @@ private struct ClipboardCardView: View {
     let isSelected: Bool
     let width: CGFloat
     let height: CGFloat
+    let quickPasteNumber: Int?
 
     var body: some View {
         ZStack(alignment: .top) {
             if isExpanded {
-                VStack(spacing: 0) {
-                    expandedHeader
-                    cardContent(showFooter: true)
+                Group {
+                    if usesImmersiveHeader {
+                        cardContent(showFooter: true)
+                        expandedHeader
+                    } else {
+                        VStack(spacing: 0) {
+                            expandedHeader
+                                .background(headerBackground)
+                            cardContent(showFooter: true)
+                        }
+                    }
                 }
                 .transition(.opacity)
             } else {
@@ -475,9 +493,21 @@ private struct ClipboardCardView: View {
                     lineWidth: isSelected ? 4 : 1
                 )
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let quickPasteNumber {
+                Text("\(quickPasteNumber)")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.94))
+                    .frame(minWidth: 25, minHeight: 25)
+                    .background(.black.opacity(isSelected ? 0.66 : 0.48), in: RoundedRectangle(cornerRadius: 7))
+                    .padding(9)
+                    .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            }
+        }
         .shadow(color: isSelected ? Color.blue.opacity(0.24) : .black.opacity(0.28), radius: 9, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
         .animation(.easeOut(duration: 0.14), value: isSelected)
+        .animation(.easeOut(duration: 0.10), value: quickPasteNumber)
     }
 
     private var expandedHeader: some View {
@@ -505,7 +535,7 @@ private struct ClipboardCardView: View {
         .padding(.leading, 14)
         .padding(.trailing, 10)
         .frame(height: headerHeight)
-        .background(headerBackground)
+        .shadow(color: usesImmersiveHeader ? .black.opacity(0.42) : .clear, radius: 3, y: 1)
     }
 
     private var compactHeader: some View {
@@ -527,30 +557,38 @@ private struct ClipboardCardView: View {
         .foregroundStyle(.white.opacity(0.90))
         .padding(.horizontal, 11)
         .padding(.top, 10)
+        .shadow(color: usesImmersiveHeader ? .black.opacity(0.55) : .clear, radius: 3, y: 1)
     }
 
     @ViewBuilder
     private func cardContent(showFooter: Bool) -> some View {
         switch item.payload {
         case let .text(plainText, _):
-            ZStack(alignment: .bottom) {
-                Text(SyntaxHighlighter.highlighted(
-                    String(plainText.prefix(3_000)),
-                    language: item.category?.previewLanguage,
-                    fontSize: 13.5
-                ))
-                    .foregroundStyle(.white.opacity(0.90))
-                    .lineSpacing(2)
-                    .padding(.horizontal, 14)
-                    .padding(.top, showFooter ? 13 : 37)
-                    .padding(.bottom, showFooter ? 34 : 12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if item.category?.previewLanguage?.lowercased() == "color",
+               let color = ClipboardColorParser.color(from: plainText) {
+                colorContent(color, value: plainText, showFooter: showFooter)
+            } else if item.webURL != nil {
+                linkContent(showFooter: showFooter)
+            } else {
+                ZStack(alignment: .bottom) {
+                    Text(SyntaxHighlighter.highlighted(
+                        String(plainText.prefix(3_000)),
+                        language: item.category?.previewLanguage,
+                        fontSize: 13.5
+                    ))
+                        .foregroundStyle(.white.opacity(0.90))
+                        .lineSpacing(2)
+                        .padding(.horizontal, 14)
+                        .padding(.top, showFooter ? 13 : 37)
+                        .padding(.bottom, showFooter ? 34 : 12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                if showFooter {
-                    Text("\(plainText.count) 个字符")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.52))
-                        .padding(.bottom, 10)
+                    if showFooter {
+                        Text("\(plainText.count) 个字符")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.52))
+                            .padding(.bottom, 10)
+                    }
                 }
             }
 
@@ -577,6 +615,79 @@ private struct ClipboardCardView: View {
         }
     }
 
+    private func colorContent(_ color: NSColor, value: String, showFooter: Bool) -> some View {
+        ZStack(alignment: .bottom) {
+            Color(nsColor: color)
+            if showFooter {
+                Text(value.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.48), in: Capsule())
+                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                    .padding(.bottom, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func linkContent(showFooter: Bool) -> some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: showFooter ? 12 : 34)
+            linkIcon(size: showFooter ? min(58, max(42, height * 0.25)) : 36)
+            Spacer(minLength: 10)
+            if showFooter {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(linkDisplayTitle)
+                        .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineLimit(2)
+                    if let host = item.linkHost {
+                        Text(host)
+                            .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.50))
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func linkIcon(size: CGFloat) -> some View {
+        Group {
+            if let data = item.linkIconData,
+               let image = ClipboardImageCache.image(key: "link:\(item.id)", data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(size * 0.13)
+            } else {
+                Image(systemName: "safari")
+                    .font(.system(size: size * 0.55, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+        }
+        .frame(width: size, height: size)
+        .background(.white.opacity(0.94), in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: size * 0.23, style: .continuous)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.24), radius: 5, y: 2)
+    }
+
+    private var linkDisplayTitle: String {
+        if item.title != "文本", !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return item.title
+        }
+        return item.linkHost ?? item.webURL?.absoluteString ?? "链接"
+    }
+
     private func sourceBadge(size: CGFloat) -> some View {
         Group {
             if let data = item.sourceApplication.iconData,
@@ -598,7 +709,19 @@ private struct ClipboardCardView: View {
         .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
     }
 
-    private var categoryLabel: String? { item.category?.name }
+    private var categoryLabel: String? {
+        guard let category = item.category else { return nil }
+        guard category.previewLanguage?.lowercased() == "code",
+              case let .text(text, _) = item.payload else { return category.name }
+        let detected = CodeHighlightService.shared.highlight(text, language: "code").language
+        guard let detected else { return category.name }
+        return CodeHighlightService.displayName(for: detected)
+    }
+
+    private var usesImmersiveHeader: Bool {
+        if case .image = item.payload { return true }
+        return item.category?.previewLanguage?.lowercased() == "color"
+    }
 
     private var headerBackground: LinearGradient {
         switch item.payload {
@@ -752,7 +875,7 @@ enum SyntaxHighlighter {
             return cached
         }
 
-        let highlighted = makeHighlighted(text, language: normalizedLanguage, fontSize: fontSize)
+        let highlighted = AttributedString(makeHighlighted(text, language: normalizedLanguage, fontSize: fontSize))
         if shouldCache {
             if cache.count >= 256 {
                 cache.removeAll(keepingCapacity: true)
@@ -762,11 +885,15 @@ enum SyntaxHighlighter {
         return highlighted
     }
 
+    static func attributedText(_ text: String, language: String?, fontSize: CGFloat) -> NSAttributedString {
+        makeHighlighted(text, language: language?.lowercased(), fontSize: fontSize)
+    }
+
     private static func makeHighlighted(
         _ text: String,
         language normalizedLanguage: String?,
         fontSize: CGFloat
-    ) -> AttributedString {
+    ) -> NSAttributedString {
         let isCode = normalizedLanguage != nil && normalizedLanguage != "text"
         let font = isCode
             ? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
@@ -779,7 +906,20 @@ enum SyntaxHighlighter {
             ]
         )
 
-        guard isCode else { return AttributedString(result) }
+        guard isCode else { return result }
+
+        if normalizedLanguage == "code" {
+            let highlighted = CodeHighlightService.shared.highlight(text, language: "code")
+            guard highlighted.text == text else { return result }
+            for span in highlighted.spans where NSMaxRange(span.range) <= result.length {
+                result.addAttribute(
+                    .foregroundColor,
+                    value: tokenColor(for: span.scope),
+                    range: span.range
+                )
+            }
+            return result
+        }
 
         let keywords = keywordPattern(for: normalizedLanguage)
         apply(keywords, color: .systemPurple, to: result)
@@ -794,7 +934,7 @@ enum SyntaxHighlighter {
             apply("(?m)^#{1,6}\\s+.*$", color: .systemBlue, to: result)
             apply("`[^`]+`|\\*\\*[^*]+\\*\\*", color: .systemOrange, to: result)
         }
-        return AttributedString(result)
+        return result
     }
 
     private static func keywordPattern(for language: String?) -> String {
@@ -822,6 +962,20 @@ enum SyntaxHighlighter {
             text.addAttribute(.foregroundColor, value: color, range: match.range)
         }
     }
+
+    private static func tokenColor(for scope: String) -> NSColor {
+        switch scope {
+        case "keyword", "selector-tag", "meta-keyword": .systemPurple
+        case "string", "regexp", "template-tag", "template-variable": .systemOrange
+        case "comment", "quote": .secondaryLabelColor
+        case "number", "literal", "symbol", "bullet": .systemTeal
+        case "title", "section", "name", "selector-id": .systemBlue
+        case "type", "built_in", "class", "attribute": .systemMint
+        case "variable", "params", "attr", "property": .systemCyan
+        case "meta", "doctag": .systemPink
+        default: .labelColor
+        }
+    }
 }
 
 @MainActor
@@ -838,6 +992,61 @@ private enum ClipboardImageCache {
         }
         images[key] = image
         return image
+    }
+}
+
+private enum ClipboardColorParser {
+    static func color(from source: String) -> NSColor? {
+        let value = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("#") { return hexColor(String(value.dropFirst())) }
+        guard value.hasPrefix("rgb"),
+              let opening = value.firstIndex(of: "("), value.last == ")" else { return nil }
+        let components = value[value.index(after: opening)..<value.index(before: value.endIndex)]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard components.count == 3 || components.count == 4,
+              let red = channel(components[0]),
+              let green = channel(components[1]),
+              let blue = channel(components[2]) else { return nil }
+        let alpha: CGFloat
+        if components.count == 4 {
+            guard let parsedAlpha = alphaChannel(components[3]) else { return nil }
+            alpha = parsedAlpha
+        } else {
+            alpha = 1
+        }
+        return NSColor(calibratedRed: red, green: green, blue: blue, alpha: alpha)
+    }
+
+    private static func hexColor(_ value: String) -> NSColor? {
+        guard [3, 4, 6, 8].contains(value.count),
+              value.allSatisfy({ $0.isHexDigit }) else { return nil }
+        let expanded = value.count <= 4
+            ? value.map { "\($0)\($0)" }.joined()
+            : value
+        guard let number = UInt64(expanded, radix: 16) else { return nil }
+        let hasAlpha = expanded.count == 8
+        let red = CGFloat((number >> (hasAlpha ? 24 : 16)) & 0xff) / 255
+        let green = CGFloat((number >> (hasAlpha ? 16 : 8)) & 0xff) / 255
+        let blue = CGFloat((number >> (hasAlpha ? 8 : 0)) & 0xff) / 255
+        let alpha = hasAlpha ? CGFloat(number & 0xff) / 255 : 1
+        return NSColor(calibratedRed: red, green: green, blue: blue, alpha: alpha)
+    }
+
+    private static func channel(_ value: String) -> CGFloat? {
+        if value.hasSuffix("%"), let percent = Double(value.dropLast()), (0 ... 100).contains(percent) {
+            return CGFloat(percent / 100)
+        }
+        guard let number = Double(value), (0 ... 255).contains(number) else { return nil }
+        return CGFloat(number / 255)
+    }
+
+    private static func alphaChannel(_ value: String) -> CGFloat? {
+        if value.hasSuffix("%"), let percent = Double(value.dropLast()), (0 ... 100).contains(percent) {
+            return CGFloat(percent / 100)
+        }
+        guard let number = Double(value), (0 ... 1).contains(number) else { return nil }
+        return CGFloat(number)
     }
 }
 
@@ -987,10 +1196,21 @@ private struct ContentEditorView: View {
 
     private var textEditor: some View {
         VStack(spacing: 0) {
-            TextEditor(text: $text)
-                .font(.system(size: 17))
-                .focused($textEditorFocused)
-                .scrollContentBackground(.hidden)
+            Group {
+                if let language = editableLanguage {
+                    SyntaxTextEditor(
+                        text: $text,
+                        language: language,
+                        fontSize: 15,
+                        autofocus: true
+                    )
+                } else {
+                    TextEditor(text: $text)
+                        .font(.system(size: 17))
+                        .focused($textEditorFocused)
+                        .scrollContentBackground(.hidden)
+                }
+            }
                 .padding(16)
                 .background(Color.black.opacity(0.56))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1016,6 +1236,11 @@ private struct ContentEditorView: View {
             .frame(height: 44)
             .background(.white.opacity(0.025))
         }
+    }
+
+    private var editableLanguage: String? {
+        let language = item.category?.previewLanguage?.lowercased()
+        return ["code", "json", "sql", "java", "javascript", "js"].contains(language) ? language : nil
     }
 
     @ViewBuilder

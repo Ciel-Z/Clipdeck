@@ -117,6 +117,40 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.searchText("发布页").first?.title, "发布页设计稿")
     }
 
+    func testLinkMetadataPersistsAndTitleRemainsSearchable() throws {
+        let repository = try makeRepository()
+        let saved = try repository.save(ClipboardItem(
+            title: "Example Documentation",
+            linkIconData: Data([3, 1, 4, 1, 5]),
+            payload: .text(plainText: "https://example.com/docs", rtfData: nil),
+            sourceApplication: source
+        ))
+
+        let restored = try XCTUnwrap(try repository.fetchRecent().first)
+        XCTAssertEqual(restored.databaseID, saved.databaseID)
+        XCTAssertEqual(restored.title, "Example Documentation")
+        XCTAssertEqual(restored.linkIconData, Data([3, 1, 4, 1, 5]))
+        XCTAssertEqual(try repository.searchText("Documentation").first?.databaseID, saved.databaseID)
+    }
+
+    func testCacheMaintenanceDeletesOnlyExpiredThenCanClearAllHistory() throws {
+        let repository = try makeRepository()
+        _ = try repository.save(ClipboardItem(
+            payload: .text(plainText: "expired", rtfData: nil),
+            sourceApplication: source,
+            copiedAt: Date().addingTimeInterval(-31 * 86_400)
+        ))
+        _ = try repository.save(ClipboardItem(
+            payload: .text(plainText: "active", rtfData: nil),
+            sourceApplication: source
+        ))
+
+        XCTAssertEqual(try repository.clearExpiredAndReclaim(retentionDays: 30), 1)
+        XCTAssertEqual(try repository.fetchRecent().map(\.title), ["文本"])
+        XCTAssertEqual(try repository.clearAllHistoryAndReclaim(), 1)
+        XCTAssertTrue(try repository.fetchRecent().isEmpty)
+    }
+
     private func makeRepository() throws -> HistoryRepository {
         try HistoryRepository(database: ClipDeckDatabase(path: ":memory:"))
     }

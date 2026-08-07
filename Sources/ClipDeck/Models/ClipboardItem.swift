@@ -51,6 +51,7 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
     let id: UUID
     let databaseID: Int64?
     let title: String
+    let linkIconData: Data?
     let payload: ClipboardPayload
     let sourceApplication: SourceApplication
     let category: ClipboardCategory?
@@ -60,6 +61,7 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
         id: UUID = UUID(),
         databaseID: Int64? = nil,
         title: String? = nil,
+        linkIconData: Data? = nil,
         payload: ClipboardPayload,
         sourceApplication: SourceApplication,
         category: ClipboardCategory? = nil,
@@ -68,10 +70,29 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
         self.id = id
         self.databaseID = databaseID
         self.title = title ?? payload.defaultTitle
+        self.linkIconData = linkIconData
         self.payload = payload
         self.sourceApplication = sourceApplication
         self.category = category
         self.copiedAt = copiedAt
+    }
+}
+
+extension ClipboardItem {
+    var webURL: URL? {
+        guard case let .text(plainText, _) = payload else { return nil }
+        let candidate = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.contains(where: \.isWhitespace),
+              let url = URL(string: candidate),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+
+    var linkHost: String? {
+        guard let host = webURL?.host(percentEncoded: false) else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 }
 

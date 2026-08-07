@@ -24,9 +24,9 @@
 - [x] Application、Content 表和 Repository 层
 - [x] 10 秒哈希去重与持久化历史列表
 - [x] 文本、RTF、图片 BLOB 存储
-- [ ] 图片字节大小设置（已实现默认 10 MB 限制）
+- [x] 图片记录开关与 1/2/5/10/20 MB 字节大小设置
 - [x] 删除与默认 30 天分批过期清理
-- [ ] WAL checkpoint 与 VACUUM
+- [x] 数据库占用、过期缓存清理、WAL checkpoint 与 VACUUM
 
 ## 第三阶段：分类
 

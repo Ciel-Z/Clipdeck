@@ -14,6 +14,8 @@ private final class ClipDeckPanel: NSPanel {
     var onTogglePreview: (() -> Void)?
     var onEditSelection: (() -> Void)?
     var onRenameSelection: (() -> Void)?
+    var onQuickPaste: ((Int) -> Void)?
+    var onQuickPasteModifierChanged: ((Bool) -> Void)?
     var isSearchActive: (() -> Bool)?
     var isSearchEditing: (() -> Bool)?
     var isSearchFieldFocused: (() -> Bool)?
@@ -23,6 +25,12 @@ private final class ClipDeckPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .flagsChanged {
+            onQuickPasteModifierChanged?(AppPreferences.isQuickPasteModifierActive(in: event.modifierFlags))
+            super.sendEvent(event)
+            return
+        }
+
         guard event.type == .keyDown else {
             super.sendEvent(event)
             return
@@ -43,6 +51,11 @@ private final class ClipDeckPanel: NSPanel {
         }
 
         let commandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if AppPreferences.isQuickPasteModifierActive(in: event.modifierFlags),
+           let quickPasteIndex = Self.quickPasteIndex(for: event.keyCode) {
+            onQuickPaste?(quickPasteIndex)
+            return
+        }
         if event.keyCode == 14, commandModifiers.contains(.command) {
             onEditSelection?()
             return
@@ -87,14 +100,30 @@ private final class ClipDeckPanel: NSPanel {
             return
         }
 
+        if isSearchEditing?() != true,
+           AppPreferences.matches(
+               keyCode: event.keyCode,
+               flags: event.modifierFlags,
+               configuredKeyCode: AppPreferences.previousCategoryKeyCode,
+               configuredModifiers: AppPreferences.previousCategoryModifiers
+           ) {
+            onMoveCategory?(-1)
+            return
+        }
+        if isSearchEditing?() != true,
+           AppPreferences.matches(
+               keyCode: event.keyCode,
+               flags: event.modifierFlags,
+               configuredKeyCode: AppPreferences.nextCategoryKeyCode,
+               configuredModifiers: AppPreferences.nextCategoryModifiers
+           ) {
+            onMoveCategory?(1)
+            return
+        }
         if event.keyCode == 123 || event.keyCode == 124,
-           isSearchEditing?() != true {
-            let direction = event.keyCode == 123 ? -1 : 1
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
-                onMoveCategory?(direction)
-            } else {
-                onMoveSelection?(direction)
-            }
+           isSearchEditing?() != true,
+           commandModifiers.intersection([.command, .shift, .option, .control]).isEmpty {
+            onMoveSelection?(event.keyCode == 123 ? -1 : 1)
             return
         }
 
@@ -117,17 +146,31 @@ private final class ClipDeckPanel: NSPanel {
             onEscape?()
             return
         }
-        if event.keyCode == 123 || event.keyCode == 124 {
-            if isSearchEditing?() == true {
-                super.keyDown(with: event)
-                return
-            }
-            let direction = event.keyCode == 123 ? -1 : 1
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
-                onMoveCategory?(direction)
-            } else {
-                onMoveSelection?(direction)
-            }
+        if isSearchEditing?() != true,
+           AppPreferences.matches(
+               keyCode: event.keyCode,
+               flags: event.modifierFlags,
+               configuredKeyCode: AppPreferences.previousCategoryKeyCode,
+               configuredModifiers: AppPreferences.previousCategoryModifiers
+           ) {
+            onMoveCategory?(-1)
+            return
+        }
+        if isSearchEditing?() != true,
+           AppPreferences.matches(
+               keyCode: event.keyCode,
+               flags: event.modifierFlags,
+               configuredKeyCode: AppPreferences.nextCategoryKeyCode,
+               configuredModifiers: AppPreferences.nextCategoryModifiers
+           ) {
+            onMoveCategory?(1)
+            return
+        }
+        let arrowModifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if (event.keyCode == 123 || event.keyCode == 124),
+           isSearchEditing?() != true,
+           arrowModifiers.isEmpty {
+            onMoveSelection?(event.keyCode == 123 ? -1 : 1)
             return
         }
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
@@ -151,6 +194,18 @@ private final class ClipDeckPanel: NSPanel {
         return characters
     }
 
+    private static func quickPasteIndex(for keyCode: UInt16) -> Int? {
+        let numberRow: [UInt16: Int] = [
+            18: 0, 19: 1, 20: 2, 21: 3, 23: 4,
+            22: 5, 26: 6, 28: 7, 25: 8,
+        ]
+        let numberPad: [UInt16: Int] = [
+            83: 0, 84: 1, 85: 2, 86: 3, 87: 4,
+            88: 5, 89: 6, 91: 7, 92: 8,
+        ]
+        return numberRow[keyCode] ?? numberPad[keyCode]
+    }
+
     override func cancelOperation(_ sender: Any?) {
         NSLog("ClipDeck cancel operation received")
         onEscape?()
@@ -161,13 +216,13 @@ private final class ClipDeckPanel: NSPanel {
 final class PanelController: NSWindowController, NSWindowDelegate {
     private static let savedHeightKey = "deck.preferredHeight"
     private let store: InMemoryHistoryStore
-    private let onPaste: (ClipboardItem) -> Void
+    private let onPaste: (ClipboardItem, Bool) -> Void
     private(set) var targetApplication: NSRunningApplication?
     var isVisible: Bool { window?.isVisible == true }
 
     init(
         store: InMemoryHistoryStore,
-        onPaste: @escaping (ClipboardItem) -> Void,
+        onPaste: @escaping (ClipboardItem, Bool) -> Void,
         onManageCategories: @escaping () -> Void,
         onSearch: @escaping (String) -> Void
     ) {
@@ -235,11 +290,21 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.onPasteSelection = { [weak store] in
             guard let store, let item = store.selectedItem else { return }
             store.dismissPreview()
-            onPaste(item)
+            onPaste(item, false)
         }
         panel.onTogglePreview = { [weak store] in store?.togglePreviewForSelection() }
         panel.onEditSelection = { [weak store] in store?.beginEditingSelection() }
         panel.onRenameSelection = { [weak store] in store?.beginRenamingSelection() }
+        panel.onQuickPaste = { [weak store] index in
+            guard let store, store.displayedItems.indices.contains(index) else { return }
+            let item = store.displayedItems[index]
+            store.selectedItemID = item.id
+            store.setQuickPasteOverlayVisible(false)
+            onPaste(item, false)
+        }
+        panel.onQuickPasteModifierChanged = { [weak store] pressed in
+            store?.setQuickPasteOverlayVisible(pressed)
+        }
         panel.delegate = self
         panel.contentViewController = NSHostingController(
             rootView: HistoryPanelView(
@@ -316,6 +381,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         if window?.isVisible == true {
             NSLog("ClipDeck panel hidden")
         }
+        store.setQuickPasteOverlayVisible(false)
         window?.orderOut(nil)
     }
 

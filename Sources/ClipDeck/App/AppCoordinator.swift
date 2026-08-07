@@ -1,5 +1,22 @@
 import AppKit
 
+private final class StatusItemInteractionView: NSView {
+    var onLeftClick: (() -> Void)?
+    var onRightClick: ((NSEvent) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        onLeftClick?()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {}
+
+    override func rightMouseUp(with event: NSEvent) {
+        onRightClick?(event)
+    }
+}
+
 @MainActor
 final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let store = InMemoryHistoryStore()
@@ -14,8 +31,10 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var lastExternalApplication: NSRunningApplication?
     private var searchTask: Task<Void, Never>?
     private var hotKeyRegistration: GlobalHotKeyController.RegistrationResult = .registered
+    private var shortcutObserver: NSObjectProtocol?
 
     override init() {
+        AppPreferences.registerDefaults()
         repository = try? HistoryRepository(database: ClipDeckDatabase.applicationDatabase())
         if let repository {
             try? repository.ensureDefaultCategories()
@@ -24,6 +43,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             classifier = nil
         }
         super.init()
+        shortcutObserver = NotificationCenter.default.addObserver(
+            forName: .clipDeckShortcutChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.reloadGlobalShortcut()
+            }
+        }
         let historyRepository = repository
         store.onDelete = { [historyRepository] item in
             DispatchQueue.global(qos: .utility).async {
@@ -47,13 +75,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isInterfaceCheck = ProcessInfo.processInfo.arguments.contains("--show-on-launch")
-        NSApp.setActivationPolicy(isInterfaceCheck ? .regular : .accessory)
+        NSApp.setActivationPolicy(.accessory)
         NSLog("ClipDeck application started")
 
         NSLog("ClipDeck creating panel controller")
         panelController = PanelController(
             store: store,
-            onPaste: { [weak self] item in self?.pasteSelection(item) },
+            onPaste: { [weak self] item, forcePlainText in
+                self?.pasteSelection(item, forcePlainText: forcePlainText)
+            },
             onManageCategories: { [weak self] in self?.showCategorySettings() },
             onSearch: { [weak self] query in self?.performSearch(query) }
         )
@@ -79,12 +109,27 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         guard let repository else { return }
         Task.detached(priority: .utility) { [weak store] in
             do {
-                _ = try repository.deleteExpired()
+                _ = try repository.deleteExpired(retentionDays: AppPreferences.retentionDays)
                 let items = try repository.fetchRecent()
                 let categories = try repository.fetchCategories()
                 await MainActor.run {
                     store?.replaceCategories(categories)
                     store?.replaceItems(items)
+                }
+                for item in items.prefix(20)
+                    where item.webURL != nil && (item.linkIconData == nil || item.title == "文本") {
+                    guard let url = item.webURL else { continue }
+                    let itemID = item.id
+                    Task.detached(priority: .utility) { [weak store] in
+                        let metadata = await LinkMetadataService.fetch(for: url)
+                        await MainActor.run {
+                            store?.updateLinkMetadata(
+                                itemID: itemID,
+                                title: metadata.title,
+                                iconData: metadata.iconData
+                            )
+                        }
+                    }
                 }
             } catch {
                 NSLog("ClipDeck failed to load persisted history: %@", String(describing: error))
@@ -115,9 +160,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         hotKeyController.unregister()
     }
 
-    private func pasteSelection(_ item: ClipboardItem) {
+    private func pasteSelection(_ item: ClipboardItem, forcePlainText: Bool = false) {
         let target = panelController.targetApplication ?? lastExternalApplication
-        let result = pasteService.paste(item, into: target) { [weak self] in
+        let result = pasteService.paste(item, into: target, forcePlainText: forcePlainText) { [weak self] in
             self?.categorySettingsController?.hide()
             self?.panelController.hide()
         }
@@ -148,33 +193,59 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     private func configureStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "ClipDeck")
-        let menu = NSMenu()
-        menu.addItem(withTitle: "显示 ClipDeck", action: #selector(togglePanel), keyEquivalent: "")
-        menu.addItem(withTitle: "设置…", action: #selector(openCategorySettings), keyEquivalent: ",")
-        switch hotKeyRegistration {
-        case .registered:
-            let shortcutItem = NSMenuItem(title: "快捷键：Command + Shift + V", action: nil, keyEquivalent: "")
-            shortcutItem.isEnabled = false
-            menu.addItem(shortcutItem)
-        case let .failed(status):
-            let errorItem = NSMenuItem(title: "快捷键注册失败（\(status)）", action: nil, keyEquivalent: "")
-            errorItem.isEnabled = false
-            menu.addItem(errorItem)
-            statusItem.button?.toolTip = "全局快捷键注册失败：\(status)"
+        guard let button = statusItem.button else { return }
+        let statusIcon = NSImage(
+            systemSymbolName: "chevron.left.forwardslash.chevron.right",
+            accessibilityDescription: "ClipDeck"
+        )?.withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+        statusIcon?.isTemplate = true
+        button.image = statusIcon
+        button.imageScaling = .scaleProportionallyDown
+        button.imagePosition = .imageOnly
+        button.target = nil
+        button.action = nil
+        let interactionView = StatusItemInteractionView(frame: button.bounds)
+        interactionView.autoresizingMask = [.width, .height]
+        interactionView.toolTip = "左键显示 ClipDeck，右键打开菜单"
+        interactionView.onLeftClick = { [weak self] in
+            NSLog("ClipDeck panel toggled from status item left click")
+            self?.toggleDeck()
         }
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        statusItem.menu = menu
+        interactionView.onRightClick = { [weak self, weak button] event in
+            guard let self, let button else { return }
+            NSMenu.popUpContextMenu(self.makeStatusMenu(), with: event, for: button)
+        }
+        button.addSubview(interactionView)
+        button.toolTip = "左键显示 ClipDeck，右键打开菜单"
+        if case let .failed(status) = hotKeyRegistration {
+            button.toolTip = "全局快捷键注册失败：\(status)"
+        }
     }
 
-    @objc private func togglePanel() {
-        NSLog("ClipDeck panel toggled")
-        toggleDeck()
+    private func makeStatusMenu() -> NSMenu {
+        let menu = NSMenu()
+        let settingsItem = menu.addItem(withTitle: "设置…", action: #selector(openCategorySettings), keyEquivalent: ",")
+        settingsItem.target = self
+        settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")
+        menu.addItem(.separator())
+        let quitItem = menu.addItem(withTitle: "退出 ClipDeck", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
+        quitItem.image = NSImage(systemSymbolName: "power", accessibilityDescription: "退出")
+        return menu
     }
 
     @objc private func openCategorySettings() {
         showCategorySettings()
+    }
+
+    private func reloadGlobalShortcut() {
+        guard hotKeyController != nil else { return }
+        hotKeyRegistration = hotKeyController.register()
+        if case let .failed(status) = hotKeyRegistration {
+            statusItem?.button?.toolTip = "全局快捷键注册失败：\(status)"
+        } else {
+            statusItem?.button?.toolTip = "左键显示 ClipDeck，右键打开菜单"
+        }
     }
 
     private func toggleDeck() {

@@ -60,22 +60,22 @@ final class GlobalHotKeyController {
 
         let identifier = EventHotKeyID(signature: Self.signature, id: 1)
         let registrationStatus = RegisterEventHotKey(
-            UInt32(kVK_ANSI_V),
-            UInt32(cmdKey | shiftKey),
+            AppPreferences.hotKeyCode,
+            AppPreferences.hotKeyModifiers,
             identifier,
             GetApplicationEventTarget(),
             0,
             &hotKey
         )
         guard registrationStatus == noErr else {
-            logger.error("Unable to register Command-Shift-V: \(registrationStatus)")
+            logger.error("Unable to register configured hot key: \(registrationStatus)")
             NSLog("ClipDeck hot key registration failed: %d", registrationStatus)
             if let eventHandler { RemoveEventHandler(eventHandler) }
             eventHandler = nil
             return .failed(status: registrationStatus)
         }
-        logger.info("Registered global hot key Command-Shift-V")
-        NSLog("ClipDeck registered global hot key Command-Shift-V")
+        logger.info("Registered configured global hot key")
+        NSLog("ClipDeck registered configured global hot key")
         return .registered
     }
 

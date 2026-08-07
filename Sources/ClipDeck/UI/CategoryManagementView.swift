@@ -1,5 +1,7 @@
 import AppKit
+import Carbon
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class CategoryManager: ObservableObject {
@@ -12,6 +14,9 @@ final class CategoryManager: ObservableObject {
     @Published var testText = ""
     @Published var testResult: String?
     @Published var errorMessage: String?
+    @Published var databaseByteCount: Int64 = 0
+    @Published var maintenanceStatus: String?
+    @Published var isMaintaining = false
 
     private let repository: HistoryRepository
     private let onChange: () -> Void
@@ -23,6 +28,7 @@ final class CategoryManager: ObservableObject {
             let values = try repository.fetchCategories()
             categories = values
             select(values.first?.id)
+            refreshDatabaseSize()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -100,19 +106,35 @@ final class CategoryManager: ObservableObject {
         }
     }
 
-    func move(id: Int64, _ offset: Int) {
-        guard let index = categories.firstIndex(where: { $0.id == id }) else { return }
-        let destination = min(max(index + offset, 0), categories.count - 1)
-        guard destination != index else { return }
+    func previewMove(id: Int64, over targetID: Int64) {
+        guard let index = categories.firstIndex(where: { $0.id == id }),
+              let destination = categories.firstIndex(where: { $0.id == targetID }),
+              index != destination else { return }
         var reordered = categories
-        reordered.swapAt(index, destination)
+        let category = reordered.remove(at: index)
+        reordered.insert(category, at: destination)
         categories = reordered
+    }
+
+    func persistOrder(select id: Int64?) {
+        let reordered = categories
         Task {
             do {
                 try await Task.detached { [repository, reordered] in
                     try repository.reorderCategories(reordered.map(\.id))
                 }.value
-                reload(select: id)
+                onChange()
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    func restorePresets() {
+        Task {
+            do {
+                try await Task.detached { [repository] in
+                    try repository.restoreDefaultCategories()
+                }.value
+                reload()
             } catch { errorMessage = error.localizedDescription }
         }
     }
@@ -120,8 +142,15 @@ final class CategoryManager: ObservableObject {
     func testScript() {
         let script = script
         let text = testText
+        let previewLanguage = previewLanguage
         Task {
-            let result = await Task.detached { ClassificationService.test(script: script, text: text) }.value
+            let result = await Task.detached {
+                ClassificationService.test(
+                    script: script,
+                    text: text,
+                    previewLanguage: previewLanguage
+                )
+            }.value
             testResult = result.error.map { "错误：\($0)" } ?? (result.matches ? "匹配：true" : "匹配：false")
         }
     }
@@ -129,18 +158,108 @@ final class CategoryManager: ObservableObject {
     func formatScript() {
         script = JavaScriptFormatter.format(script)
     }
+
+    func refreshDatabaseSize() {
+        let repository = repository
+        Task {
+            databaseByteCount = await Task.detached {
+                repository.databaseByteCount()
+            }.value
+        }
+    }
+
+    func applyRetention(days: Int) {
+        let repository = repository
+        Task {
+            do {
+                let deleted = try await Task.detached {
+                    try repository.deleteExpired(retentionDays: days)
+                }.value
+                if deleted > 0 {
+                    maintenanceStatus = "已清理 \(deleted) 条过期历史"
+                    onChange()
+                }
+                refreshDatabaseSize()
+            } catch {
+                maintenanceStatus = "清理失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func clearCache(retentionDays: Int) {
+        guard !isMaintaining else { return }
+        isMaintaining = true
+        maintenanceStatus = "正在清理过期内容并回收空间…"
+        let repository = repository
+        Task {
+            do {
+                let deleted = try await Task.detached {
+                    try repository.clearExpiredAndReclaim(retentionDays: retentionDays)
+                }.value
+                maintenanceStatus = "已删除 \(deleted) 条过期历史并回收数据库空间"
+                onChange()
+            } catch {
+                maintenanceStatus = "清理失败：\(error.localizedDescription)"
+            }
+            isMaintaining = false
+            refreshDatabaseSize()
+        }
+    }
+
+    func clearAllHistory() {
+        guard !isMaintaining else { return }
+        isMaintaining = true
+        maintenanceStatus = "正在删除全部历史…"
+        let repository = repository
+        Task {
+            do {
+                let deleted = try await Task.detached {
+                    try repository.clearAllHistoryAndReclaim()
+                }.value
+                maintenanceStatus = "已删除 \(deleted) 条历史并回收数据库空间"
+                onChange()
+            } catch {
+                maintenanceStatus = "删除失败：\(error.localizedDescription)"
+            }
+            isMaintaining = false
+            refreshDatabaseSize()
+        }
+    }
 }
 
 struct CategoryManagementView: View {
     private enum SettingsPane {
         case general
+        case images
+        case keyboard
+        case data
         case categories
+    }
+
+    private enum DataAction {
+        case clearCache
+        case clearAll
     }
 
     @StateObject var manager: CategoryManager
     @State private var categoryPendingDeletion: ClipboardCategory?
+    @State private var pendingDataAction: DataAction?
+    @State private var confirmsShortcutReset = false
+    @State private var confirmsPresetRestore = false
+    @State private var draggedCategoryID: Int64?
     @State private var selectedPane: SettingsPane = .categories
     @AppStorage(PasteService.preserveFormattingKey) private var preserveFormatting = false
+    @AppStorage(AppPreferences.retentionDaysKey) private var retentionDays = 30
+    @AppStorage(AppPreferences.recordsImagesKey) private var recordsImages = true
+    @AppStorage(AppPreferences.maximumImageMegabytesKey) private var maximumImageMegabytes = 10
+    @AppStorage(AppPreferences.hotKeyCodeKey) private var hotKeyCode = Int(kVK_ANSI_V)
+    @AppStorage(AppPreferences.hotKeyModifiersKey) private var hotKeyModifiers = Int(cmdKey | shiftKey)
+    @AppStorage(AppPreferences.nextCategoryKeyCodeKey) private var nextCategoryKeyCode = Int(kVK_RightArrow)
+    @AppStorage(AppPreferences.nextCategoryModifiersKey) private var nextCategoryModifiers = Int(cmdKey)
+    @AppStorage(AppPreferences.previousCategoryKeyCodeKey) private var previousCategoryKeyCode = Int(kVK_LeftArrow)
+    @AppStorage(AppPreferences.previousCategoryModifiersKey) private var previousCategoryModifiers = Int(cmdKey)
+    @AppStorage(AppPreferences.quickPasteModifierKey) private var quickPasteModifier = Int(cmdKey)
+    @AppStorage(AppPreferences.plainTextModifierKey) private var plainTextModifier = Int(shiftKey)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -152,6 +271,12 @@ struct CategoryManagementView: View {
 
             if selectedPane == .general {
                 generalSettings
+            } else if selectedPane == .images {
+                imageSettings
+            } else if selectedPane == .keyboard {
+                keyboardSettings
+            } else if selectedPane == .data {
+                dataSettings
             } else {
                 categoryWorkspace
             }
@@ -174,6 +299,64 @@ struct CategoryManagementView: View {
         } message: { category in
             Text("确定删除“\(category.name)”吗？已有历史内容会保留，但会失去这个分类。")
         }
+        .confirmationDialog(
+            pendingDataAction == .clearAll ? "清空全部历史？" : "清空缓存？",
+            isPresented: Binding(
+                get: { pendingDataAction != nil },
+                set: { if !$0 { pendingDataAction = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("取消", role: .cancel) { pendingDataAction = nil }
+            if pendingDataAction == .clearAll {
+                Button("清空全部历史", role: .destructive) {
+                    pendingDataAction = nil
+                    manager.clearAllHistory()
+                }
+            } else {
+                Button("清理过期内容并回收空间") {
+                    pendingDataAction = nil
+                    manager.clearCache(retentionDays: retentionDays)
+                }
+            }
+        } message: {
+            if pendingDataAction == .clearAll {
+                Text("所有文本和图片历史都将永久删除，此操作无法撤销。")
+            } else {
+                Text("只删除超过当前保留期限的内容，并执行 WAL checkpoint 和 VACUUM；有效期内历史不受影响。")
+            }
+        }
+        .confirmationDialog(
+            "重置键盘快捷键？",
+            isPresented: $confirmsShortcutReset,
+            titleVisibility: .visible
+        ) {
+            Button("取消", role: .cancel) {}
+            Button("恢复默认快捷键", role: .destructive) {
+                AppPreferences.resetShortcutDefaults()
+                hotKeyCode = Int(kVK_ANSI_V)
+                hotKeyModifiers = Int(cmdKey | shiftKey)
+                nextCategoryKeyCode = Int(kVK_RightArrow)
+                nextCategoryModifiers = Int(cmdKey)
+                previousCategoryKeyCode = Int(kVK_LeftArrow)
+                previousCategoryModifiers = Int(cmdKey)
+                quickPasteModifier = Int(cmdKey)
+                plainTextModifier = Int(shiftKey)
+                NotificationCenter.default.post(name: .clipDeckShortcutChanged, object: nil)
+            }
+        } message: {
+            Text("启动 ClipDeck、类型切换、快速粘贴和纯文本模式都将恢复为默认快捷键。")
+        }
+        .confirmationDialog(
+            "还原预制分类？",
+            isPresented: $confirmsPresetRestore,
+            titleVisibility: .visible
+        ) {
+            Button("取消", role: .cancel) {}
+            Button("还原预制分类") { manager.restorePresets() }
+        } message: {
+            Text("缺失的预制分类会被重新创建，同名预制分类的图标、规则和预览语言会恢复默认；其他自建分类会保留。")
+        }
     }
 
     private var sidebar: some View {
@@ -186,7 +369,10 @@ struct CategoryManagementView: View {
 
             VStack(spacing: 5) {
                 sidebarItem("通用", systemImage: "gearshape", pane: .general)
+                sidebarItem("图片", systemImage: "photo", pane: .images)
+                sidebarItem("键盘快捷键", systemImage: "keyboard", pane: .keyboard)
                 sidebarItem("分类", systemImage: "square.grid.2x2", pane: .categories)
+                sidebarItem("数据", systemImage: "externaldrive", pane: .data)
             }
             .padding(.horizontal, 12)
 
@@ -251,12 +437,240 @@ struct CategoryManagementView: View {
                         .frame(minHeight: 56)
                     }
                 }
+
+                settingsSection("历史") {
+                    settingsRow("保留时长") {
+                        HStack(spacing: 7) {
+                            TextField("天数", value: retentionDaysBinding, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 58)
+                            Text("天")
+                                .foregroundStyle(.secondary)
+                            Stepper("", value: retentionDaysBinding, in: 1 ... 90)
+                                .labelsHidden()
+                        }
+                    }
+                }
             }
             .padding(.horizontal, 38)
             .padding(.vertical, 26)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .onChange(of: retentionDays) { _, days in
+            manager.applyRetention(days: days)
+        }
+    }
+
+    private var imageSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("图片")
+                        .font(.system(size: 25, weight: .bold, design: .rounded))
+                    Text("控制图片剪贴板内容的记录方式")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+
+                settingsSection("图片历史") {
+                    VStack(spacing: 0) {
+                        settingsRow("记录图片") {
+                            Toggle("", isOn: $recordsImages)
+                                .labelsHidden()
+                        }
+                        Divider().padding(.leading, 16)
+                        settingsRow("最大图片大小") {
+                            Picker("", selection: $maximumImageMegabytes) {
+                                ForEach([1, 2, 5, 10, 20], id: \.self) { size in
+                                    Text("\(size) MB").tag(size)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 130)
+                            .disabled(!recordsImages)
+                        }
+                    }
+                }
+
+                Text("超过限制的图片会被忽略，不会压缩、转码或写入数据库。")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 38)
+            .padding(.vertical, 26)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var dataSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("数据")
+                        .font(.system(size: 25, weight: .bold, design: .rounded))
+                    Text("查看数据库占用并管理本地历史")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+
+                settingsSection("数据库") {
+                    VStack(spacing: 0) {
+                        settingsRow("当前占用") {
+                            Text(formattedDatabaseSize)
+                                .foregroundStyle(.secondary)
+                        }
+                        Divider().padding(.leading, 16)
+                        settingsRow("过期缓存") {
+                            Button("清空缓存…") {
+                                pendingDataAction = .clearCache
+                            }
+                            .disabled(manager.isMaintaining)
+                        }
+                        Divider().padding(.leading, 16)
+                        settingsRow("全部历史") {
+                            Button("清空全部历史…", role: .destructive) {
+                                pendingDataAction = .clearAll
+                            }
+                            .disabled(manager.isMaintaining)
+                        }
+                    }
+                }
+
+                if let status = manager.maintenanceStatus {
+                    Text(status)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 38)
+            .padding(.vertical, 26)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .onAppear { manager.refreshDatabaseSize() }
+    }
+
+    private var keyboardSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("键盘快捷键")
+                        .font(.system(size: 25, weight: .bold, design: .rounded))
+                    Text("点击快捷键区域，然后按下新的组合键")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+
+                settingsSection("全局") {
+                    settingsRow("启动 ClipDeck") {
+                        KeyboardShortcutRecorder(
+                            keyCode: shortcutKeyCodeBinding,
+                            modifiers: shortcutModifiersBinding
+                        ) {
+                            NotificationCenter.default.post(
+                                name: .clipDeckShortcutChanged,
+                                object: nil
+                            )
+                        }
+                        .frame(width: 190, height: 34)
+                    }
+                }
+
+                settingsSection("Deck") {
+                    settingsRow("显示下一个类型") {
+                        KeyboardShortcutRecorder(
+                            keyCode: uint32Binding($nextCategoryKeyCode),
+                            modifiers: uint32Binding($nextCategoryModifiers),
+                            onChange: {}
+                        )
+                        .frame(width: 190, height: 34)
+                    }
+                    Divider().padding(.leading, 16)
+                    settingsRow("显示上一个类型") {
+                        KeyboardShortcutRecorder(
+                            keyCode: uint32Binding($previousCategoryKeyCode),
+                            modifiers: uint32Binding($previousCategoryModifiers),
+                            onChange: {}
+                        )
+                        .frame(width: 190, height: 34)
+                    }
+                    Divider().padding(.leading, 16)
+                    settingsRow("快速粘贴") {
+                        HStack(spacing: 9) {
+                            modifierPicker(selection: $quickPasteModifier)
+                            Text("+ 1…9")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Divider().padding(.leading, 16)
+                    settingsRow("纯文本模式") {
+                        modifierPicker(selection: $plainTextModifier)
+                    }
+                }
+
+                HStack {
+                    Spacer()
+                    Button("将快捷方式重置为默认…") {
+                        confirmsShortcutReset = true
+                    }
+                }
+            }
+            .padding(.horizontal, 38)
+            .padding(.vertical, 26)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var formattedDatabaseSize: String {
+        ByteCountFormatter.string(
+            fromByteCount: manager.databaseByteCount,
+            countStyle: .file
+        )
+    }
+
+    private var retentionDaysBinding: Binding<Int> {
+        Binding(
+            get: { retentionDays },
+            set: { retentionDays = min(90, max(1, $0)) }
+        )
+    }
+
+    private var shortcutKeyCodeBinding: Binding<UInt32> {
+        Binding(
+            get: { UInt32(hotKeyCode) },
+            set: { hotKeyCode = Int($0) }
+        )
+    }
+
+    private var shortcutModifiersBinding: Binding<UInt32> {
+        Binding(
+            get: { UInt32(hotKeyModifiers) },
+            set: { hotKeyModifiers = Int($0) }
+        )
+    }
+
+    private func uint32Binding(_ binding: Binding<Int>) -> Binding<UInt32> {
+        Binding(
+            get: { UInt32(binding.wrappedValue) },
+            set: { binding.wrappedValue = Int($0) }
+        )
+    }
+
+    private func modifierPicker(selection: Binding<Int>) -> some View {
+        Picker("", selection: selection) {
+            Text("⌘ Command").tag(Int(cmdKey))
+            Text("⇧ Shift").tag(Int(shiftKey))
+            Text("⌃ Control").tag(Int(controlKey))
+            Text("⌥ Option").tag(Int(optionKey))
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(width: 145)
     }
 
     private var categoryWorkspace: some View {
@@ -277,6 +691,16 @@ struct CategoryManagementView: View {
                 Text("分类")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                 Spacer()
+                Button {
+                    confirmsPresetRestore = true
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+                .help("还原预制分类")
                 Button(action: manager.add) {
                     Image(systemName: "plus")
                         .frame(width: 28, height: 28)
@@ -320,19 +744,18 @@ struct CategoryManagementView: View {
             .buttonStyle(.plain)
             .focusEffectDisabled()
 
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 24, height: 30)
+                .help("拖动调整顺序")
+
             Menu {
-                Button("上移") { manager.move(id: category.id, -1) }
-                    .disabled(manager.categories.first?.id == category.id)
-                Button("下移") { manager.move(id: category.id, 1) }
-                    .disabled(manager.categories.last?.id == category.id)
-                Divider()
-                Button("删除", role: .destructive) {
-                    categoryPendingDeletion = category
-                }
+                Button("删除", role: .destructive) { categoryPendingDeletion = category }
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 26, height: 30)
+                    .frame(width: 24, height: 30)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
@@ -347,6 +770,18 @@ struct CategoryManagementView: View {
         .background(
             manager.selectedID == category.id ? Color.white.opacity(0.12) : .clear,
             in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .onDrag {
+            draggedCategoryID = category.id
+            return NSItemProvider(object: String(category.id) as NSString)
+        }
+        .onDrop(
+            of: [UTType.text],
+            delegate: CategoryDropDelegate(
+                targetID: category.id,
+                manager: manager,
+                draggedID: $draggedCategoryID
+            )
         )
     }
 
@@ -381,7 +816,7 @@ struct CategoryManagementView: View {
                         Divider().padding(.leading, 16)
                         settingsRow("预览语言") {
                             Picker("", selection: $manager.previewLanguage) {
-                                ForEach(["text", "json", "sql", "javascript", "shell", "markdown", "xml", "yaml"], id: \.self) { Text($0) }
+                                ForEach(["text", "code", "json", "sql", "java", "javascript", "color", "shell", "markdown", "xml", "yaml"], id: \.self) { Text($0) }
                             }
                             .labelsHidden()
                             .frame(width: 170)
@@ -404,7 +839,7 @@ struct CategoryManagementView: View {
 
                         Divider().padding(.leading, 16)
 
-                        JavaScriptEditor(text: $manager.script)
+                        SyntaxTextEditor(text: $manager.script, language: "javascript")
                             .frame(minHeight: 230)
                     }
                 }
@@ -486,6 +921,157 @@ struct CategoryManagementView: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 52)
+    }
+}
+
+private struct CategoryDropDelegate: DropDelegate {
+    let targetID: Int64
+    let manager: CategoryManager
+    @Binding var draggedID: Int64?
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID else { return }
+        manager.previewMove(id: draggedID, over: targetID)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        manager.persistOrder(select: draggedID)
+        draggedID = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
+
+private struct KeyboardShortcutRecorder: NSViewRepresentable {
+    @Binding var keyCode: UInt32
+    @Binding var modifiers: UInt32
+    let onChange: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> ShortcutCaptureButton {
+        let button = ShortcutCaptureButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.font = .systemFont(ofSize: 14, weight: .semibold)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.beginRecording(_:))
+        button.onCapture = { [weak coordinator = context.coordinator] code, flags in
+            coordinator?.capture(keyCode: code, modifiers: flags)
+        }
+        button.onCancel = { [weak coordinator = context.coordinator] in
+            coordinator?.finishWithoutChange()
+        }
+        button.title = ShortcutFormatter.label(keyCode: keyCode, modifiers: modifiers)
+        return button
+    }
+
+    func updateNSView(_ button: ShortcutCaptureButton, context: Context) {
+        context.coordinator.parent = self
+        if !button.isRecording {
+            button.title = ShortcutFormatter.label(keyCode: keyCode, modifiers: modifiers)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var parent: KeyboardShortcutRecorder
+        weak var button: ShortcutCaptureButton?
+
+        init(_ parent: KeyboardShortcutRecorder) {
+            self.parent = parent
+        }
+
+        @objc func beginRecording(_ sender: ShortcutCaptureButton) {
+            button = sender
+            sender.isRecording = true
+            sender.title = "请按新的快捷键…"
+            sender.window?.makeFirstResponder(sender)
+        }
+
+        func capture(keyCode: UInt32, modifiers: UInt32) {
+            parent.keyCode = keyCode
+            parent.modifiers = modifiers
+            button?.isRecording = false
+            button?.title = ShortcutFormatter.label(keyCode: keyCode, modifiers: modifiers)
+            parent.onChange()
+        }
+
+        func finishWithoutChange() {
+            button?.isRecording = false
+            button?.title = ShortcutFormatter.label(
+                keyCode: parent.keyCode,
+                modifiers: parent.modifiers
+            )
+        }
+    }
+}
+
+private final class ShortcutCaptureButton: NSButton {
+    var onCapture: ((UInt32, UInt32) -> Void)?
+    var onCancel: (() -> Void)?
+    var isRecording = false
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        guard isRecording else {
+            super.keyDown(with: event)
+            return
+        }
+        if event.keyCode == 53 {
+            onCancel?()
+            return
+        }
+        let modifiers = ShortcutFormatter.carbonModifiers(from: event.modifierFlags)
+        guard modifiers != 0 || ShortcutFormatter.isFunctionKey(event.keyCode) else {
+            NSSound.beep()
+            return
+        }
+        onCapture?(UInt32(event.keyCode), modifiers)
+    }
+}
+
+private enum ShortcutFormatter {
+    static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
+        var result: UInt32 = 0
+        if flags.contains(.control) { result |= UInt32(controlKey) }
+        if flags.contains(.option) { result |= UInt32(optionKey) }
+        if flags.contains(.shift) { result |= UInt32(shiftKey) }
+        if flags.contains(.command) { result |= UInt32(cmdKey) }
+        return result
+    }
+
+    static func label(keyCode: UInt32, modifiers: UInt32) -> String {
+        var value = ""
+        if modifiers & UInt32(controlKey) != 0 { value += "⌃" }
+        if modifiers & UInt32(optionKey) != 0 { value += "⌥" }
+        if modifiers & UInt32(shiftKey) != 0 { value += "⇧" }
+        if modifiers & UInt32(cmdKey) != 0 { value += "⌘" }
+        return value + keyName(UInt16(keyCode))
+    }
+
+    static func isFunctionKey(_ keyCode: UInt16) -> Bool {
+        keyName(keyCode).hasPrefix("F")
+    }
+
+    private static func keyName(_ code: UInt16) -> String {
+        let names: [UInt16: String] = [
+            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+            8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
+            16: "Y", 17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6",
+            23: "5", 24: "=", 25: "9", 26: "7", 27: "-", 28: "8", 29: "0",
+            30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P", 36: "↩",
+            37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",",
+            44: "/", 45: "N", 46: "M", 47: ".", 48: "⇥", 49: "Space",
+            50: "`", 51: "⌫", 53: "Esc", 96: "F5", 97: "F6", 98: "F7",
+            99: "F3", 100: "F8", 101: "F9", 103: "F11", 105: "F13",
+            107: "F14", 109: "F10", 111: "F12", 113: "F15", 118: "F4",
+            120: "F2", 122: "F1", 123: "←", 124: "→", 125: "↓", 126: "↑",
+        ]
+        return names[code] ?? "Key \(code)"
     }
 }
 
@@ -659,8 +1245,11 @@ enum JavaScriptFormatter {
     }
 }
 
-struct JavaScriptEditor: NSViewRepresentable {
+struct SyntaxTextEditor: NSViewRepresentable {
     @Binding var text: String
+    let language: String
+    var fontSize: CGFloat = 13
+    var autofocus = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -668,17 +1257,22 @@ struct JavaScriptEditor: NSViewRepresentable {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
         let textView = NSTextView()
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.drawsBackground = false
         textView.string = text
         scrollView.documentView = textView
         context.coordinator.highlight(textView)
+        if autofocus {
+            DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
+        }
         return scrollView
     }
 
@@ -686,16 +1280,20 @@ struct JavaScriptEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView, textView.string != text else { return }
         textView.string = text
         context.coordinator.highlight(textView)
+        if autofocus, textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
+        }
     }
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
-        private var parent: JavaScriptEditor
+        private var parent: SyntaxTextEditor
+        private var isApplyingHighlight = false
 
-        init(_ parent: JavaScriptEditor) { self.parent = parent }
+        init(_ parent: SyntaxTextEditor) { self.parent = parent }
 
         func textDidChange(_ notification: Notification) {
-            guard let textView = notification.object as? NSTextView else { return }
+            guard !isApplyingHighlight, let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
             highlight(textView)
         }
@@ -703,24 +1301,14 @@ struct JavaScriptEditor: NSViewRepresentable {
         func highlight(_ textView: NSTextView) {
             guard let storage = textView.textStorage else { return }
             let selection = textView.selectedRanges
-            let fullRange = NSRange(location: 0, length: storage.length)
-            storage.setAttributes([
-                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                .foregroundColor: NSColor.labelColor,
-            ], range: fullRange)
-            apply("\\b(function|return|true|false|null|undefined|const|let|var|if|else|try|catch|throw|new)\\b", color: .systemPurple, storage: storage)
-            apply("(['\"])(?:\\\\.|(?!\\1).)*\\1", color: .systemOrange, storage: storage)
-            apply("//.*|/\\*[\\s\\S]*?\\*/", color: .secondaryLabelColor, storage: storage)
-            apply("\\b\\d+(?:\\.\\d+)?\\b", color: .systemTeal, storage: storage)
+            isApplyingHighlight = true
+            storage.setAttributedString(SyntaxHighlighter.attributedText(
+                storage.string,
+                language: parent.language,
+                fontSize: parent.fontSize
+            ))
             textView.selectedRanges = selection
-        }
-
-        private func apply(_ pattern: String, color: NSColor, storage: NSTextStorage) {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
-            let range = NSRange(location: 0, length: storage.length)
-            for match in regex.matches(in: storage.string, range: range) {
-                storage.addAttribute(.foregroundColor, value: color, range: match.range)
-            }
+            isApplyingHighlight = false
         }
     }
 }

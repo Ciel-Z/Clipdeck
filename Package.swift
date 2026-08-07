@@ -15,7 +15,8 @@ let package = Package(
         .executableTarget(
             name: "ClipDeck",
             dependencies: [.product(name: "GRDB", package: "GRDB.swift")],
-            path: "Sources/ClipDeck"
+            path: "Sources/ClipDeck",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "ClipDeckTests",

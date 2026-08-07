@@ -28,6 +28,7 @@ final class InMemoryHistoryStore: ObservableObject {
     @Published private(set) var previewedItemID: ClipboardItem.ID?
     @Published private(set) var editingItemID: ClipboardItem.ID?
     @Published private(set) var renamingItemID: ClipboardItem.ID?
+    @Published private(set) var isQuickPasteOverlayVisible = false
     var onDelete: ((ClipboardItem) -> Void)?
     var onUpdate: ((ClipboardItem) -> Void)?
 
@@ -124,6 +125,10 @@ final class InMemoryHistoryStore: ObservableObject {
 
     func selectNextCategory() {
         moveCategory(by: 1)
+    }
+
+    func setQuickPasteOverlayVisible(_ visible: Bool) {
+        isQuickPasteOverlayVisible = visible
     }
 
     func revealSelection() {
@@ -241,6 +246,7 @@ final class InMemoryHistoryStore: ObservableObject {
             id: current.id,
             databaseID: current.databaseID,
             title: trimmed.isEmpty ? nil : trimmed,
+            linkIconData: current.linkIconData,
             payload: current.payload,
             sourceApplication: current.sourceApplication,
             category: current.category,
@@ -259,6 +265,7 @@ final class InMemoryHistoryStore: ObservableObject {
             id: current.id,
             databaseID: current.databaseID,
             title: current.title,
+            linkIconData: current.linkIconData,
             payload: payload,
             sourceApplication: current.sourceApplication,
             category: current.category,
@@ -268,6 +275,33 @@ final class InMemoryHistoryStore: ObservableObject {
         replace(current, with: updated, in: &searchResults)
         editingItemID = nil
         selectedItemID = updated.id
+        onUpdate?(updated)
+    }
+
+    func updateLinkMetadata(
+        itemID: ClipboardItem.ID,
+        title: String?,
+        iconData: Data?
+    ) {
+        guard let current = items.first(where: { $0.id == itemID }) else { return }
+        let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = current.title == "文本" && cleanTitle?.isEmpty == false
+            ? cleanTitle!
+            : current.title
+        let resolvedIconData = iconData ?? current.linkIconData
+        guard resolvedTitle != current.title || resolvedIconData != current.linkIconData else { return }
+        let updated = ClipboardItem(
+            id: current.id,
+            databaseID: current.databaseID,
+            title: resolvedTitle,
+            linkIconData: resolvedIconData,
+            payload: current.payload,
+            sourceApplication: current.sourceApplication,
+            category: current.category,
+            copiedAt: current.copiedAt
+        )
+        replace(current, with: updated, in: &items)
+        replace(current, with: updated, in: &searchResults)
         onUpdate?(updated)
     }
 

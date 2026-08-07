@@ -230,6 +230,16 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.applyLocalSearch("Aurora").first?.title, "项目代号 Aurora")
     }
 
+    func testQuickPasteOverlayTracksCommandModifierState() {
+        let store = InMemoryHistoryStore()
+
+        store.setQuickPasteOverlayVisible(true)
+        XCTAssertTrue(store.isQuickPasteOverlayVisible)
+
+        store.setQuickPasteOverlayVisible(false)
+        XCTAssertFalse(store.isQuickPasteOverlayVisible)
+    }
+
     private func item(_ text: String) -> ClipboardItem {
         ClipboardItem(payload: .text(plainText: text, rtfData: nil), sourceApplication: source)
     }

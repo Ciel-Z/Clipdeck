@@ -18,13 +18,16 @@ final class PasteService {
     func paste(
         _ item: ClipboardItem,
         into application: NSRunningApplication?,
+        forcePlainText: Bool = false,
         dismissDeck: () -> Void
     ) -> Result {
         let pasteboard = NSPasteboard.general
         let didWrite = write(
             item,
             to: pasteboard,
-            preserveFormatting: UserDefaults.standard.bool(forKey: Self.preserveFormattingKey)
+            preserveFormatting: forcePlainText
+                ? false
+                : UserDefaults.standard.bool(forKey: Self.preserveFormattingKey)
         )
         guard didWrite else { return .failed }
 

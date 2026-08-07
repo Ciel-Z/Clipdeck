@@ -3,6 +3,13 @@ import Foundation
 import GRDB
 
 enum DefaultCategoryScripts {
+    struct Preset: Sendable {
+        let name: String
+        let icon: String
+        let script: String
+        let previewLanguage: String
+    }
+
     static let legacyJSON = "function classify(item) { try { JSON.parse(item.text); return true; } catch (_) { return false; } }"
     static let formattedLegacyJSON = """
     function classify(item) {
@@ -30,6 +37,117 @@ enum DefaultCategoryScripts {
         }
     }
     """
+
+    static let url = #"""
+    function classify(item) {
+        return /^https?:\/\/\S+$/i.test(item.text.trim());
+    }
+    """#
+
+    static let sql = #"""
+    function classify(item) {
+        return /^(select|insert|update|delete|create|alter|drop)\b/i.test(
+            item.text.trim()
+        );
+    }
+    """#
+
+    static let markdown = #"""
+    function classify(item) {
+        return /(^|\n)(#{1,6} |[-*] |```)/.test(item.text);
+    }
+    """#
+
+    static let java = #"""
+    function classify(item) {
+        const text = item.text.trim();
+        const hasJavaDeclaration =
+            /\b(public|private|protected|class|interface|enum|record|package|import)\b/.test(text);
+        return hasJavaDeclaration && /[;{}]/.test(text);
+    }
+    """#
+
+    static let javaScript = #"""
+    function classify(item) {
+        const text = item.text.trim();
+        return /\b(function|const|let|var|async|await|export|import)\b|=>/.test(text);
+    }
+    """#
+
+    static let relevanceBasedCode = #"""
+    function classify(item) {
+        const text = item.text.trim();
+        const isStandaloneColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(text)
+            || /^rgba?\(/i.test(text);
+        return !isStandaloneColor
+            && Boolean(item.detectedLanguage)
+            && item.codeRelevance >= 2;
+    }
+    """#
+
+    static let code = #"""
+    function classify(item) {
+        return item.codeEngineMatched === true;
+    }
+    """#
+
+    static let color = #"""
+    function classify(item) {
+        const text = item.text.trim();
+        const hex = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+        if (hex.test(text)) {
+            return true;
+        }
+
+        const match = /^rgba?\((.*)\)$/i.exec(text);
+        if (!match) {
+            return false;
+        }
+
+        const channels = match[1].split(",").map(value => value.trim());
+        if (channels.length !== 3 && channels.length !== 4) {
+            return false;
+        }
+
+        const numericChannel = /^\d+(?:\.\d+)?%?$/;
+        const validColorChannel = value => numericChannel.test(value) && (value.endsWith("%")
+            ? Number(value.slice(0, -1)) >= 0 && Number(value.slice(0, -1)) <= 100
+            : Number(value) >= 0 && Number(value) <= 255);
+        const validAlphaChannel = value => numericChannel.test(value) && (value.endsWith("%")
+            ? Number(value.slice(0, -1)) >= 0 && Number(value.slice(0, -1)) <= 100
+            : Number(value) >= 0 && Number(value) <= 1);
+
+        return channels.slice(0, 3).every(validColorChannel)
+            && (channels.length === 3 || validAlphaChannel(channels[3]));
+    }
+    """#
+
+    static let presets: [Preset] = [
+        Preset(name: "JSON", icon: "curlybraces", script: json, previewLanguage: "json"),
+        Preset(name: "URL", icon: "link", script: url, previewLanguage: "url"),
+        Preset(name: "SQL", icon: "cylinder", script: sql, previewLanguage: "sql"),
+        Preset(name: "Markdown", icon: "text.badge.checkmark", script: markdown, previewLanguage: "markdown"),
+        Preset(name: "代码", icon: "chevron.left.forwardslash.chevron.right", script: code, previewLanguage: "code"),
+        Preset(name: "色彩", icon: "eyedropper.halffull", script: color, previewLanguage: "color"),
+    ]
+
+    static let legacyURL = "function classify(item) { return /^https?:\\/\\/\\S+$/i.test(item.text.trim()); }"
+    static let legacySQL = "function classify(item) { return /^(select|insert|update|delete|create|alter|drop)\\b/i.test(item.text.trim()); }"
+    static let legacyShell = "function classify(item) { return /^(sudo |git |cd |ls |npm |yarn |pnpm |brew |curl |ssh )/.test(item.text.trim()); }"
+    static let formattedLegacyShell = #"""
+    function classify(item) {
+        return /^(sudo |git |cd |ls |npm |yarn |pnpm |brew |curl |ssh )/.test(item.text.trim());
+    }
+    """#
+    static let legacyMarkdown = "function classify(item) { return /(^|\\n)(#{1,6} |[-*] |```)/.test(item.text); }"
+    static let permissiveColor = #"""
+    function classify(item) {
+        const text = item.text.trim();
+        const hex = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+        const rgb = /^rgba?\(\s*\d{1,3}%?\s*,\s*\d{1,3}%?\s*,\s*\d{1,3}%?(?:\s*,\s*(?:0|1|0?\.\d+|\d{1,3}%))?\s*\)$/i;
+        return hex.test(text) || rgb.test(text);
+    }
+    """#
 }
 
 final class HistoryRepository: @unchecked Sendable {
@@ -43,18 +161,51 @@ final class HistoryRepository: @unchecked Sendable {
     func ensureDefaultCategories() throws {
         try database.writer.write { db in
             guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM category") == 0 else { return }
-            let defaults: [(String, String, String, Int)] = [
-                ("JSON", "curlybraces", DefaultCategoryScripts.json, 0),
-                ("URL", "link", "function classify(item) { return /^https?:\\/\\/\\S+$/i.test(item.text.trim()); }", 1),
-                ("SQL", "cylinder", "function classify(item) { return /^(select|insert|update|delete|create|alter|drop)\\b/i.test(item.text.trim()); }", 2),
-                ("Shell", "terminal", "function classify(item) { return /^(sudo |git |cd |ls |npm |yarn |pnpm |brew |curl |ssh )/.test(item.text.trim()); }", 3),
-                ("Markdown", "text.badge.checkmark", "function classify(item) { return /(^|\\n)(#{1,6} |[-*] |```)/.test(item.text); }", 4),
-            ]
             let now = Self.milliseconds(Date())
-            for (name, icon, script, order) in defaults {
+            for (order, preset) in DefaultCategoryScripts.presets.enumerated() {
                 try db.execute(
                     sql: "INSERT INTO category (name, icon, script, preview_language, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    arguments: [name, icon, script, name.lowercased(), order, now, now]
+                    arguments: [preset.name, preset.icon, preset.script, preset.previewLanguage, order, now, now]
+                )
+            }
+        }
+    }
+
+    func restoreDefaultCategories() throws {
+        try database.writer.write { db in
+            let now = Self.milliseconds(Date())
+            for preset in DefaultCategoryScripts.presets {
+                if let id = try Int64.fetchOne(db, sql: "SELECT id FROM category WHERE name = ? LIMIT 1", arguments: [preset.name]) {
+                    try db.execute(
+                        sql: "UPDATE category SET icon = ?, script = ?, preview_language = ?, updated_at = ? WHERE id = ?",
+                        arguments: [preset.icon, preset.script, preset.previewLanguage, now, id]
+                    )
+                } else {
+                    try db.execute(
+                        sql: "INSERT INTO category (name, icon, script, preview_language, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)",
+                        arguments: [preset.name, preset.icon, preset.script, preset.previewLanguage, now, now]
+                    )
+                }
+            }
+
+            let presetNames = Set(DefaultCategoryScripts.presets.map(\.name))
+            let rows = try Row.fetchAll(db, sql: "SELECT id, name FROM category ORDER BY sort_order, id")
+            let IDsByName = Dictionary(uniqueKeysWithValues: rows.compactMap { row -> (String, Int64)? in
+                guard let name: String = row["name"], let id: Int64 = row["id"] else { return nil }
+                return (name, id)
+            })
+            var orderedIDs = DefaultCategoryScripts.presets.dropLast().compactMap { IDsByName[$0.name] }
+            orderedIDs.append(contentsOf: rows.compactMap { row -> Int64? in
+                guard let name: String = row["name"], !presetNames.contains(name) else { return nil }
+                return row["id"]
+            })
+            if let colorID = IDsByName[DefaultCategoryScripts.presets.last!.name] {
+                orderedIDs.append(colorID)
+            }
+            for (index, id) in orderedIDs.enumerated() {
+                try db.execute(
+                    sql: "UPDATE category SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    arguments: [index, now, id]
                 )
             }
         }
@@ -118,6 +269,7 @@ final class HistoryRepository: @unchecked Sendable {
             id: item.id,
             databaseID: databaseID,
             title: item.title,
+            linkIconData: item.linkIconData,
             payload: item.payload,
             sourceApplication: item.sourceApplication,
             category: category,
@@ -137,7 +289,7 @@ final class HistoryRepository: @unchecked Sendable {
     func save(_ item: ClipboardItem) throws -> ClipboardItem {
         let now = Self.milliseconds(item.copiedAt)
         let hash = Self.hash(item.payload)
-        let persisted = try database.writer.write { db -> (id: Int64, title: String) in
+        let persisted = try database.writer.write { db -> (id: Int64, title: String, iconData: Data?) in
             let applicationID = try upsertApplication(item.sourceApplication, at: now, in: db)
             if let existingID = try Int64.fetchOne(
                 db,
@@ -153,30 +305,36 @@ final class HistoryRepository: @unchecked Sendable {
                     sql: "SELECT title FROM content WHERE id = ?",
                     arguments: [existingID]
                 ) ?? item.title
-                return (existingID, existingTitle)
+                let existingIcon = try Data.fetchOne(
+                    db,
+                    sql: "SELECT link_icon_data FROM content WHERE id = ?",
+                    arguments: [existingID]
+                )
+                return (existingID, existingTitle, existingIcon)
             }
 
             let values = Self.databaseValues(item.payload)
             try db.execute(
                 sql: """
                     INSERT INTO content (
-                        title, content_type, plain_text, rich_text, rich_text_type,
+                        title, link_icon_data, content_type, plain_text, rich_text, rich_text_type,
                         image_data, image_width, image_height, image_format,
                         content_hash, content_size, application_id,
                         copied_at, last_copied_at, copy_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
                 arguments: [
-                    item.title, values.type, values.plainText, values.richText, values.richTextType,
+                    item.title, item.linkIconData, values.type, values.plainText, values.richText, values.richTextType,
                     values.imageData, values.imageWidth, values.imageHeight, values.imageFormat,
                     hash, values.size, applicationID, now, now, now, now,
                 ]
             )
-            return (db.lastInsertedRowID, item.title)
+            return (db.lastInsertedRowID, item.title, item.linkIconData)
         }
         return ClipboardItem(
             databaseID: persisted.id,
             title: persisted.title,
+            linkIconData: persisted.iconData,
             payload: item.payload,
             sourceApplication: item.sourceApplication,
             copiedAt: item.copiedAt
@@ -239,13 +397,13 @@ final class HistoryRepository: @unchecked Sendable {
             try db.execute(
                 sql: """
                     UPDATE content SET
-                        title = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
+                        title = ?, link_icon_data = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
                         image_data = ?, image_width = ?, image_height = ?, image_format = ?,
                         content_hash = ?, content_size = ?, updated_at = ?
                     WHERE id = ?
                     """,
                 arguments: [
-                    item.title, values.type, values.plainText, values.richText, values.richTextType,
+                    item.title, item.linkIconData, values.type, values.plainText, values.richText, values.richTextType,
                     values.imageData, values.imageWidth, values.imageHeight, values.imageFormat,
                     Self.hash(item.payload), values.size, Self.milliseconds(Date()), databaseID,
                 ]
@@ -267,6 +425,41 @@ final class HistoryRepository: @unchecked Sendable {
                 total += deleted
                 if deleted < 500 { return total }
             }
+        }
+    }
+
+    func databaseByteCount() -> Int64 {
+        guard database.path != ":memory:" else { return 0 }
+        let fileManager = FileManager.default
+        return [database.path, database.path + "-wal", database.path + "-shm"].reduce(0) {
+            partial, path in
+            let size = (try? fileManager.attributesOfItem(atPath: path)[.size] as? NSNumber)?
+                .int64Value ?? 0
+            return partial + size
+        }
+    }
+
+    @discardableResult
+    func clearExpiredAndReclaim(retentionDays: Int) throws -> Int {
+        let deleted = try deleteExpired(retentionDays: retentionDays)
+        try reclaimDatabaseSpace()
+        return deleted
+    }
+
+    @discardableResult
+    func clearAllHistoryAndReclaim() throws -> Int {
+        let deleted = try database.writer.write { db in
+            try db.execute(sql: "DELETE FROM content")
+            return db.changesCount
+        }
+        try reclaimDatabaseSpace()
+        return deleted
+    }
+
+    private func reclaimDatabaseSpace() throws {
+        try database.writer.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            try db.execute(sql: "VACUUM")
         }
     }
 
@@ -300,6 +493,7 @@ final class HistoryRepository: @unchecked Sendable {
         return ClipboardItem(
             databaseID: row["id"],
             title: row["title"],
+            linkIconData: row["link_icon_data"],
             payload: payload,
             sourceApplication: SourceApplication(
                 bundleIdentifier: row["bundle_id"],
