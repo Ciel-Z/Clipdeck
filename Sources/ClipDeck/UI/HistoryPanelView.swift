@@ -9,6 +9,7 @@ struct HistoryPanelView: View {
     let onSearch: (String) -> Void
     @FocusState private var searchFieldFocused: Bool
     @State private var categoryPageStart = 0
+    @State private var isResizing = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,14 +28,8 @@ struct HistoryPanelView: View {
             }
         }
         .overlay(alignment: .top) {
-            ZStack(alignment: .top) {
-                Capsule()
-                    .fill(.white.opacity(0.32))
-                    .frame(width: 44, height: 3)
-                    .padding(.top, 5)
-                DeckResizeHandle()
-            }
-            .frame(height: 18)
+            DeckResizeHandle()
+                .frame(height: 18)
         }
         .onExitCommand {
             if store.renamingItemID != nil {
@@ -59,6 +54,17 @@ struct HistoryPanelView: View {
         .onChange(of: store.searchQuery) { _, query in
             onSearch(query)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .clipDeckResizeStarted)) { _ in
+            isResizing = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clipDeckResizeEnded)) { _ in
+            isResizing = false
+        }
+        .transaction { transaction in
+            if isResizing {
+                transaction.animation = nil
+            }
+        }
     }
 
     @ViewBuilder
@@ -80,6 +86,7 @@ struct HistoryPanelView: View {
                                     isSelected: item.id == store.selectedItemID,
                                     width: cardSide,
                                     height: cardSide,
+                                    isResizing: isResizing,
                                     quickPasteNumber: store.isQuickPasteOverlayVisible && entry.offset < 9
                                         ? entry.offset + 1
                                         : nil
@@ -458,6 +465,7 @@ private struct ClipboardCardView: View {
     let isSelected: Bool
     let width: CGFloat
     let height: CGFloat
+    let isResizing: Bool
     let quickPasteNumber: Int?
 
     var body: some View {
@@ -482,7 +490,6 @@ private struct ClipboardCardView: View {
                     .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.12), value: isExpanded)
         .frame(width: width, height: height)
         .background(Color(red: 0.075, green: 0.075, blue: 0.082))
         .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
@@ -504,7 +511,13 @@ private struct ClipboardCardView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.88)))
             }
         }
-        .shadow(color: isSelected ? Color.blue.opacity(0.24) : .black.opacity(0.28), radius: 9, y: 4)
+        .shadow(
+            color: isResizing
+                ? .clear
+                : (isSelected ? Color.blue.opacity(0.24) : .black.opacity(0.28)),
+            radius: isResizing ? 0 : 9,
+            y: isResizing ? 0 : 4
+        )
         .contentShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
         .animation(.easeOut(duration: 0.14), value: isSelected)
         .animation(.easeOut(duration: 0.10), value: quickPasteNumber)
@@ -514,7 +527,7 @@ private struct ClipboardCardView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 7) {
-                    Text(item.title)
+                    Text(cardHeaderTitle)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .lineLimit(1)
                     if let categoryLabel {
@@ -540,7 +553,7 @@ private struct ClipboardCardView: View {
 
     private var compactHeader: some View {
         HStack(spacing: 5) {
-            Text(item.title)
+            Text(cardHeaderTitle)
                 .fontWeight(.bold)
                 .lineLimit(1)
             if let categoryLabel {
@@ -632,30 +645,62 @@ private struct ClipboardCardView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    @ViewBuilder
     private func linkContent(showFooter: Bool) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: showFooter ? 12 : 34)
-            linkIcon(size: showFooter ? min(58, max(42, height * 0.25)) : 36)
-            Spacer(minLength: 10)
-            if showFooter {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(linkDisplayTitle)
-                        .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(2)
-                    if let host = item.linkHost {
-                        Text(host)
-                            .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.50))
-                            .lineLimit(1)
+        if showFooter {
+            VStack(spacing: 0) {
+                GeometryReader { geometry in
+                    if let data = item.linkPreviewData,
+                       let image = ClipboardImageCache.image(key: "preview:\(item.id)", data: data) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                    } else {
+                        linkIcon(size: min(58, max(42, height * 0.25)))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 12)
+
+                linkFooter
+                    .frame(height: linkFooterHeight)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            linkIcon(size: 36)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.top, 18)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var linkFooter: some View {
+        HStack(alignment: .center, spacing: 10) {
+            linkIcon(size: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(linkDisplayTitle)
+                    .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(2)
+                if let host = item.linkHost {
+                    Text(host)
+                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.50))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private var cardHeaderTitle: String {
+        item.webURL == nil ? item.title : "链接"
+    }
+
+    private var linkFooterHeight: CGFloat {
+        min(88, max(72, height * 0.23))
     }
 
     private func linkIcon(size: CGFloat) -> some View {
@@ -816,6 +861,38 @@ private struct DeckResizeHandle: NSViewRepresentable {
     final class ResizeTrackingView: NSView {
         private var startMouseY: CGFloat = 0
         private var startFrame: NSRect = .zero
+        private var pendingFrame: NSRect?
+        private var frameUpdateScheduled = false
+        private var lastFrameUpdateTime: TimeInterval = 0
+        private let indicatorLayer = CALayer()
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            configureIndicator()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            configureIndicator()
+        }
+
+        private func configureIndicator() {
+            wantsLayer = true
+            indicatorLayer.backgroundColor = NSColor.white.withAlphaComponent(0.32).cgColor
+            indicatorLayer.cornerRadius = 1.5
+            indicatorLayer.isHidden = true
+            layer?.addSublayer(indicatorLayer)
+        }
+
+        override func layout() {
+            super.layout()
+            indicatorLayer.frame = CGRect(
+                x: floor((bounds.width - 44) / 2),
+                y: bounds.height - 8,
+                width: 44,
+                height: 3
+            )
+        }
 
         override func resetCursorRects() {
             addCursorRect(bounds, cursor: .resizeUpDown)
@@ -825,6 +902,11 @@ private struct DeckResizeHandle: NSViewRepresentable {
             guard let window else { return }
             startMouseY = NSEvent.mouseLocation.y
             startFrame = window.frame
+            pendingFrame = nil
+            lastFrameUpdateTime = 0
+            indicatorLayer.isHidden = false
+            window.hasShadow = false
+            NotificationCenter.default.post(name: .clipDeckResizeStarted, object: nil)
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -833,23 +915,53 @@ private struct DeckResizeHandle: NSViewRepresentable {
             let maximum = max(250, min(420, floor(screen.visibleFrame.height * 0.42)))
             let minimum = min(250, maximum)
             let newHeight = min(max(startFrame.height + delta, minimum), maximum)
-            window.setFrame(
-                NSRect(x: startFrame.minX, y: startFrame.minY, width: startFrame.width, height: newHeight),
-                display: true
+            pendingFrame = NSRect(
+                x: startFrame.minX,
+                y: startFrame.minY,
+                width: startFrame.width,
+                height: newHeight
             )
+            scheduleFrameUpdate(for: window, screen: screen)
         }
 
         override func mouseUp(with event: NSEvent) {
             if let window {
+                applyPendingFrame(to: window, display: true)
+                window.hasShadow = true
+                window.invalidateShadow()
                 NSLog("ClipDeck panel resized to %.0f pt", window.frame.height)
                 UserDefaults.standard.set(Double(window.frame.height), forKey: "deck.preferredHeight")
             }
+            indicatorLayer.isHidden = true
             NotificationCenter.default.post(name: .clipDeckResizeEnded, object: nil)
+        }
+
+        private func scheduleFrameUpdate(for window: NSWindow, screen: NSScreen) {
+            guard !frameUpdateScheduled else { return }
+            frameUpdateScheduled = true
+            let framesPerSecond = max(60, screen.maximumFramesPerSecond)
+            let frameInterval = 1.0 / Double(framesPerSecond)
+            let elapsed = ProcessInfo.processInfo.systemUptime - lastFrameUpdateTime
+            let delay = max(0, frameInterval - elapsed)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak window] in
+                guard let self else { return }
+                self.frameUpdateScheduled = false
+                guard let window else { return }
+                self.applyPendingFrame(to: window, display: false)
+            }
+        }
+
+        private func applyPendingFrame(to window: NSWindow, display: Bool) {
+            guard let frame = pendingFrame else { return }
+            pendingFrame = nil
+            lastFrameUpdateTime = ProcessInfo.processInfo.systemUptime
+            window.setFrame(frame, display: display)
         }
     }
 }
 
 private extension Notification.Name {
+    static let clipDeckResizeStarted = Notification.Name("ClipDeck.resizeStarted")
     static let clipDeckResizeEnded = Notification.Name("ClipDeck.resizeEnded")
 }
 

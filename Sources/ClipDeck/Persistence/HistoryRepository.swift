@@ -122,6 +122,8 @@ final class HistoryRepository: @unchecked Sendable {
             databaseID: databaseID,
             title: item.title,
             linkIconData: item.linkIconData,
+            linkPreviewData: item.linkPreviewData,
+            hasFetchedLinkPreview: item.hasFetchedLinkPreview,
             payload: item.payload,
             sourceApplication: item.sourceApplication,
             category: category,
@@ -141,7 +143,7 @@ final class HistoryRepository: @unchecked Sendable {
     func save(_ item: ClipboardItem) throws -> ClipboardItem {
         let now = Self.milliseconds(item.copiedAt)
         let hash = Self.hash(item.payload)
-        let persisted = try database.writer.write { db -> (id: Int64, title: String, iconData: Data?) in
+        let persisted = try database.writer.write { db -> (id: Int64, title: String, iconData: Data?, previewData: Data?, previewFetched: Bool) in
             let applicationID = try upsertApplication(item.sourceApplication, at: now, in: db)
             if let existingID = try Int64.fetchOne(
                 db,
@@ -162,31 +164,44 @@ final class HistoryRepository: @unchecked Sendable {
                     sql: "SELECT link_icon_data FROM content WHERE id = ?",
                     arguments: [existingID]
                 )
-                return (existingID, existingTitle, existingIcon)
+                let existingPreview = try Data.fetchOne(
+                    db,
+                    sql: "SELECT link_preview_data FROM content WHERE id = ?",
+                    arguments: [existingID]
+                )
+                let previewFetched = try Bool.fetchOne(
+                    db,
+                    sql: "SELECT link_preview_fetched FROM content WHERE id = ?",
+                    arguments: [existingID]
+                ) ?? false
+                return (existingID, existingTitle, existingIcon, existingPreview, previewFetched)
             }
 
             let values = Self.databaseValues(item.payload)
             try db.execute(
                 sql: """
                     INSERT INTO content (
-                        title, link_icon_data, content_type, plain_text, rich_text, rich_text_type,
+                        title, link_icon_data, link_preview_data, link_preview_fetched, content_type, plain_text, rich_text, rich_text_type,
                         image_data, image_width, image_height, image_format,
                         content_hash, content_size, application_id,
                         copied_at, last_copied_at, copy_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
                 arguments: [
-                    item.title, item.linkIconData, values.type, values.plainText, values.richText, values.richTextType,
+                    item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
+                    values.type, values.plainText, values.richText, values.richTextType,
                     values.imageData, values.imageWidth, values.imageHeight, values.imageFormat,
                     hash, values.size, applicationID, now, now, now, now,
                 ]
             )
-            return (db.lastInsertedRowID, item.title, item.linkIconData)
+            return (db.lastInsertedRowID, item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview)
         }
         return ClipboardItem(
             databaseID: persisted.id,
             title: persisted.title,
             linkIconData: persisted.iconData,
+            linkPreviewData: persisted.previewData,
+            hasFetchedLinkPreview: persisted.previewFetched,
             payload: item.payload,
             sourceApplication: item.sourceApplication,
             copiedAt: item.copiedAt
@@ -249,13 +264,14 @@ final class HistoryRepository: @unchecked Sendable {
             try db.execute(
                 sql: """
                     UPDATE content SET
-                        title = ?, link_icon_data = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
+                        title = ?, link_icon_data = ?, link_preview_data = ?, link_preview_fetched = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
                         image_data = ?, image_width = ?, image_height = ?, image_format = ?,
                         content_hash = ?, content_size = ?, updated_at = ?
                     WHERE id = ?
                     """,
                 arguments: [
-                    item.title, item.linkIconData, values.type, values.plainText, values.richText, values.richTextType,
+                    item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
+                    values.type, values.plainText, values.richText, values.richTextType,
                     values.imageData, values.imageWidth, values.imageHeight, values.imageFormat,
                     Self.hash(item.payload), values.size, Self.milliseconds(Date()), databaseID,
                 ]
@@ -346,6 +362,8 @@ final class HistoryRepository: @unchecked Sendable {
             databaseID: row["id"],
             title: row["title"],
             linkIconData: row["link_icon_data"],
+            linkPreviewData: row["link_preview_data"],
+            hasFetchedLinkPreview: row["link_preview_fetched"],
             payload: payload,
             sourceApplication: SourceApplication(
                 bundleIdentifier: row["bundle_id"],

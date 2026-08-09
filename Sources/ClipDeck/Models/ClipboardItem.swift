@@ -52,6 +52,8 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
     let databaseID: Int64?
     let title: String
     let linkIconData: Data?
+    let linkPreviewData: Data?
+    let hasFetchedLinkPreview: Bool
     let payload: ClipboardPayload
     let sourceApplication: SourceApplication
     let category: ClipboardCategory?
@@ -62,6 +64,8 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
         databaseID: Int64? = nil,
         title: String? = nil,
         linkIconData: Data? = nil,
+        linkPreviewData: Data? = nil,
+        hasFetchedLinkPreview: Bool = false,
         payload: ClipboardPayload,
         sourceApplication: SourceApplication,
         category: ClipboardCategory? = nil,
@@ -71,6 +75,8 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
         self.databaseID = databaseID
         self.title = title ?? payload.defaultTitle
         self.linkIconData = linkIconData
+        self.linkPreviewData = linkPreviewData
+        self.hasFetchedLinkPreview = hasFetchedLinkPreview
         self.payload = payload
         self.sourceApplication = sourceApplication
         self.category = category

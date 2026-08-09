@@ -117,7 +117,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                     store?.replaceItems(items)
                 }
                 for item in items.prefix(20)
-                    where item.webURL != nil && (item.linkIconData == nil || item.title == "文本") {
+                    where item.webURL != nil
+                        && (!item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本") {
                     guard let url = item.webURL else { continue }
                     let itemID = item.id
                     Task.detached(priority: .utility) { [weak store] in
@@ -126,7 +127,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                             store?.updateLinkMetadata(
                                 itemID: itemID,
                                 title: metadata.title,
-                                iconData: metadata.iconData
+                                iconData: metadata.iconData,
+                                previewData: metadata.previewData
                             )
                         }
                     }

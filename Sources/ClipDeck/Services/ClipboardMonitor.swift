@@ -1,13 +1,18 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
 struct LinkMetadata: Equatable, Sendable {
     let title: String?
     let iconData: Data?
+    let previewData: Data?
 }
 
 enum LinkMetadataService {
     private static let maximumHTMLBytes = 512 * 1_024
     private static let maximumIconBytes = 512 * 1_024
+    private static let maximumPreviewDownloadBytes = 8 * 1_024 * 1_024
+    private static let maximumPreviewPixelDimension = 1_200
 
     static func fetch(for url: URL) async -> LinkMetadata {
         guard let (data, response) = await download(
@@ -17,7 +22,11 @@ enum LinkMetadataService {
             timeout: 8
         ),
               let html = decodeHTML(data) else {
-            return LinkMetadata(title: nil, iconData: await fetchFirstIcon(from: fallbackIconURLs(for: url)))
+            return LinkMetadata(
+                title: nil,
+                iconData: await fetchFirstIcon(from: fallbackIconURLs(for: url)),
+                previewData: nil
+            )
         }
 
         let baseURL = response.url ?? url
@@ -33,7 +42,9 @@ enum LinkMetadataService {
             candidates.append(contentsOf: iconURLs(fromManifest: manifestData, baseURL: manifestURL))
         }
         candidates.append(contentsOf: fallbackIconURLs(for: baseURL))
-        return LinkMetadata(title: title, iconData: await fetchFirstIcon(from: candidates))
+        async let iconData = fetchFirstIcon(from: candidates)
+        async let previewData = fetchPreview(from: previewImageURL(fromHTML: html, baseURL: baseURL))
+        return await LinkMetadata(title: title, iconData: iconData, previewData: previewData)
     }
 
     static func title(fromHTML html: String) -> String? {
@@ -57,6 +68,15 @@ enum LinkMetadataService {
 
     static func iconURL(fromHTML html: String, baseURL: URL) -> URL? {
         iconURLs(fromHTML: html, baseURL: baseURL).first
+    }
+
+    static func previewImageURL(fromHTML html: String, baseURL: URL) -> URL? {
+        guard let value = metadataContent(
+            in: html,
+            keys: ["og:image", "og:image:url", "twitter:image", "twitter:image:src"]
+        ), let url = URL(string: decodeEntities(value), relativeTo: baseURL)?.absoluteURL,
+           ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        return url
     }
 
     static func iconURLs(fromHTML html: String, baseURL: URL) -> [URL] {
@@ -117,6 +137,44 @@ enum LinkMetadataService {
             return data
         }
         return nil
+    }
+
+    private static func fetchPreview(from url: URL?) async -> Data? {
+        guard let url,
+              let (data, _) = await download(
+                  url: url,
+                  accept: "image/*",
+                  maximumBytes: maximumPreviewDownloadBytes,
+                  timeout: 8
+              ) else { return nil }
+        return normalizedPreviewData(data)
+    }
+
+    private static func normalizedPreviewData(_ data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(
+                  source,
+                  0,
+                  [
+                      kCGImageSourceCreateThumbnailFromImageAlways: true,
+                      kCGImageSourceCreateThumbnailWithTransform: true,
+                      kCGImageSourceThumbnailMaxPixelSize: maximumPreviewPixelDimension,
+                  ] as CFDictionary
+              ),
+              let output = CFDataCreateMutable(nil, 0),
+              let destination = CGImageDestinationCreateWithData(
+                  output,
+                  UTType.jpeg.identifier as CFString,
+                  1,
+                  nil
+              ) else { return nil }
+        CGImageDestinationAddImage(
+            destination,
+            image,
+            [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary
+        )
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
     }
 
     private static func fallbackIconURLs(for url: URL) -> [URL] {
@@ -285,7 +343,8 @@ final class ClipboardMonitor {
             Task { @MainActor [weak self] in
                 self?.store.insert(item)
             }
-            if let url = item.webURL, item.linkIconData == nil || item.title == "文本" {
+            if let url = item.webURL,
+               !item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本" {
                 let itemID = item.id
                 Task.detached(priority: .utility) {
                     let metadata = await LinkMetadataService.fetch(for: url)
@@ -293,7 +352,8 @@ final class ClipboardMonitor {
                         self?.store.updateLinkMetadata(
                             itemID: itemID,
                             title: metadata.title,
-                            iconData: metadata.iconData
+                            iconData: metadata.iconData,
+                            previewData: metadata.previewData
                         )
                     }
                 }

@@ -242,6 +242,7 @@ struct CategoryManagementView: View {
     }
 
     @StateObject var manager: CategoryManager
+    @StateObject private var launchAtLogin = LaunchAtLoginController()
     @State private var categoryPendingDeletion: ClipboardCategory?
     @State private var pendingDataAction: DataAction?
     @State private var confirmsShortcutReset = false
@@ -438,6 +439,40 @@ struct CategoryManagementView: View {
                     }
                 }
 
+                settingsSection("启动") {
+                    VStack(spacing: 0) {
+                        settingsRow("登录时自动启动") {
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: { launchAtLogin.isOn },
+                                    set: { launchAtLogin.setEnabled($0) }
+                                )
+                            )
+                            .labelsHidden()
+                            .disabled(launchAtLogin.isUpdating)
+                        }
+
+                        if let message = launchAtLogin.statusMessage {
+                            Divider().padding(.leading, 16)
+                            HStack(spacing: 12) {
+                                Text(message)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(launchAtLogin.errorMessage == nil ? Color.secondary : Color.red)
+                                Spacer()
+                                if launchAtLogin.requiresApproval {
+                                    Button("打开登录项设置") {
+                                        launchAtLogin.openSystemSettings()
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(minHeight: 56)
+                        }
+                    }
+                }
+
                 settingsSection("历史") {
                     settingsRow("保留时长") {
                         HStack(spacing: 7) {
@@ -460,6 +495,12 @@ struct CategoryManagementView: View {
         }
         .onChange(of: retentionDays) { _, days in
             manager.applyRetention(days: days)
+        }
+        .onAppear {
+            launchAtLogin.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            launchAtLogin.refresh()
         }
     }
 
@@ -494,7 +535,7 @@ struct CategoryManagementView: View {
                     }
                 }
 
-                Text("超过限制的图片会被忽略，不会压缩、转码或写入数据库。")
+                Text("PNG 超过限制时会被忽略；TIFF 会先转为 PNG，再按转换后的大小判断是否保存。")
                     .font(.system(size: 12.5))
                     .foregroundStyle(.secondary)
             }

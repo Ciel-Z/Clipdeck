@@ -42,6 +42,16 @@ final class LinkMetadataServiceTests: XCTestCase {
         XCTAssertEqual(LinkMetadataService.title(fromHTML: html), "Fallback & Title")
     }
 
+    func testResolvesOpenGraphPreviewImage() throws {
+        let html = #"<meta property="og:image" content="/images/preview.jpg">"#
+        let baseURL = try XCTUnwrap(URL(string: "https://example.com/articles/one"))
+
+        XCTAssertEqual(
+            LinkMetadataService.previewImageURL(fromHTML: html, baseURL: baseURL)?.absoluteString,
+            "https://example.com/images/preview.jpg"
+        )
+    }
+
     func testReadsManifestAndPrefersItsLargestListedIcon() throws {
         let html = #"<link rel="manifest" href="/site.webmanifest">"#
         let baseURL = try XCTUnwrap(URL(string: "https://example.com/page"))

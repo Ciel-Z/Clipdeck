@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import ClipDeck
 
@@ -55,6 +56,38 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertTrue(ClipboardReader.isSafeImageSize(width: 10_000, height: 6_000))
         XCTAssertFalse(ClipboardReader.isSafeImageSize(width: 10_000, height: 6_001))
         XCTAssertFalse(ClipboardReader.isSafeImageSize(width: Int.max, height: Int.max))
+    }
+
+    func testTIFFIsCompressedBeforeApplyingStorageLimit() throws {
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 100,
+            pixelsHigh: 100,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let tiff = try XCTUnwrap(bitmap.tiffRepresentation)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(tiff.count, png.count)
+
+        let payload = ClipboardReader.normalizedImagePayload(
+            data: tiff,
+            type: .tiff,
+            maximumByteCount: tiff.count - 1
+        )
+
+        guard case let .image(data, width, height, format) = payload else {
+            return XCTFail("Expected a normalized image payload")
+        }
+        XCTAssertEqual(format, .png)
+        XCTAssertEqual(width, 100)
+        XCTAssertEqual(height, 100)
+        XCTAssertLessThan(data.count, tiff.count)
     }
 
     func testCategorySwitchingFiltersItemsAndKeepsAVisibleSelection() {

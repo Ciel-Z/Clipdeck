@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import UniformTypeIdentifiers
 
 struct ClipboardReader: Sendable {
     static let maximumPixelCount = 60_000_000
@@ -27,17 +28,50 @@ struct ClipboardReader: Sendable {
         guard AppPreferences.recordsImages else { return nil }
         let candidates: [NSPasteboard.PasteboardType] = [.png, .tiff]
         guard let type = pasteboard.availableType(from: candidates),
-              let data = pasteboard.data(forType: type),
-              data.count <= AppPreferences.maximumImageByteCount,
+              let data = pasteboard.data(forType: type) else { return nil }
+        return Self.normalizedImagePayload(
+            data: data,
+            type: type,
+            maximumByteCount: AppPreferences.maximumImageByteCount
+        )
+    }
+
+    static func normalizedImagePayload(
+        data: Data,
+        type: NSPasteboard.PasteboardType,
+        maximumByteCount: Int
+    ) -> ClipboardPayload? {
+        guard maximumByteCount > 0,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
               Self.isSafeImageSize(width: width, height: height) else {
             return nil
         }
-        let format: ClipboardImageFormat = type == .png ? .png : .tiff
-        return .image(data: data, width: width, height: height, format: format)
+
+        if type == .tiff {
+            guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+                  let destinationData = CFDataCreateMutable(nil, 0),
+                  let destination = CGImageDestinationCreateWithData(
+                      destinationData,
+                      UTType.png.identifier as CFString,
+                      1,
+                      nil
+                  ) else { return nil }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination),
+                  CFDataGetLength(destinationData) <= maximumByteCount else { return nil }
+            return .image(
+                data: destinationData as Data,
+                width: width,
+                height: height,
+                format: .png
+            )
+        }
+
+        guard type == .png, data.count <= maximumByteCount else { return nil }
+        return .image(data: data, width: width, height: height, format: .png)
     }
 
     static func isSafeImageSize(width: Int, height: Int) -> Bool {

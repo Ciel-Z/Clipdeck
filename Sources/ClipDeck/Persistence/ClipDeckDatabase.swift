@@ -344,6 +344,12 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 ]
             )
         }
+        migrator.registerMigration("addLinkPreviewData") { database in
+            try database.alter(table: "content") { table in
+                table.add(column: "link_preview_data", .blob)
+                table.add(column: "link_preview_fetched", .boolean).notNull().defaults(to: false)
+            }
+        }
         return migrator
     }
 }

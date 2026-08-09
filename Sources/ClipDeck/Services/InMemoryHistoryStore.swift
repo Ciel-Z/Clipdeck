@@ -247,6 +247,8 @@ final class InMemoryHistoryStore: ObservableObject {
             databaseID: current.databaseID,
             title: trimmed.isEmpty ? nil : trimmed,
             linkIconData: current.linkIconData,
+            linkPreviewData: current.linkPreviewData,
+            hasFetchedLinkPreview: current.hasFetchedLinkPreview,
             payload: current.payload,
             sourceApplication: current.sourceApplication,
             category: current.category,
@@ -266,6 +268,8 @@ final class InMemoryHistoryStore: ObservableObject {
             databaseID: current.databaseID,
             title: current.title,
             linkIconData: current.linkIconData,
+            linkPreviewData: current.linkPreviewData,
+            hasFetchedLinkPreview: current.hasFetchedLinkPreview,
             payload: payload,
             sourceApplication: current.sourceApplication,
             category: current.category,
@@ -281,7 +285,8 @@ final class InMemoryHistoryStore: ObservableObject {
     func updateLinkMetadata(
         itemID: ClipboardItem.ID,
         title: String?,
-        iconData: Data?
+        iconData: Data?,
+        previewData: Data?
     ) {
         guard let current = items.first(where: { $0.id == itemID }) else { return }
         let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -289,12 +294,18 @@ final class InMemoryHistoryStore: ObservableObject {
             ? cleanTitle!
             : current.title
         let resolvedIconData = iconData ?? current.linkIconData
-        guard resolvedTitle != current.title || resolvedIconData != current.linkIconData else { return }
+        let resolvedPreviewData = previewData ?? current.linkPreviewData
+        guard !current.hasFetchedLinkPreview
+                || resolvedTitle != current.title
+                || resolvedIconData != current.linkIconData
+                || resolvedPreviewData != current.linkPreviewData else { return }
         let updated = ClipboardItem(
             id: current.id,
             databaseID: current.databaseID,
             title: resolvedTitle,
             linkIconData: resolvedIconData,
+            linkPreviewData: resolvedPreviewData,
+            hasFetchedLinkPreview: true,
             payload: current.payload,
             sourceApplication: current.sourceApplication,
             category: current.category,

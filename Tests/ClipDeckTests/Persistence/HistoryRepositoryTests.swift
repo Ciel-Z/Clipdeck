@@ -122,6 +122,8 @@ final class HistoryRepositoryTests: XCTestCase {
         let saved = try repository.save(ClipboardItem(
             title: "Example Documentation",
             linkIconData: Data([3, 1, 4, 1, 5]),
+            linkPreviewData: Data([9, 2, 6, 5]),
+            hasFetchedLinkPreview: true,
             payload: .text(plainText: "https://example.com/docs", rtfData: nil),
             sourceApplication: source
         ))
@@ -130,6 +132,8 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(restored.databaseID, saved.databaseID)
         XCTAssertEqual(restored.title, "Example Documentation")
         XCTAssertEqual(restored.linkIconData, Data([3, 1, 4, 1, 5]))
+        XCTAssertEqual(restored.linkPreviewData, Data([9, 2, 6, 5]))
+        XCTAssertTrue(restored.hasFetchedLinkPreview)
         XCTAssertEqual(try repository.searchText("Documentation").first?.databaseID, saved.databaseID)
     }
 
