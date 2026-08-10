@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ClipDeck
+Comment=Clipboard history deck
+Exec=/usr/bin/clipdeck
+Icon=clipdeck
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+

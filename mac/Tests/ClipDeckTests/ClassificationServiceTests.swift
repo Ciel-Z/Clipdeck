@@ -139,6 +139,18 @@ final class ClassificationServiceTests: XCTestCase {
             sourceApplication: source
         )))
         XCTAssertNotEqual(invalidColor.category?.name, "色彩")
+
+        let verificationCode = try service.classify(repository.save(ClipboardItem(
+            payload: .text(plainText: "677164", rtfData: nil),
+            sourceApplication: source
+        )))
+        XCTAssertNotEqual(verificationCode.category?.name, "色彩")
+
+        let hashPrefixedNumericColor = try service.classify(repository.save(ClipboardItem(
+            payload: .text(plainText: "#677164", rtfData: nil),
+            sourceApplication: source
+        )))
+        XCTAssertEqual(hashPrefixedNumericColor.category?.name, "色彩")
     }
 
     func testClipboardColorParserSupportsBareHexWithoutAcceptingShortBareWords() throws {
@@ -147,6 +159,8 @@ final class ClassificationServiceTests: XCTestCase {
         XCTAssertEqual(color.greenComponent, 0x49 / 255, accuracy: 0.001)
         XCTAssertEqual(color.blueComponent, 0x27 / 255, accuracy: 0.001)
         XCTAssertNil(ClipboardColorParser.color(from: "face"))
+        XCTAssertNil(ClipboardColorParser.color(from: "677164"))
+        XCTAssertNotNil(ClipboardColorParser.color(from: "#677164"))
     }
 
     func testUniversalCodeHighlighterDetectsCommonLanguagesAndPreservesText() {

@@ -1,0 +1,4 @@
+#!/bin/sh
+export LD_LIBRARY_PATH="/opt/clipdeck/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="/opt/clipdeck/plugins"
+exec /opt/clipdeck/bin/clipdeck-linux "$@"

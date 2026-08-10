@@ -6,7 +6,9 @@ enum ClipboardColorParser {
         if value.hasPrefix("#") {
             return hexColor(String(value.dropFirst()))
         }
-        if [6, 8].contains(value.count), value.allSatisfy(\.isHexDigit) {
+        if [6, 8].contains(value.count),
+           value.allSatisfy(\.isHexDigit),
+           value.contains(where: { $0.isLetter }) {
             return hexColor(value)
         }
         guard value.hasPrefix("rgb"),

@@ -121,6 +121,38 @@ enum DefaultCategoryScripts {
     static let color = #"""
     function classify(item) {
         const text = item.text.trim();
+        const hashHex = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+        const bareHex = /^(?=[0-9a-f]*[a-f])(?:[0-9a-f]{6}|[0-9a-f]{8})$/i;
+        if (hashHex.test(text) || bareHex.test(text)) {
+            return true;
+        }
+
+        const match = /^rgba?\((.*)\)$/i.exec(text);
+        if (!match) {
+            return false;
+        }
+
+        const channels = match[1].split(",").map(value => value.trim());
+        if (channels.length !== 3 && channels.length !== 4) {
+            return false;
+        }
+
+        const numericChannel = /^\d+(?:\.\d+)?%?$/;
+        const validColorChannel = value => numericChannel.test(value) && (value.endsWith("%")
+            ? Number(value.slice(0, -1)) >= 0 && Number(value.slice(0, -1)) <= 100
+            : Number(value) >= 0 && Number(value) <= 255);
+        const validAlphaChannel = value => numericChannel.test(value) && (value.endsWith("%")
+            ? Number(value.slice(0, -1)) >= 0 && Number(value.slice(0, -1)) <= 100
+            : Number(value) >= 0 && Number(value) <= 1);
+
+        return channels.slice(0, 3).every(validColorChannel)
+            && (channels.length === 3 || validAlphaChannel(channels[3]));
+    }
+    """#
+
+    static let numericBareHexColor = #"""
+    function classify(item) {
+        const text = item.text.trim();
         const hex = /^(?:#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})|[0-9a-f]{6}|[0-9a-f]{8})$/i;
         if (hex.test(text)) {
             return true;

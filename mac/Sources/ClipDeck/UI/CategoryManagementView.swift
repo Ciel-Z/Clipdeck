@@ -1467,7 +1467,7 @@ struct SyntaxTextEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
-        let textView = NSTextView()
+        let textView = SyntaxEditorTextView()
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.allowsUndo = true
@@ -1519,6 +1519,31 @@ struct SyntaxTextEditor: NSViewRepresentable {
             textView.selectedRanges = selection
             isApplyingHighlight = false
         }
+    }
+}
+
+private final class SyntaxEditorTextView: NSTextView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if isSelectAllShortcut(event) {
+            selectAll(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if isSelectAllShortcut(event) {
+            selectAll(nil)
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    private func isSelectAllShortcut(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        return event.type == .keyDown
+            && modifiers == .command
+            && event.charactersIgnoringModifiers?.lowercased() == "a"
     }
 }
 

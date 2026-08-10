@@ -356,6 +356,16 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 ]
             )
         }
+        migrator.registerMigration("rejectNumericBareHexColors") { database in
+            try database.execute(
+                sql: "UPDATE category SET script = ?, updated_at = ? WHERE name = '色彩' AND script = ?",
+                arguments: [
+                    DefaultCategoryScripts.color,
+                    Int64(Date().timeIntervalSince1970 * 1_000),
+                    DefaultCategoryScripts.numericBareHexColor,
+                ]
+            )
+        }
         migrator.registerMigration("addLinkPreviewData") { database in
             try database.alter(table: "content") { table in
                 table.add(column: "link_preview_data", .blob)
