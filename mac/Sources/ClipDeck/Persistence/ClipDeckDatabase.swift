@@ -14,7 +14,11 @@ final class ClipDeckDatabase: @unchecked Sendable {
         configuration.prepareDatabase { database in
             try database.execute(sql: "PRAGMA foreign_keys = ON")
         }
-        writer = try DatabaseQueue(path: path, configuration: configuration)
+        if path == ":memory:" {
+            writer = try DatabaseQueue(path: path, configuration: configuration)
+        } else {
+            writer = try DatabasePool(path: path, configuration: configuration)
+        }
         try Self.migrator.migrate(writer)
     }
 
@@ -29,6 +33,14 @@ final class ClipDeckDatabase: @unchecked Sendable {
         let directory = supportDirectory.appending(path: "ClipDeck", directoryHint: .isDirectory)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return try ClipDeckDatabase(path: directory.appending(path: "history.sqlite").path)
+    }
+
+    func releaseMemory() {
+        if let pool = writer as? DatabasePool {
+            pool.releaseMemory()
+        } else if let queue = writer as? DatabaseQueue {
+            queue.releaseMemory()
+        }
     }
 
     private static var migrator: DatabaseMigrator {

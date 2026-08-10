@@ -166,6 +166,12 @@ final class InMemoryHistoryStore: ObservableObject {
         if !searchQuery.isEmpty {
             searchQuery.removeLast()
         }
+        collapseSearchIfQueryWasDeleted()
+    }
+
+    func collapseSearchIfQueryWasDeleted() {
+        guard isSearchActive, searchQuery.isEmpty else { return }
+        endSearch()
     }
 
     func replaceSearchResults(_ results: [ClipboardItem]) {

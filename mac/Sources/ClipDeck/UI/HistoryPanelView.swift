@@ -139,6 +139,16 @@ struct HistoryPanelView: View {
                                     }
                                     .keyboardShortcut(.return, modifiers: [])
 
+                                    if let url = item.webURL {
+                                        Button {
+                                            store.selectedItemID = item.id
+                                            NSWorkspace.shared.open(url)
+                                        } label: {
+                                            Label("访问", systemImage: "safari")
+                                        }
+                                        .keyboardShortcut("o", modifiers: .command)
+                                    }
+
                                     Divider()
 
                                     Button {
@@ -173,6 +183,7 @@ struct HistoryPanelView: View {
                                     } label: {
                                         Label("删除", systemImage: "trash")
                                     }
+                                    .keyboardShortcut(.delete, modifiers: .command)
                                 }
                             }
                         }

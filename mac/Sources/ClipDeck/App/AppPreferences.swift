@@ -28,6 +28,7 @@ enum AppPreferences {
             quickPasteModifierKey: Int(cmdKey),
             plainTextModifierKey: Int(shiftKey),
         ])
+
     }
 
     static var recordsImages: Bool {
@@ -40,7 +41,8 @@ enum AppPreferences {
     }
 
     static var retentionDays: Int {
-        min(90, max(1, UserDefaults.standard.integer(forKey: retentionDaysKey)))
+        let days = UserDefaults.standard.integer(forKey: retentionDaysKey)
+        return days == 0 ? 0 : max(1, days)
     }
 
     static var hotKeyCode: UInt32 {

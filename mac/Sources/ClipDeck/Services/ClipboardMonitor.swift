@@ -284,16 +284,23 @@ final class ClipboardMonitor {
     private let store: InMemoryHistoryStore
     private let repository: HistoryRepository?
     private let classifier: ClassificationService?
+    private let onCapture: @MainActor () -> Void
     private let reader = ClipboardReader()
     private let processingQueue = DispatchQueue(label: "app.clipdeck.clipboard-reader", qos: .utility)
     private var timer: Timer?
     private var lastChangeCount = NSPasteboard.general.changeCount
     private var ignoredChangeCount: Int?
 
-    init(store: InMemoryHistoryStore, repository: HistoryRepository? = nil, classifier: ClassificationService? = nil) {
+    init(
+        store: InMemoryHistoryStore,
+        repository: HistoryRepository? = nil,
+        classifier: ClassificationService? = nil,
+        onCapture: @escaping @MainActor () -> Void = {}
+    ) {
         self.store = store
         self.repository = repository
         self.classifier = classifier
+        self.onCapture = onCapture
     }
 
     func start() {
@@ -330,31 +337,34 @@ final class ClipboardMonitor {
 
         let sourceApplication = Self.frontmostApplication()
         processingQueue.async { [reader, repository, classifier] in
-            guard let payload = reader.read() else { return }
-            let capturedItem = ClipboardItem(payload: payload, sourceApplication: sourceApplication)
-            let item: ClipboardItem
-            do {
-                let savedItem = try repository?.save(capturedItem) ?? capturedItem
-                item = try classifier?.classify(savedItem) ?? savedItem
-            } catch {
-                NSLog("ClipDeck failed to persist clipboard item: %@", String(describing: error))
-                item = capturedItem
-            }
-            Task { @MainActor [weak self] in
-                self?.store.insert(item)
-            }
-            if let url = item.webURL,
-               !item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本" {
-                let itemID = item.id
-                Task.detached(priority: .utility) {
-                    let metadata = await LinkMetadataService.fetch(for: url)
-                    await MainActor.run { [weak self] in
-                        self?.store.updateLinkMetadata(
-                            itemID: itemID,
-                            title: metadata.title,
-                            iconData: metadata.iconData,
-                            previewData: metadata.previewData
-                        )
+            autoreleasepool {
+                guard let payload = reader.read() else { return }
+                let capturedItem = ClipboardItem(payload: payload, sourceApplication: sourceApplication)
+                let item: ClipboardItem
+                do {
+                    let savedItem = try repository?.save(capturedItem) ?? capturedItem
+                    item = try classifier?.classify(savedItem) ?? savedItem
+                } catch {
+                    NSLog("ClipDeck failed to persist clipboard item: %@", String(describing: error))
+                    item = capturedItem
+                }
+                Task { @MainActor [weak self] in
+                    self?.store.insert(item)
+                    self?.onCapture()
+                }
+                if let url = item.webURL,
+                   !item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本" {
+                    let itemID = item.id
+                    Task.detached(priority: .utility) {
+                        let metadata = await LinkMetadataService.fetch(for: url)
+                        await MainActor.run { [weak self] in
+                            self?.store.updateLinkMetadata(
+                                itemID: itemID,
+                                title: metadata.title,
+                                iconData: metadata.iconData,
+                                previewData: metadata.previewData
+                            )
+                        }
                     }
                 }
             }

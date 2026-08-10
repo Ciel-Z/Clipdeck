@@ -9,11 +9,13 @@ private final class ClipDeckPanel: NSPanel {
     var onFinishSearch: (() -> Void)?
     var onTypeToSearch: ((String) -> Void)?
     var onResumeSearchAndDeleteBackward: (() -> Void)?
+    var onCollapseEmptySearch: (() -> Void)?
     var onDeleteSelection: (() -> Void)?
     var onPasteSelection: (() -> Void)?
     var onTogglePreview: (() -> Void)?
     var onEditSelection: (() -> Void)?
     var onRenameSelection: (() -> Void)?
+    var onOpenSelection: (() -> Void)?
     var onQuickPaste: ((Int) -> Void)?
     var onQuickPasteModifierChanged: ((Bool) -> Void)?
     var isSearchActive: (() -> Bool)?
@@ -36,6 +38,13 @@ private final class ClipDeckPanel: NSPanel {
             return
         }
 
+        let commandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let shortcutModifiers = commandModifiers.intersection([.command, .shift, .option, .control])
+        if event.keyCode == 12, shortcutModifiers == .command {
+            NSApp.terminate(nil)
+            return
+        }
+
         if isEditingContent?() == true {
             if event.keyCode == 53 {
                 onEscape?()
@@ -50,18 +59,23 @@ private final class ClipDeckPanel: NSPanel {
             return
         }
 
-        let commandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if AppPreferences.isQuickPasteModifierActive(in: event.modifierFlags),
            let quickPasteIndex = Self.quickPasteIndex(for: event.keyCode) {
             onQuickPaste?(quickPasteIndex)
             return
         }
-        if event.keyCode == 14, commandModifiers.contains(.command) {
+        // Context-menu shortcuts remain available whenever the Deck panel is key,
+        // even when the context menu itself is closed.
+        if event.keyCode == 14, shortcutModifiers == .command {
             onEditSelection?()
             return
         }
-        if event.keyCode == 15, commandModifiers.contains(.command) {
+        if event.keyCode == 15, shortcutModifiers == .command {
             onRenameSelection?()
+            return
+        }
+        if event.keyCode == 31, shortcutModifiers == .command {
+            onOpenSelection?()
             return
         }
 
@@ -77,9 +91,19 @@ private final class ClipDeckPanel: NSPanel {
         if event.keyCode == 51 {
             if isSearchEditing?() == true, isSearchFieldFocused?() == true {
                 super.sendEvent(event)
+                DispatchQueue.main.async { [weak self] in
+                    let hasMarkedText = (self?.firstResponder as? NSTextView)?.hasMarkedText() == true
+                    if !hasMarkedText {
+                        self?.onCollapseEmptySearch?()
+                    }
+                }
             } else if isSearchActive?() == true {
-                onResumeSearchAndDeleteBackward?()
-            } else {
+                if shortcutModifiers == .command {
+                    onDeleteSelection?()
+                } else if shortcutModifiers.isEmpty {
+                    onResumeSearchAndDeleteBackward?()
+                }
+            } else if shortcutModifiers == .command {
                 onDeleteSelection?()
             }
             return
@@ -88,8 +112,6 @@ private final class ClipDeckPanel: NSPanel {
         if event.keyCode == 117 {
             if isSearchEditing?() == true {
                 super.sendEvent(event)
-            } else {
-                onDeleteSelection?()
             }
             return
         }
@@ -174,7 +196,7 @@ private final class ClipDeckPanel: NSPanel {
             return
         }
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if event.keyCode == 3, modifiers.contains(.command) {
+        if event.keyCode == 3, modifiers == .command {
             onSearch?()
             return
         }
@@ -238,7 +260,9 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = true
+        // Visibility is managed by windowDidResignKey. AppKit's automatic
+        // deactivation hiding races with activation when invoked from the menu bar.
+        panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.hasShadow = true
         panel.backgroundColor = .clear
@@ -280,6 +304,9 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.onResumeSearchAndDeleteBackward = { [weak store] in
             store?.resumeSearchEditingAndDeleteBackward()
         }
+        panel.onCollapseEmptySearch = { [weak store] in
+            store?.collapseSearchIfQueryWasDeleted()
+        }
         panel.isSearchActive = { [weak store] in store?.isSearchActive == true }
         panel.isSearchEditing = { [weak store] in store?.isSearchEditing == true }
         panel.isSearchFieldFocused = { [weak store] in store?.isSearchFieldFocused == true }
@@ -295,6 +322,10 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.onTogglePreview = { [weak store] in store?.togglePreviewForSelection() }
         panel.onEditSelection = { [weak store] in store?.beginEditingSelection() }
         panel.onRenameSelection = { [weak store] in store?.beginRenamingSelection() }
+        panel.onOpenSelection = { [weak store] in
+            guard let url = store?.selectedItem?.webURL else { return }
+            NSWorkspace.shared.open(url)
+        }
         panel.onQuickPaste = { [weak store] index in
             guard let store, store.displayedItems.indices.contains(index) else { return }
             let item = store.displayedItems[index]
@@ -334,6 +365,12 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    func prepareForFirstPresentation() {
+        guard let panel = window else { return }
+        updateFrame(of: panel, display: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
+    }
+
     func show(targetApplication: NSRunningApplication? = nil) {
         guard let panel = window else { return }
         if let targetApplication,
@@ -345,6 +382,26 @@ final class PanelController: NSWindowController, NSWindowDelegate {
                   !frontmost.isTerminated {
             self.targetApplication = frontmost
         }
+        updateFrame(of: panel, display: true)
+        store.selectedItemID = store.selectedItemID ?? store.displayedItems.first?.id
+        store.revealSelection()
+
+        // Make the Deck visible immediately even while another application is
+        // frontmost, then transfer keyboard focus to ClipDeck.
+        panel.orderFrontRegardless()
+        NSApp.activate()
+        panel.makeKeyAndOrderFront(nil)
+        NSLog(
+            "ClipDeck panel shown at %@; visible=%@; key=%@; active=%@; target=%@",
+            NSStringFromRect(panel.frame),
+            panel.isVisible ? "true" : "false",
+            panel.isKeyWindow ? "true" : "false",
+            NSApp.isActive ? "true" : "false",
+            self.targetApplication?.localizedName ?? "none"
+        )
+    }
+
+    private func updateFrame(of panel: NSWindow, display: Bool) {
         let screen = Self.preferredScreen()
         let visibleFrame = screen.visibleFrame
         let horizontalInset: CGFloat = 8
@@ -363,17 +420,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
                 width: width,
                 height: height
             ),
-            display: true
-        )
-        store.selectedItemID = store.selectedItemID ?? store.displayedItems.first?.id
-        store.revealSelection()
-        NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
-        NSLog(
-            "ClipDeck panel shown at %@; visible=%@; target=%@",
-            NSStringFromRect(panel.frame),
-            panel.isVisible ? "true" : "false",
-            self.targetApplication?.localizedName ?? "none"
+            display: display
         )
     }
 

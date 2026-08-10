@@ -1,6 +1,7 @@
 <p align="center">
-  <img src="Assets.xcassets/AppIcon.appiconset/icon-256.png" width="128" height="128" alt="ClipDeck 图标">
+  <img src="mac/Assets.xcassets/AppIcon.appiconset/icon-256.png" width="128" height="128" alt="ClipDeck 图标">
 </p>
+
 
 <h1 align="center">ClipDeck</h1>
 

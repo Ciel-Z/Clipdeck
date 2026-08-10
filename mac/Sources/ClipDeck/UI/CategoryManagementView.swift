@@ -227,28 +227,43 @@ final class CategoryManager: ObservableObject {
     }
 }
 
-struct CategoryManagementView: View {
-    private enum SettingsPane {
-        case general
-        case images
-        case keyboard
-        case data
-        case categories
-    }
+private enum SettingsPane {
+    case general
+    case images
+    case keyboard
+    case data
+    case categories
+}
+
+@MainActor
+private final class SettingsNavigation: ObservableObject {
+    @Published var selectedPane: SettingsPane = .general
+}
+
+private struct CategoryManagementView: View {
 
     private enum DataAction {
         case clearCache
         case clearAll
     }
 
+    private struct RetentionOption {
+        let days: Int
+        let title: String
+        let position: Double
+        let isMajor: Bool
+    }
+
     @StateObject var manager: CategoryManager
+    @ObservedObject var navigation: SettingsNavigation
     @StateObject private var launchAtLogin = LaunchAtLoginController()
     @State private var categoryPendingDeletion: ClipboardCategory?
     @State private var pendingDataAction: DataAction?
+    @State private var pendingRetentionDays: Int?
+    @State private var draftRetentionDays: Int?
     @State private var confirmsShortcutReset = false
     @State private var confirmsPresetRestore = false
     @State private var draggedCategoryID: Int64?
-    @State private var selectedPane: SettingsPane = .categories
     @AppStorage(PasteService.preserveFormattingKey) private var preserveFormatting = false
     @AppStorage(AppPreferences.retentionDaysKey) private var retentionDays = 30
     @AppStorage(AppPreferences.recordsImagesKey) private var recordsImages = true
@@ -270,13 +285,13 @@ struct CategoryManagementView: View {
 
             Divider()
 
-            if selectedPane == .general {
+            if navigation.selectedPane == .general {
                 generalSettings
-            } else if selectedPane == .images {
+            } else if navigation.selectedPane == .images {
                 imageSettings
-            } else if selectedPane == .keyboard {
+            } else if navigation.selectedPane == .keyboard {
                 keyboardSettings
-            } else if selectedPane == .data {
+            } else if navigation.selectedPane == .data {
                 dataSettings
             } else {
                 categoryWorkspace
@@ -299,6 +314,25 @@ struct CategoryManagementView: View {
             }
         } message: { category in
             Text("确定删除“\(category.name)”吗？已有历史内容会保留，但会失去这个分类。")
+        }
+        .alert(
+            "缩短历史保留期限？",
+            isPresented: Binding(
+                get: { pendingRetentionDays != nil },
+                set: { if !$0 { pendingRetentionDays = nil } }
+            ),
+            presenting: pendingRetentionDays
+        ) { days in
+            Button("取消", role: .cancel) {
+                pendingRetentionDays = nil
+            }
+            Button("删除并应用", role: .destructive) {
+                retentionDays = days
+                pendingRetentionDays = nil
+                manager.applyRetention(days: days)
+            }
+        } message: { days in
+            Text("将永久删除最近复制时间早于\(retentionTitle(for: days))的历史项目，然后应用新期限。此操作无法撤销。")
         }
         .confirmationDialog(
             pendingDataAction == .clearAll ? "清空全部历史？" : "清空缓存？",
@@ -382,7 +416,7 @@ struct CategoryManagementView: View {
     }
 
     private func sidebarItem(_ title: String, systemImage: String, pane: SettingsPane) -> some View {
-        Button { selectedPane = pane } label: {
+        Button { navigation.selectedPane = pane } label: {
             HStack(spacing: 11) {
                 Image(systemName: systemImage)
                     .font(.system(size: 17, weight: .medium))
@@ -391,11 +425,11 @@ struct CategoryManagementView: View {
                     .font(.system(size: 15, weight: .semibold))
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(selectedPane == pane ? .primary : .secondary)
+            .foregroundStyle(navigation.selectedPane == pane ? .primary : .secondary)
             .padding(.horizontal, 13)
             .frame(height: 42)
             .background(
-                selectedPane == pane ? Color.white.opacity(0.12) : .clear,
+                navigation.selectedPane == pane ? Color.white.opacity(0.12) : .clear,
                 in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -473,18 +507,41 @@ struct CategoryManagementView: View {
                     }
                 }
 
-                settingsSection("历史") {
-                    settingsRow("保留时长") {
-                        HStack(spacing: 7) {
-                            TextField("天数", value: retentionDaysBinding, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 58)
-                            Text("天")
-                                .foregroundStyle(.secondary)
-                            Stepper("", value: retentionDaysBinding, in: 1 ... 90)
-                                .labelsHidden()
+                settingsSection("保留历史") {
+                    VStack(spacing: 0) {
+                        VStack(spacing: 5) {
+                            retentionSlider
+
+                            GeometryReader { geometry in
+                                ForEach(retentionMajorLabels, id: \.title) { marker in
+                                    Text(marker.title)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize()
+                                        .position(
+                                            x: 10 + max(0, geometry.size.width - 20) * marker.position,
+                                            y: 8
+                                        )
+                                }
+                            }
+                            .frame(height: 18)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 15)
+
+                        Divider().padding(.leading, 16)
+
+                        HStack {
+                            Text("期限以项目最近一次复制时间为起点")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("删除历史…", role: .destructive) {
+                                pendingDataAction = .clearAll
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 56)
                     }
                 }
             }
@@ -492,9 +549,6 @@ struct CategoryManagementView: View {
             .padding(.vertical, 26)
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity, alignment: .topLeading)
-        }
-        .onChange(of: retentionDays) { _, days in
-            manager.applyRetention(days: days)
         }
         .onAppear {
             launchAtLogin.refresh()
@@ -674,11 +728,125 @@ struct CategoryManagementView: View {
         )
     }
 
-    private var retentionDaysBinding: Binding<Int> {
+    private var retentionOptions: [RetentionOption] {
+        var options: [RetentionOption] = []
+        for day in 1 ... 6 {
+            let position = Double(day - 1) / 6.0 * 0.25
+            options.append(RetentionOption(
+                days: day,
+                title: "\(day)天",
+                position: position,
+                isMajor: day == 1
+            ))
+        }
+        options.append(RetentionOption(days: 7, title: "1周", position: 0.25, isMajor: true))
+        for week in 2 ... 3 {
+            let position = 0.25 + Double(week - 1) / 3.0 * 0.25
+            options.append(RetentionOption(days: week * 7, title: "\(week)周", position: position, isMajor: false))
+        }
+        options.append(RetentionOption(days: 30, title: "1个月", position: 0.5, isMajor: true))
+        for month in 2 ... 11 {
+            let position = 0.5 + Double(month - 1) / 11.0 * 0.25
+            options.append(RetentionOption(days: month * 30, title: "\(month)个月", position: position, isMajor: false))
+        }
+        options.append(RetentionOption(days: 365, title: "1年", position: 0.75, isMajor: true))
+        options.append(RetentionOption(days: 0, title: "永久", position: 1, isMajor: true))
+        return options
+    }
+
+    private var retentionMajorLabels: [(title: String, position: Double)] {
+        [
+            ("天", 0),
+            ("周", 0.25),
+            ("月", 0.5),
+            ("年", 0.75),
+            ("永久", 1),
+        ]
+    }
+
+    private var retentionOptionIndex: Int {
+        if retentionDays == 0 { return retentionOptions.count - 1 }
+        return retentionOptions.indices.min {
+            abs(retentionOptions[$0].days - retentionDays) < abs(retentionOptions[$1].days - retentionDays)
+        } ?? 2
+    }
+
+    private var displayedRetentionDays: Int {
+        draftRetentionDays ?? retentionDays
+    }
+
+    private var displayedRetentionOptionIndex: Int {
+        if displayedRetentionDays == 0 { return retentionOptions.count - 1 }
+        return retentionOptions.indices.min {
+            abs(retentionOptions[$0].days - displayedRetentionDays)
+                < abs(retentionOptions[$1].days - displayedRetentionDays)
+        } ?? retentionOptionIndex
+    }
+
+    private var retentionSlider: some View {
+        GeometryReader { geometry in
+            let usableWidth = max(0, geometry.size.width - 20)
+            let selectedPosition = retentionOptions[displayedRetentionOptionIndex].position
+            let selectedX = 10 + usableWidth * selectedPosition
+
+            Text(retentionOptions[displayedRetentionOptionIndex].title)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .fixedSize()
+                .position(x: min(max(selectedX, 28), geometry.size.width - 28), y: 9)
+
+            Slider(
+                value: retentionSelectionBinding,
+                in: 0 ... 1,
+                onEditingChanged: { isEditing in
+                    if isEditing {
+                        draftRetentionDays = displayedRetentionDays
+                    } else if let days = draftRetentionDays {
+                        draftRetentionDays = nil
+                        requestRetentionChange(to: days)
+                    }
+                }
+            )
+            .position(x: geometry.size.width / 2, y: 34)
+
+            ForEach(Array(retentionOptions.enumerated()), id: \.offset) { _, option in
+                Circle()
+                    .fill(Color.secondary.opacity(option.isMajor ? 0.65 : 0.32))
+                    .frame(width: option.isMajor ? 3.5 : 2, height: option.isMajor ? 3.5 : 2)
+                    .position(x: 10 + usableWidth * option.position, y: 51)
+            }
+        }
+        .frame(height: 57)
+    }
+
+    private var retentionSelectionBinding: Binding<Double> {
         Binding(
-            get: { retentionDays },
-            set: { retentionDays = min(90, max(1, $0)) }
+            get: { retentionOptions[displayedRetentionOptionIndex].position },
+            set: { value in
+                let index = retentionOptions.indices.min {
+                    abs(retentionOptions[$0].position - value) < abs(retentionOptions[$1].position - value)
+                } ?? retentionOptionIndex
+                draftRetentionDays = retentionOptions[index].days
+            }
         )
+    }
+
+    private func requestRetentionChange(to days: Int) {
+        guard days != retentionDays else { return }
+        let isShorter = retentionDays == 0
+            ? days != 0
+            : days != 0 && days < retentionDays
+        if isShorter {
+            pendingRetentionDays = days
+        } else {
+            retentionDays = days
+        }
+    }
+
+    private func retentionTitle(for days: Int) -> String {
+        if let option = retentionOptions.first(where: { $0.days == days }) {
+            return option.title
+        }
+        return "\(days)天"
     }
 
     private var shortcutKeyCodeBinding: Binding<UInt32> {
@@ -1357,10 +1525,15 @@ struct SyntaxTextEditor: NSViewRepresentable {
 @MainActor
 final class CategorySettingsController: NSWindowController {
     var isVisible: Bool { window?.isVisible == true }
+    private let navigation: SettingsNavigation
 
     init(repository: HistoryRepository, onChange: @escaping () -> Void) {
+        let navigation = SettingsNavigation()
+        self.navigation = navigation
         let manager = CategoryManager(repository: repository, onChange: onChange)
-        let window = NSWindow(contentViewController: NSHostingController(rootView: CategoryManagementView(manager: manager)))
+        let window = NSWindow(contentViewController: NSHostingController(
+            rootView: CategoryManagementView(manager: manager, navigation: navigation)
+        ))
         window.title = "ClipDeck 设置"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 980, height: 680))
@@ -1370,7 +1543,17 @@ final class CategorySettingsController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func show() {
+    func showGeneral() {
+        navigation.selectedPane = .general
+        show()
+    }
+
+    func showCategories() {
+        navigation.selectedPane = .categories
+        show()
+    }
+
+    private func show() {
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }

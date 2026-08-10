@@ -215,6 +215,22 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.searchQuery, "matc")
     }
 
+    func testBackspaceCollapsesSearchAfterDeletingTheLastCharacter() {
+        let store = InMemoryHistoryStore()
+        let original = item("matching")
+        store.insert(original)
+        store.beginSearch()
+        store.searchQuery = "m"
+        store.finishSearchEditing()
+
+        store.resumeSearchEditingAndDeleteBackward()
+
+        XCTAssertFalse(store.isSearchActive)
+        XCTAssertFalse(store.isSearchEditing)
+        XCTAssertEqual(store.searchQuery, "")
+        XCTAssertEqual(store.displayedItems, [original])
+    }
+
     func testPreviewClosesWhenSelectionChanges() {
         let store = InMemoryHistoryStore()
         let older = item("older")

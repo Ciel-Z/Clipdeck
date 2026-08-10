@@ -143,12 +143,18 @@ final class HistoryRepository: @unchecked Sendable {
     func save(_ item: ClipboardItem) throws -> ClipboardItem {
         let now = Self.milliseconds(item.copiedAt)
         let hash = Self.hash(item.payload)
+        let duplicateCutoff: Int64
+        if item.webURL != nil {
+            duplicateCutoff = Self.milliseconds(Calendar.current.startOfDay(for: item.copiedAt))
+        } else {
+            duplicateCutoff = now - duplicateWindowMilliseconds
+        }
         let persisted = try database.writer.write { db -> (id: Int64, title: String, iconData: Data?, previewData: Data?, previewFetched: Bool) in
             let applicationID = try upsertApplication(item.sourceApplication, at: now, in: db)
             if let existingID = try Int64.fetchOne(
                 db,
                 sql: "SELECT id FROM content WHERE content_hash = ? AND last_copied_at >= ? ORDER BY last_copied_at DESC LIMIT 1",
-                arguments: [hash, now - duplicateWindowMilliseconds]
+                arguments: [hash, duplicateCutoff]
             ) {
                 try db.execute(
                     sql: "UPDATE content SET application_id = ?, last_copied_at = ?, copy_count = copy_count + 1, updated_at = ? WHERE id = ?",
@@ -230,23 +236,15 @@ final class HistoryRepository: @unchecked Sendable {
         let matchQuery = Self.ftsQuery(query)
         guard !matchQuery.isEmpty else { return [] }
         return try database.writer.read { db in
-            let rows = try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT content.*, application.bundle_id, application.name AS application_name, application.icon_data,
-                           category.name AS category_name, category.icon AS category_icon, category.script AS category_script,
-                           category.preview_language, category.sort_order
-                    FROM content_fts
-                    JOIN content ON content.id = content_fts.rowid
-                    LEFT JOIN application ON application.id = content.application_id
-                    LEFT JOIN category ON category.id = content.category_id
-                    WHERE content_fts MATCH ?
-                    ORDER BY bm25(content_fts), content.last_copied_at DESC
-                    LIMIT ?
-                    """,
-                arguments: [matchQuery, limit]
-            )
-            return rows.compactMap(Self.item)
+            try Self.searchText(matchQuery: matchQuery, limit: limit, in: db)
+        }
+    }
+
+    func searchTextAsync(_ query: String, limit: Int = 100) async throws -> [ClipboardItem] {
+        let matchQuery = Self.ftsQuery(query)
+        guard !matchQuery.isEmpty else { return [] }
+        return try await database.writer.read { db in
+            try Self.searchText(matchQuery: matchQuery, limit: limit, in: db)
         }
     }
 
@@ -279,8 +277,29 @@ final class HistoryRepository: @unchecked Sendable {
         }
     }
 
+    private static func searchText(matchQuery: String, limit: Int, in db: Database) throws -> [ClipboardItem] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT content.*, application.bundle_id, application.name AS application_name, application.icon_data,
+                       category.name AS category_name, category.icon AS category_icon, category.script AS category_script,
+                       category.preview_language, category.sort_order
+                FROM content_fts
+                JOIN content ON content.id = content_fts.rowid
+                LEFT JOIN application ON application.id = content.application_id
+                LEFT JOIN category ON category.id = content.category_id
+                WHERE content_fts MATCH ?
+                ORDER BY bm25(content_fts), content.last_copied_at DESC
+                LIMIT ?
+                """,
+            arguments: [matchQuery, limit]
+        )
+        return rows.compactMap(Self.item)
+    }
+
     @discardableResult
     func deleteExpired(retentionDays: Int = 30) throws -> Int {
+        guard retentionDays > 0 else { return 0 }
         let cutoff = Self.milliseconds(Date().addingTimeInterval(-Double(retentionDays) * 86_400))
         return try database.writer.write { db in
             var total = 0
@@ -326,9 +345,10 @@ final class HistoryRepository: @unchecked Sendable {
 
     private func reclaimDatabaseSpace() throws {
         try database.writer.writeWithoutTransaction { db in
-            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
             try db.execute(sql: "VACUUM")
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
         }
+        database.releaseMemory()
     }
 
     private func upsertApplication(_ application: SourceApplication, at now: Int64, in db: Database) throws -> Int64 {

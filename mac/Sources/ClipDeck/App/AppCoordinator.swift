@@ -1,29 +1,20 @@
 import AppKit
 
-private final class StatusItemInteractionView: NSView {
-    var onLeftClick: (() -> Void)?
-    var onRightClick: ((NSEvent) -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        onLeftClick?()
-    }
-
-    override func mouseUp(with event: NSEvent) {}
-
-    override func rightMouseDown(with event: NSEvent) {
-        onRightClick?(event)
-    }
-
-    override func rightMouseUp(with event: NSEvent) {}
-}
-
 @MainActor
 final class AppCoordinator: NSObject, NSApplicationDelegate {
     private let store = InMemoryHistoryStore()
     private let repository: HistoryRepository?
     private let classifier: ClassificationService?
-    private lazy var monitor = ClipboardMonitor(store: store, repository: repository, classifier: classifier)
-    private let pasteService = PasteService()
+    private let feedbackSoundPlayer = FeedbackSoundPlayer()
+    private lazy var monitor = ClipboardMonitor(
+        store: store,
+        repository: repository,
+        classifier: classifier,
+        onCapture: { [weak self] in self?.feedbackSoundPlayer.playCopy() }
+    )
+    private lazy var pasteService = PasteService(
+        onPasteKeystroke: { [weak self] in self?.feedbackSoundPlayer.playPaste() }
+    )
     private var panelController: PanelController!
     private var hotKeyController: GlobalHotKeyController!
     private var statusItem: NSStatusItem!
@@ -32,6 +23,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var searchTask: Task<Void, Never>?
     private var hotKeyRegistration: GlobalHotKeyController.RegistrationResult = .registered
     private var shortcutObserver: NSObjectProtocol?
+    private var localKeyMonitor: Any?
+    private var statusItemMouseMonitor: Any?
 
     override init() {
         AppPreferences.registerDefaults()
@@ -84,7 +77,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onPaste: { [weak self] item, forcePlainText in
                 self?.pasteSelection(item, forcePlainText: forcePlainText)
             },
-            onManageCategories: { [weak self] in self?.showCategorySettings() },
+            onManageCategories: { [weak self] in self?.showCategorySettings(selectCategories: true) },
             onSearch: { [weak self] query in self?.performSearch(query) }
         )
         NSLog("ClipDeck panel controller created")
@@ -97,7 +90,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         monitor.start()
         NSLog("ClipDeck clipboard monitor started")
         loadPersistedHistory()
+        panelController.prepareForFirstPresentation()
         configureStatusItem()
+        configureApplicationShortcuts()
         NSLog("ClipDeck status item configured")
 
         if isInterfaceCheck {
@@ -139,7 +134,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showCategorySettings() {
+    private func showCategorySettings(selectCategories: Bool = false) {
         guard let repository else { return }
         rememberFrontmostExternalApplication()
         if let target = panelController.targetApplication,
@@ -153,13 +148,23 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             }
         }
         panelController.hide()
-        categorySettingsController?.show()
+        if selectCategories {
+            categorySettingsController?.showCategories()
+        } else {
+            categorySettingsController?.showGeneral()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         searchTask?.cancel()
         monitor.stop()
         hotKeyController.unregister()
+        if let localKeyMonitor {
+            NSEvent.removeMonitor(localKeyMonitor)
+        }
+        if let statusItemMouseMonitor {
+            NSEvent.removeMonitor(statusItemMouseMonitor)
+        }
     }
 
     private func pasteSelection(_ item: ClipboardItem, forcePlainText: Bool = false) {
@@ -206,21 +211,47 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         button.imagePosition = .imageOnly
         button.target = nil
         button.action = nil
-        let interactionView = StatusItemInteractionView(frame: button.bounds)
-        interactionView.autoresizingMask = [.width, .height]
-        interactionView.toolTip = "左键显示 ClipDeck，右键打开菜单"
-        interactionView.onLeftClick = { [weak self] in
-            NSLog("ClipDeck panel toggled from status item left click")
-            self?.toggleDeck()
-        }
-        interactionView.onRightClick = { [weak self, weak button] event in
-            guard let self, let button else { return }
-            NSMenu.popUpContextMenu(self.makeStatusMenu(), with: event, for: button)
-        }
-        button.addSubview(interactionView)
         button.toolTip = "左键显示 ClipDeck，右键打开菜单"
         if case let .failed(status) = hotKeyRegistration {
             button.toolTip = "全局快捷键注册失败：\(status)"
+        }
+
+        statusItemMouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self, weak button] event in
+            guard let self,
+                  let button,
+                  event.window === button.window,
+                  button.bounds.contains(button.convert(event.locationInWindow, from: nil)) else {
+                return event
+            }
+
+            if event.type == .rightMouseDown {
+                NSMenu.popUpContextMenu(self.makeStatusMenu(), with: event, for: button)
+                return nil
+            }
+
+            // Command-drag is owned by macOS so the status item can be repositioned.
+            guard !event.modifierFlags.contains(.command) else {
+                return event
+            }
+
+            self.toggleDeckFromStatusItem()
+            return nil
+        }
+    }
+
+    private func toggleDeckFromStatusItem() {
+        NSLog("ClipDeck panel toggled from status item left click")
+        toggleDeck()
+    }
+
+    private func configureApplicationShortcuts() {
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            guard event.keyCode == 43, modifiers == .command else { return event }
+            self?.showCategorySettings()
+            return nil
         }
     }
 
@@ -280,7 +311,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
         searchTask = Task { [weak self] in
             do {
-                let results = try await Task.detached { try repository.searchText(trimmed) }.value
+                try await Task.sleep(for: .milliseconds(120))
+                let results = try await repository.searchTextAsync(trimmed)
                 guard !Task.isCancelled,
                       let self,
                       self.store.isSearchActive,
