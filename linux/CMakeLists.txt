@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
 
-find_package(Qt5 5.11 REQUIRED COMPONENTS Core Gui Widgets Sql X11Extras)
+find_package(Qt5 5.11 REQUIRED COMPONENTS Core Gui Widgets Network Sql Qml X11Extras)
 find_package(X11 REQUIRED)
 find_library(XTST_LIBRARY Xtst)
 
@@ -28,7 +28,9 @@ target_link_libraries(clipdeck-linux PRIVATE
   Qt5::Core
   Qt5::Gui
   Qt5::Widgets
+  Qt5::Network
   Qt5::Sql
+  Qt5::Qml
   Qt5::X11Extras
   ${X11_LIBRARIES}
   ${XTST_LIBRARY}

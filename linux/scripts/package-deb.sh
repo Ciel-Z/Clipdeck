@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 build_dir="${repo_root}/linux/.build/amd64-release"
 artifact_dir="${repo_root}/artifacts/linux"
-package_version="${CLIPDECK_VERSION:-0.3.0~preview5}"
+package_version="${CLIPDECK_VERSION:-0.3.0~preview7}"
 
 cmake -S "${repo_root}/linux" -B "${build_dir}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -58,7 +58,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: ClipDeck Contributors
-Depends: libc6 (>= 2.28), libdbus-1-3, libfontconfig1, libfreetype6, libgcc1, libgl1, libglib2.0-0, libharfbuzz0b, libice6, libjpeg62-turbo, libpng16-16, libsm6, libstdc++6, libx11-6, libx11-xcb1, libxdamage1, libxext6, libxfixes3, libxi6, libxrender1, libxtst6, libxcb1, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-util0, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0
+Depends: ca-certificates, libc6 (>= 2.28), libdbus-1-3, libfontconfig1, libfreetype6, libgcc1, libgl1, libglib2.0-0, libharfbuzz0b, libice6, libjpeg62-turbo, libpng16-16, libsm6, libstdc++6, libx11-6, libx11-xcb1, libxdamage1, libxext6, libxfixes3, libxi6, libxrender1, libxtst6, libxcb1, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-util0, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0
 Description: ClipDeck clipboard history for UOS
  A native clipboard history Deck for UOS with persistent text and image history,
  automatic categories, search, editing and X11 automatic paste through Ctrl+V.

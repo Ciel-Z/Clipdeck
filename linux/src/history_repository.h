@@ -18,6 +18,9 @@ struct ClipboardItem {
     ClipboardPayloadType type = ClipboardPayloadType::Text;
     QString text;
     QString richTextHtml;
+    QByteArray linkIconData;
+    QByteArray linkPreviewData;
+    bool hasFetchedLinkPreview = false;
     QByteArray imageData;
     QImage image;
     QString sourceID;
@@ -25,6 +28,8 @@ struct ClipboardItem {
     QByteArray sourceIconData;
     QImage sourceIcon;
     QString category;
+    QString categoryIcon;
+    QString previewLanguage;
     QDateTime copiedAt;
     int copyCount = 1;
 
@@ -32,9 +37,18 @@ struct ClipboardItem {
     bool isImage() const { return type == ClipboardPayloadType::Image; }
 };
 
+struct ClipboardCategory {
+    qint64 databaseID = -1;
+    QString name;
+    QString icon;
+    QString script;
+    QString previewLanguage;
+    int sortOrder = 0;
+};
+
 class HistoryRepository final {
 public:
-    HistoryRepository();
+    explicit HistoryRepository(const QString &databasePath = QString());
     ~HistoryRepository();
 
     bool isOpen() const;
@@ -46,12 +60,31 @@ public:
     bool updateTitle(qint64 id, const QString &title);
     bool updateText(qint64 id, const QString &text, const QString &category);
     bool updateImage(qint64 id, const QByteArray &pngData, const QImage &image);
+    bool updateLinkMetadata(qint64 id, const QString &title, const QByteArray &iconData,
+                            const QByteArray &previewData);
     bool remove(qint64 id);
     int clearExpired(int retentionDays);
+    int clearExpiredAndReclaim(int retentionDays);
     int clearAll();
     qint64 databaseByteCount() const;
 
-    static QString classifyText(const QString &text);
+    QVector<ClipboardCategory> categories() const;
+    bool createCategory(const QString &name, const QString &icon, const QString &script,
+                        const QString &previewLanguage);
+    bool updateCategory(qint64 id, const QString &name, const QString &icon,
+                        const QString &script, const QString &previewLanguage);
+    bool removeCategory(qint64 id);
+    bool reorderCategories(const QVector<qint64> &ids);
+    bool restoreDefaultCategories();
+    QString classifyText(const QString &text, const QString &sourceID = QString(),
+                         const QString &sourceName = QString(),
+                         const QDateTime &copiedAt = QDateTime()) const;
+    QString categoryScriptError(const QString &script) const;
+    bool categoryScriptMatches(const QString &script, const QString &text,
+                               const QString &previewLanguage,
+                               QString *error = nullptr) const;
+    static QString detectedCodeLanguage(const QString &text, int *score = nullptr);
+
     static QStringList presetCategories();
 
 private:
@@ -59,9 +92,11 @@ private:
     static QByteArray contentHash(const ClipboardItem &item);
     static ClipboardItem itemFromQuery(const class QSqlQuery &query);
     bool execute(const QString &sql) const;
+    static QString classifyBuiltinText(const QString &text);
 
     QString connectionName_;
     QString databasePath_;
     mutable QString lastError_;
     QSqlDatabase database_;
+    bool ready_ = false;
 };

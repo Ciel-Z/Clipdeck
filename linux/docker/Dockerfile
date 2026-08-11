@@ -32,6 +32,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ninja-build \
       pkg-config \
       qtbase5-dev \
+      qtdeclarative5-dev \
       libqt5svg5 \
       libqt5sql5-sqlite \
       libqt5x11extras5-dev \
