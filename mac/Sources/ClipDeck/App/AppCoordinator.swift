@@ -21,6 +21,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var categorySettingsController: CategorySettingsController?
     private var lastExternalApplication: NSRunningApplication?
     private var searchTask: Task<Void, Never>?
+    private var historyLoadTask: Task<Void, Never>?
     private var hotKeyRegistration: GlobalHotKeyController.RegistrationResult = .registered
     private var shortcutObserver: NSObjectProtocol?
     private var localKeyMonitor: Any?
@@ -100,36 +101,59 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        panelController?.focusVisiblePanel()
+    }
+
     private func loadPersistedHistory() {
         guard let repository else { return }
-        Task.detached(priority: .utility) { [weak store] in
+        historyLoadTask?.cancel()
+        historyLoadTask = Task.detached(priority: .userInitiated) { [weak self, weak store] in
             do {
-                _ = try repository.deleteExpired(retentionDays: AppPreferences.retentionDays)
-                let items = try repository.fetchRecent()
                 let categories = try repository.fetchCategories()
+                guard !Task.isCancelled else { return }
+                await MainActor.run { store?.replaceCategories(categories) }
+
+                let priorityItems = try repository.fetchRecent(limit: 20)
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    store?.replaceCategories(categories)
-                    store?.replaceItems(items)
+                    store?.replaceItems(priorityItems)
+                    self?.refreshLinkMetadata(for: priorityItems)
                 }
-                for item in items.prefix(20)
-                    where item.webURL != nil
-                        && (!item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本") {
-                    guard let url = item.webURL else { continue }
-                    let itemID = item.id
-                    Task.detached(priority: .utility) { [weak store] in
-                        let metadata = await LinkMetadataService.fetch(for: url)
+
+                Task.detached(priority: .background) { [weak store] in
+                    do {
+                        _ = try repository.deleteExpired(retentionDays: AppPreferences.retentionDays)
+                        let remainingItems = try repository.fetchRecent()
                         await MainActor.run {
-                            store?.updateLinkMetadata(
-                                itemID: itemID,
-                                title: metadata.title,
-                                iconData: metadata.iconData,
-                                previewData: metadata.previewData
-                            )
+                            store?.expandPersistedItems(remainingItems)
                         }
+                    } catch {
+                        NSLog("ClipDeck failed to finish background history loading: %@", String(describing: error))
                     }
                 }
             } catch {
                 NSLog("ClipDeck failed to load persisted history: %@", String(describing: error))
+            }
+        }
+    }
+
+    private func refreshLinkMetadata(for items: [ClipboardItem]) {
+        let historyStore = store
+        for item in items where item.webURL != nil
+            && (!item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本") {
+            guard let url = item.webURL else { continue }
+            let itemID = item.id
+            Task.detached(priority: .utility) { [weak historyStore] in
+                let metadata = await LinkMetadataService.fetch(for: url)
+                await MainActor.run {
+                    historyStore?.updateLinkMetadata(
+                        itemID: itemID,
+                        title: metadata.title,
+                        iconData: metadata.iconData,
+                        previewData: metadata.previewData
+                    )
+                }
             }
         }
     }
@@ -157,6 +181,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         searchTask?.cancel()
+        historyLoadTask?.cancel()
         monitor.stop()
         hotKeyController.unregister()
         if let localKeyMonitor {
@@ -201,12 +226,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         guard let button = statusItem.button else { return }
-        let statusIcon = NSImage(
-            systemSymbolName: "chevron.left.forwardslash.chevron.right",
-            accessibilityDescription: "ClipDeck"
-        )?.withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
-        statusIcon?.isTemplate = true
-        button.image = statusIcon
+        button.image = makeStatusBarIcon()
         button.imageScaling = .scaleProportionallyDown
         button.imagePosition = .imageOnly
         button.target = nil
@@ -236,9 +256,64 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 return event
             }
 
-            self.toggleDeckFromStatusItem()
+            // The status button can reclaim key status while its mouse-down is
+            // still being dispatched. Present on the next run-loop turn so the
+            // Deck remains the focused window after a left click.
+            DispatchQueue.main.async { [weak self] in
+                self?.toggleDeckFromStatusItem()
+            }
             return nil
         }
+    }
+
+    private func makeStatusBarIcon() -> NSImage? {
+        let logicalSize = NSSize(width: 18, height: 18)
+        if let url = Bundle.main.url(forResource: "clipdeck", withExtension: "svg"),
+           let source = NSImage(contentsOf: url) {
+            // AppKit's SVG representation can fail to redraw after an Xcode
+            // relaunch. Rasterize it once and retain the pixels on the status
+            // item instead of relying on the lazy SVG representation.
+            let scale = max(2, NSScreen.main?.backingScaleFactor ?? 2)
+            let pixelWidth = Int(logicalSize.width * scale)
+            let pixelHeight = Int(logicalSize.height * scale)
+            if let representation = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: pixelWidth,
+                pixelsHigh: pixelHeight,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ), let context = NSGraphicsContext(bitmapImageRep: representation) {
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = context
+                context.imageInterpolation = .high
+                source.draw(
+                    in: NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight),
+                    from: .zero,
+                    operation: .sourceOver,
+                    fraction: 1
+                )
+                NSGraphicsContext.restoreGraphicsState()
+
+                representation.size = logicalSize
+                let image = NSImage(size: logicalSize)
+                image.addRepresentation(representation)
+                image.isTemplate = false
+                return image
+            }
+        }
+
+        let fallback = NSImage(
+            systemSymbolName: "chevron.left.forwardslash.chevron.right",
+            accessibilityDescription: "ClipDeck"
+        )
+        fallback?.size = logicalSize
+        fallback?.isTemplate = true
+        return fallback
     }
 
     private func toggleDeckFromStatusItem() {

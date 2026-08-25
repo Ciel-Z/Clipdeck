@@ -100,4 +100,5 @@ enum AppPreferences {
 
 extension Notification.Name {
     static let clipDeckShortcutChanged = Notification.Name("clipDeckShortcutChanged")
+    static let clipDeckPreviewScroll = Notification.Name("ClipDeck.previewScroll")
 }

@@ -19,6 +19,8 @@ final class ClassificationService: @unchecked Sendable {
             copiedAt: item.copiedAt
         )
 
+        var categoryErrors: [(categoryID: Int64, message: String?)] = []
+        var matchedCategory: ClipboardCategory?
         for category in try repository.fetchCategories() {
             let categoryInput = Self.input(
                 input,
@@ -26,12 +28,14 @@ final class ClassificationService: @unchecked Sendable {
                 text: text
             )
             let result = Self.evaluate(category.script, input: categoryInput)
-            try repository.recordCategoryError(result.error, for: category.id)
+            categoryErrors.append((category.id, result.error))
             if result.matches {
-                return try repository.assignCategory(category, to: item)
+                matchedCategory = category
+                break
             }
         }
-        return try repository.assignCategory(nil, to: item)
+        try repository.recordCategoryErrors(categoryErrors)
+        return try repository.assignCategory(matchedCategory, to: item)
     }
 
     static func test(script: String, text: String, previewLanguage: String? = nil) -> (matches: Bool, error: String?) {

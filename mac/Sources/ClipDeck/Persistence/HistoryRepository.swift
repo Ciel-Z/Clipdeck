@@ -4,7 +4,7 @@ import GRDB
 
 final class HistoryRepository: @unchecked Sendable {
     private let database: ClipDeckDatabase
-    private let duplicateWindowMilliseconds: Int64 = 10_000
+    private let duplicateWindowMilliseconds: Int64 = 24 * 60 * 60 * 1_000
 
     init(database: ClipDeckDatabase) {
         self.database = database
@@ -124,6 +124,7 @@ final class HistoryRepository: @unchecked Sendable {
             linkIconData: item.linkIconData,
             linkPreviewData: item.linkPreviewData,
             hasFetchedLinkPreview: item.hasFetchedLinkPreview,
+            imageAngle: item.imageAngle,
             payload: item.payload,
             sourceApplication: item.sourceApplication,
             category: category,
@@ -131,25 +132,34 @@ final class HistoryRepository: @unchecked Sendable {
         )
     }
 
-    func recordCategoryError(_ message: String?, for categoryID: Int64) throws {
+    func recordCategoryErrors(_ errors: [(categoryID: Int64, message: String?)]) throws {
+        guard !errors.isEmpty else { return }
         try database.writer.write { db in
-            try db.execute(
-                sql: "UPDATE category SET last_error_message = ?, last_error_at = ?, updated_at = ? WHERE id = ?",
-                arguments: [message, message == nil ? nil : Self.milliseconds(Date()), Self.milliseconds(Date()), categoryID]
-            )
+            let now = Self.milliseconds(Date())
+            for error in errors {
+                try db.execute(
+                    sql: """
+                        UPDATE category
+                        SET last_error_message = ?, last_error_at = ?, updated_at = ?
+                        WHERE id = ? AND last_error_message IS NOT ?
+                        """,
+                    arguments: [
+                        error.message,
+                        error.message == nil ? nil : now,
+                        now,
+                        error.categoryID,
+                        error.message,
+                    ]
+                )
+            }
         }
     }
 
     func save(_ item: ClipboardItem) throws -> ClipboardItem {
         let now = Self.milliseconds(item.copiedAt)
         let hash = Self.hash(item.payload)
-        let duplicateCutoff: Int64
-        if item.webURL != nil {
-            duplicateCutoff = Self.milliseconds(Calendar.current.startOfDay(for: item.copiedAt))
-        } else {
-            duplicateCutoff = now - duplicateWindowMilliseconds
-        }
-        let persisted = try database.writer.write { db -> (id: Int64, title: String, iconData: Data?, previewData: Data?, previewFetched: Bool) in
+        let duplicateCutoff = now - duplicateWindowMilliseconds
+        let persisted = try database.writer.write { db -> (id: Int64, title: String, iconData: Data?, previewData: Data?, previewFetched: Bool, imageAngle: Int) in
             let applicationID = try upsertApplication(item.sourceApplication, at: now, in: db)
             if let existingID = try Int64.fetchOne(
                 db,
@@ -180,7 +190,12 @@ final class HistoryRepository: @unchecked Sendable {
                     sql: "SELECT link_preview_fetched FROM content WHERE id = ?",
                     arguments: [existingID]
                 ) ?? false
-                return (existingID, existingTitle, existingIcon, existingPreview, previewFetched)
+                let imageAngle = try Int.fetchOne(
+                    db,
+                    sql: "SELECT image_angle FROM content WHERE id = ?",
+                    arguments: [existingID]
+                ) ?? 0
+                return (existingID, existingTitle, existingIcon, existingPreview, previewFetched, imageAngle)
             }
 
             let values = Self.databaseValues(item.payload)
@@ -188,26 +203,28 @@ final class HistoryRepository: @unchecked Sendable {
                 sql: """
                     INSERT INTO content (
                         title, link_icon_data, link_preview_data, link_preview_fetched, content_type, plain_text, rich_text, rich_text_type,
-                        image_data, image_width, image_height, image_format,
+                        image_data, image_width, image_height, image_format, image_angle,
                         content_hash, content_size, application_id,
                         copied_at, last_copied_at, copy_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
                 arguments: [
                     item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
                     values.type, values.plainText, values.richText, values.richTextType,
-                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat,
+                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle,
                     hash, values.size, applicationID, now, now, now, now,
                 ]
             )
-            return (db.lastInsertedRowID, item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview)
+            return (db.lastInsertedRowID, item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview, item.imageAngle)
         }
         return ClipboardItem(
+            id: item.id,
             databaseID: persisted.id,
             title: persisted.title,
             linkIconData: persisted.iconData,
             linkPreviewData: persisted.previewData,
             hasFetchedLinkPreview: persisted.previewFetched,
+            imageAngle: persisted.imageAngle,
             payload: item.payload,
             sourceApplication: item.sourceApplication,
             copiedAt: item.copiedAt
@@ -263,14 +280,14 @@ final class HistoryRepository: @unchecked Sendable {
                 sql: """
                     UPDATE content SET
                         title = ?, link_icon_data = ?, link_preview_data = ?, link_preview_fetched = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
-                        image_data = ?, image_width = ?, image_height = ?, image_format = ?,
+                        image_data = ?, image_width = ?, image_height = ?, image_format = ?, image_angle = ?,
                         content_hash = ?, content_size = ?, updated_at = ?
                     WHERE id = ?
                     """,
                 arguments: [
                     item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
                     values.type, values.plainText, values.richText, values.richTextType,
-                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat,
+                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle,
                     Self.hash(item.payload), values.size, Self.milliseconds(Date()), databaseID,
                 ]
             )
@@ -384,6 +401,7 @@ final class HistoryRepository: @unchecked Sendable {
             linkIconData: row["link_icon_data"],
             linkPreviewData: row["link_preview_data"],
             hasFetchedLinkPreview: row["link_preview_fetched"],
+            imageAngle: row["image_angle"] ?? 0,
             payload: payload,
             sourceApplication: SourceApplication(
                 bundleIdentifier: row["bundle_id"],

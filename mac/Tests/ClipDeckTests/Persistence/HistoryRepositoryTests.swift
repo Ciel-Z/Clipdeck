@@ -28,19 +28,44 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.fetchRecent().count, 1)
     }
 
-    func testRecentDuplicateUpdatesExistingRow() throws {
+    func testImageAnglePersistsWithoutReencodingImageData() throws {
         let repository = try makeRepository()
-        _ = try repository.save(ClipboardItem(payload: .text(plainText: "same", rtfData: nil), sourceApplication: source))
-        _ = try repository.save(ClipboardItem(payload: .text(plainText: "same", rtfData: nil), sourceApplication: source))
+        let data = Data([6, 7, 8, 9])
+        let saved = try repository.save(ClipboardItem(
+            imageAngle: 90,
+            payload: .image(data: data, width: 2, height: 1, format: .png),
+            sourceApplication: source
+        ))
 
+        let restored = try XCTUnwrap(try repository.fetchRecent().first)
+        XCTAssertEqual(restored.databaseID, saved.databaseID)
+        XCTAssertEqual(restored.imageAngle, 90)
+        XCTAssertEqual(restored.payload, saved.payload)
+    }
+
+    func testDuplicateWithin24HoursUpdatesExistingRow() throws {
+        let repository = try makeRepository()
+        let now = Date()
+        let first = try repository.save(ClipboardItem(
+            payload: .text(plainText: "same", rtfData: nil),
+            sourceApplication: source,
+            copiedAt: now.addingTimeInterval(-23 * 60 * 60)
+        ))
+        let repeated = try repository.save(ClipboardItem(
+            payload: .text(plainText: "same", rtfData: nil),
+            sourceApplication: source,
+            copiedAt: now
+        ))
+
+        XCTAssertEqual(repeated.databaseID, first.databaseID)
         XCTAssertEqual(try repository.fetchRecent().count, 1)
     }
 
-    func testSameDayLinkCopyReusesFetchedMetadata() throws {
+    func testLinkCopyWithin24HoursAcrossMidnightReusesFetchedMetadata() throws {
         let repository = try makeRepository()
         let startOfToday = Calendar.current.startOfDay(for: Date())
-        let firstCopyDate = startOfToday.addingTimeInterval(3_600)
-        let secondCopyDate = startOfToday.addingTimeInterval(7_200)
+        let firstCopyDate = startOfToday.addingTimeInterval(-3_600)
+        let secondCopyDate = startOfToday.addingTimeInterval(3_600)
         let first = try repository.save(ClipboardItem(
             title: "Example",
             linkIconData: Data([1, 2, 3]),
@@ -65,22 +90,22 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.fetchRecent().count, 1)
     }
 
-    func testLinkCopyOnAnotherDayCreatesANewRecord() throws {
+    func testDuplicateAfter24HoursCreatesANewRecord() throws {
         let repository = try makeRepository()
-        let startOfToday = Calendar.current.startOfDay(for: Date())
+        let now = Date()
         _ = try repository.save(ClipboardItem(
-            title: "Yesterday",
+            title: "Older copy",
             linkIconData: Data([1]),
             hasFetchedLinkPreview: true,
             payload: .text(plainText: "https://example.com/page", rtfData: nil),
             sourceApplication: source,
-            copiedAt: startOfToday.addingTimeInterval(-3_600)
+            copiedAt: now.addingTimeInterval(-(24 * 60 * 60 + 1))
         ))
 
         _ = try repository.save(ClipboardItem(
             payload: .text(plainText: "https://example.com/page", rtfData: nil),
             sourceApplication: source,
-            copiedAt: startOfToday.addingTimeInterval(3_600)
+            copiedAt: now
         ))
 
         XCTAssertEqual(try repository.fetchRecent().count, 2)

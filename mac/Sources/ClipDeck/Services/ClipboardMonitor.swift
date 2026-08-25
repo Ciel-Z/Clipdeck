@@ -286,7 +286,11 @@ final class ClipboardMonitor {
     private let classifier: ClassificationService?
     private let onCapture: @MainActor () -> Void
     private let reader = ClipboardReader()
-    private let processingQueue = DispatchQueue(label: "app.clipdeck.clipboard-reader", qos: .utility)
+    private let readerQueue = DispatchQueue(label: "app.clipdeck.clipboard-reader", qos: .userInitiated)
+    private let persistenceQueue = DispatchQueue(
+        label: "app.clipdeck.clipboard-persistence",
+        qos: .utility
+    )
     private var timer: Timer?
     private var lastChangeCount = NSPasteboard.general.changeCount
     private var ignoredChangeCount: Int?
@@ -305,7 +309,7 @@ final class ClipboardMonitor {
 
     func start() {
         guard timer == nil else { return }
-        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.poll()
             }
@@ -336,10 +340,26 @@ final class ClipboardMonitor {
         }
 
         let sourceApplication = Self.frontmostApplication()
-        processingQueue.async { [reader, repository, classifier] in
+        readerQueue.async { [reader] in
             autoreleasepool {
                 guard let payload = reader.read() else { return }
                 let capturedItem = ClipboardItem(payload: payload, sourceApplication: sourceApplication)
+                // Make capture feedback independent from disk and JavaScript
+                // classification latency. The persisted form keeps this UUID and
+                // replaces the transient item in place when background work ends.
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.store.insert(capturedItem)
+                    self.onCapture()
+                    self.persistAndClassify(capturedItem)
+                }
+            }
+        }
+    }
+
+    private func persistAndClassify(_ capturedItem: ClipboardItem) {
+        persistenceQueue.async { [weak self, repository, classifier] in
+            autoreleasepool {
                 let item: ClipboardItem
                 do {
                     let savedItem = try repository?.save(capturedItem) ?? capturedItem
@@ -349,21 +369,30 @@ final class ClipboardMonitor {
                     item = capturedItem
                 }
                 Task { @MainActor [weak self] in
-                    self?.store.insert(item)
-                    self?.onCapture()
-                }
-                if let url = item.webURL,
-                   !item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本" {
-                    let itemID = item.id
-                    Task.detached(priority: .utility) {
-                        let metadata = await LinkMetadataService.fetch(for: url)
-                        await MainActor.run { [weak self] in
-                            self?.store.updateLinkMetadata(
-                                itemID: itemID,
-                                title: metadata.title,
-                                iconData: metadata.iconData,
-                                previewData: metadata.previewData
-                            )
+                    guard let self else { return }
+                    let reconciliation = self.store.reconcileCapturedItem(item)
+                    if reconciliation == .removed {
+                        if item.databaseID != nil, let repository {
+                            Task.detached(priority: .utility) {
+                                try? repository.delete(item)
+                            }
+                        }
+                        return
+                    }
+                    guard reconciliation == .reconciled else { return }
+                    if let url = item.webURL,
+                       !item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本" {
+                        let itemID = item.id
+                        Task.detached(priority: .utility) { [weak self] in
+                            let metadata = await LinkMetadataService.fetch(for: url)
+                            await MainActor.run {
+                                self?.store.updateLinkMetadata(
+                                    itemID: itemID,
+                                    title: metadata.title,
+                                    iconData: metadata.iconData,
+                                    previewData: metadata.previewData
+                                )
+                            }
                         }
                     }
                 }

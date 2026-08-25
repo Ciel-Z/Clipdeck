@@ -84,6 +84,10 @@ final class PasteService {
             }
             return didWrite
         case let .image(data, _, _, format):
+            if item.imageAngle != 0,
+               let rendered = ImageRotation.render(data, angle: item.imageAngle) {
+                return pasteboard.setData(rendered.data, forType: .png)
+            }
             let type: NSPasteboard.PasteboardType = format == .png ? .png : .tiff
             return pasteboard.setData(data, forType: type)
         }

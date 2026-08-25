@@ -7,6 +7,12 @@ enum HistoryCategory: Hashable {
     case automatic(Int64)
 }
 
+enum CaptureReconciliation: Equatable {
+    case reconciled
+    case superseded
+    case removed
+}
+
 @MainActor
 final class InMemoryHistoryStore: ObservableObject {
     @Published private(set) var items: [ClipboardItem] = []
@@ -20,7 +26,14 @@ final class InMemoryHistoryStore: ObservableObject {
     @Published private(set) var selectedCategory: HistoryCategory = .all
     @Published private(set) var selectionRevealToken = 0
     @Published private(set) var automaticCategories: [ClipboardCategory] = []
-    @Published var searchQuery = ""
+    @Published var searchQuery = "" {
+        didSet {
+            if oldValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                selectedCategory = .all
+            }
+        }
+    }
     @Published private(set) var searchResults: [ClipboardItem] = []
     @Published private(set) var isSearchActive = false
     @Published private(set) var isSearchEditing = false
@@ -38,9 +51,35 @@ final class InMemoryHistoryStore: ObservableObject {
         self.capacity = max(1, capacity)
     }
 
-    func replaceItems(_ items: [ClipboardItem]) {
+    func replaceItems(_ items: [ClipboardItem], preservingSelection: Bool = false) {
+        let previousSelection = selectedItemID
         self.items = Array(items.prefix(capacity))
-        selectedItemID = self.items.first?.id
+        selectedItemID = preservingSelection
+            && self.items.contains(where: { $0.id == previousSelection })
+            ? previousSelection
+            : self.items.first?.id
+    }
+
+    func expandPersistedItems(_ persistedItems: [ClipboardItem]) {
+        let previousSelection = selectedItemID
+        let currentByDatabaseID = Dictionary(
+            uniqueKeysWithValues: items.compactMap { item in
+                item.databaseID.map { ($0, item) }
+            }
+        )
+        let transientItems = items.filter { $0.databaseID == nil }
+        let resolvedPersistedItems = persistedItems.map { item in
+            guard let databaseID = item.databaseID else { return item }
+            return currentByDatabaseID[databaseID] ?? item
+        }
+        self.items = Array(
+            (transientItems + resolvedPersistedItems)
+                .sorted { $0.copiedAt > $1.copiedAt }
+                .prefix(capacity)
+        )
+        selectedItemID = self.items.contains(where: { $0.id == previousSelection })
+            ? previousSelection
+            : self.items.first?.id
     }
 
     func replaceCategories(_ categories: [ClipboardCategory]) {
@@ -85,6 +124,23 @@ final class InMemoryHistoryStore: ObservableObject {
         }
         selectedCategory = .all
         selectedItemID = item.id
+    }
+
+    /// Replaces the immediately displayed transient capture with its persisted,
+    /// classified form without moving the card or changing its selection.
+    /// Distinguishes a user deletion from a newer capture of the same payload so
+    /// persistence cleanup cannot delete the newer duplicate's shared row.
+    func reconcileCapturedItem(_ item: ClipboardItem) -> CaptureReconciliation {
+        guard let index = items.firstIndex(where: { $0.id == item.id }) else {
+            return items.contains(where: { $0.payload == item.payload })
+                ? .superseded
+                : .removed
+        }
+        items[index] = item
+        if let searchIndex = searchResults.firstIndex(where: { $0.id == item.id }) {
+            searchResults[searchIndex] = item
+        }
+        return .reconciled
     }
 
     func selectPrevious() {
@@ -141,7 +197,6 @@ final class InMemoryHistoryStore: ObservableObject {
         }
         isSearchActive = true
         isSearchEditing = true
-        selectedCategory = .all
         selectedItemID = displayedItems.first?.id
     }
 
@@ -255,6 +310,7 @@ final class InMemoryHistoryStore: ObservableObject {
             linkIconData: current.linkIconData,
             linkPreviewData: current.linkPreviewData,
             hasFetchedLinkPreview: current.hasFetchedLinkPreview,
+            imageAngle: current.imageAngle,
             payload: current.payload,
             sourceApplication: current.sourceApplication,
             category: current.category,
@@ -267,7 +323,7 @@ final class InMemoryHistoryStore: ObservableObject {
         onUpdate?(updated)
     }
 
-    func updateEditingItem(payload: ClipboardPayload) {
+    func updateEditingItem(payload: ClipboardPayload, imageAngle: Int? = nil) {
         guard let current = editingItem else { return }
         let updated = ClipboardItem(
             id: current.id,
@@ -276,6 +332,7 @@ final class InMemoryHistoryStore: ObservableObject {
             linkIconData: current.linkIconData,
             linkPreviewData: current.linkPreviewData,
             hasFetchedLinkPreview: current.hasFetchedLinkPreview,
+            imageAngle: imageAngle ?? current.imageAngle,
             payload: payload,
             sourceApplication: current.sourceApplication,
             category: current.category,
@@ -312,6 +369,7 @@ final class InMemoryHistoryStore: ObservableObject {
             linkIconData: resolvedIconData,
             linkPreviewData: resolvedPreviewData,
             hasFetchedLinkPreview: true,
+            imageAngle: current.imageAngle,
             payload: current.payload,
             sourceApplication: current.sourceApplication,
             category: current.category,

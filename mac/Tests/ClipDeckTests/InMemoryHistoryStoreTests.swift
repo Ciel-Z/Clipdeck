@@ -24,6 +24,34 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedItemID, third.id)
     }
 
+    func testExpandingPersistedHistoryPreservesPriorityItemIdentityAndSelection() {
+        let store = InMemoryHistoryStore()
+        let priority = ClipboardItem(
+            databaseID: 1,
+            payload: .text(plainText: "priority", rtfData: nil),
+            sourceApplication: source
+        )
+        store.replaceItems([priority])
+        let reloadedPriority = ClipboardItem(
+            databaseID: 1,
+            payload: priority.payload,
+            sourceApplication: source,
+            copiedAt: priority.copiedAt
+        )
+        let older = ClipboardItem(
+            databaseID: 2,
+            payload: .text(plainText: "older", rtfData: nil),
+            sourceApplication: source,
+            copiedAt: priority.copiedAt.addingTimeInterval(-60)
+        )
+
+        store.expandPersistedItems([reloadedPriority, older])
+
+        XCTAssertEqual(store.items.map(\.databaseID), [1, 2])
+        XCTAssertEqual(store.items.first?.id, priority.id)
+        XCTAssertEqual(store.selectedItemID, priority.id)
+    }
+
     func testDuplicatePayloadMovesNewestCopyToFront() {
         let store = InMemoryHistoryStore()
         let original = item("same")
@@ -36,6 +64,45 @@ final class InMemoryHistoryStoreTests: XCTestCase {
 
         XCTAssertEqual(store.items.count, 2)
         XCTAssertEqual(store.items.first?.id, duplicate.id)
+    }
+
+    func testReconcilingCapturedItemPreservesIdentityPositionAndSelection() {
+        let store = InMemoryHistoryStore()
+        let captured = item("captured")
+        store.insert(captured)
+        let persisted = ClipboardItem(
+            id: captured.id,
+            databaseID: 42,
+            payload: captured.payload,
+            sourceApplication: captured.sourceApplication,
+            copiedAt: captured.copiedAt
+        )
+
+        XCTAssertEqual(store.reconcileCapturedItem(persisted), .reconciled)
+        XCTAssertEqual(store.items.first?.databaseID, 42)
+        XCTAssertEqual(store.items.first?.id, captured.id)
+        XCTAssertEqual(store.selectedItemID, captured.id)
+    }
+
+    func testReconcilingDeletedTransientCaptureDoesNotRestoreIt() {
+        let store = InMemoryHistoryStore()
+        let captured = item("captured")
+        store.insert(captured)
+        store.deleteSelection()
+
+        XCTAssertEqual(store.reconcileCapturedItem(captured), .removed)
+        XCTAssertTrue(store.items.isEmpty)
+    }
+
+    func testOlderCaptureIsSupersededByNewerDuplicate() {
+        let store = InMemoryHistoryStore()
+        let older = item("duplicate")
+        let newer = item("duplicate")
+        store.insert(older)
+        store.insert(newer)
+
+        XCTAssertEqual(store.reconcileCapturedItem(older), .superseded)
+        XCTAssertEqual(store.items.map(\.id), [newer.id])
     }
 
     func testSelectionNavigationAndDeletion() {
@@ -186,6 +253,26 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedItemID, first.id)
     }
 
+    func testFirstSearchCharacterSelectsHistoryButLaterTypingPreservesCategory() {
+        let store = InMemoryHistoryStore()
+        let image = ClipboardItem(
+            payload: .image(data: Data([0x00]), width: 1, height: 1, format: .png),
+            sourceApplication: source
+        )
+        store.insert(item("matching text"))
+        store.insert(image)
+        store.selectCategory(.images)
+        store.beginSearch()
+
+        XCTAssertEqual(store.selectedCategory, .images)
+        store.searchQuery = "m"
+        XCTAssertEqual(store.selectedCategory, .all)
+
+        store.selectCategory(.text)
+        store.searchQuery = "ma"
+        XCTAssertEqual(store.selectedCategory, .text)
+    }
+
     func testFinishingSearchEditingKeepsResultsActive() {
         let store = InMemoryHistoryStore()
         let result = item("matching")
@@ -261,6 +348,29 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(persisted?.payload, .text(plainText: "after", rtfData: nil))
         XCTAssertNil(store.editingItemID)
         XCTAssertEqual(store.selectedItemID, store.items.first?.id)
+    }
+
+    func testImageEditingStoresAngleWithoutChangingImagePayload() {
+        let store = InMemoryHistoryStore()
+        let original = ClipboardItem(
+            payload: .image(data: Data([1, 2, 3]), width: 3, height: 1, format: .png),
+            sourceApplication: source
+        )
+        store.insert(original)
+        store.beginEditing(original)
+
+        store.updateEditingItem(payload: original.payload, imageAngle: 90)
+
+        XCTAssertEqual(store.items.first?.payload, original.payload)
+        XCTAssertEqual(store.items.first?.imageAngle, 90)
+    }
+
+    func testJSONTextFormatterPrettyPrintsValidJSONAndRejectsInvalidInput() {
+        XCTAssertEqual(
+            JSONTextFormatter.format(#"{"b":2,"a":1}"#),
+            "{\n  \"a\" : 1,\n  \"b\" : 2\n}"
+        )
+        XCTAssertNil(JSONTextFormatter.format("{broken}"))
     }
 
     func testRenamingPersistsAndTitleParticipatesInLocalSearch() {

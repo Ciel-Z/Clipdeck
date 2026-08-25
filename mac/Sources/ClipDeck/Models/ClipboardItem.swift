@@ -54,6 +54,7 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
     let linkIconData: Data?
     let linkPreviewData: Data?
     let hasFetchedLinkPreview: Bool
+    let imageAngle: Int
     let payload: ClipboardPayload
     let sourceApplication: SourceApplication
     let category: ClipboardCategory?
@@ -66,6 +67,7 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
         linkIconData: Data? = nil,
         linkPreviewData: Data? = nil,
         hasFetchedLinkPreview: Bool = false,
+        imageAngle: Int = 0,
         payload: ClipboardPayload,
         sourceApplication: SourceApplication,
         category: ClipboardCategory? = nil,
@@ -77,10 +79,16 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
         self.linkIconData = linkIconData
         self.linkPreviewData = linkPreviewData
         self.hasFetchedLinkPreview = hasFetchedLinkPreview
+        self.imageAngle = Self.normalizedImageAngle(imageAngle)
         self.payload = payload
         self.sourceApplication = sourceApplication
         self.category = category
         self.copiedAt = copiedAt
+    }
+
+    private static func normalizedImageAngle(_ angle: Int) -> Int {
+        let normalized = angle % 360
+        return normalized >= 0 ? normalized : normalized + 360
     }
 }
 

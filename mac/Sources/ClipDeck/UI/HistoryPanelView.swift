@@ -122,8 +122,11 @@ struct HistoryPanelView: View {
                                         ContentEditorView(
                                             item: item,
                                             onCancel: { store.cancelEditing() },
-                                            onSave: { payload in
-                                                store.updateEditingItem(payload: payload)
+                                            onSave: { payload, imageAngle in
+                                                store.updateEditingItem(
+                                                    payload: payload,
+                                                    imageAngle: imageAngle
+                                                )
                                             }
                                         )
                                     } else {
@@ -620,13 +623,13 @@ private struct ClipboardCardView: View {
             ZStack(alignment: .bottom) {
                 ImageCheckerboard()
                 if let image = ClipboardImageCache.image(key: item.id.uuidString, data: data) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    RotatedImageView(image: image, angle: item.imageAngle)
                         .padding(8)
                 }
                 if showFooter {
-                    Text("\(width) × \(height)")
+                    Text(item.imageAngle.isMultiple(of: 180)
+                        ? "\(width) × \(height)"
+                        : "\(height) × \(width)")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.82))
                         .padding(.horizontal, 9)
@@ -862,6 +865,26 @@ private struct ImageCheckerboard: View {
             }
         }
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+    }
+}
+
+private struct RotatedImageView: View {
+    let image: NSImage
+    let angle: Int
+
+    var body: some View {
+        GeometryReader { geometry in
+            let quarterTurn = !angle.isMultiple(of: 180)
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(
+                    width: quarterTurn ? geometry.size.height : geometry.size.width,
+                    height: quarterTurn ? geometry.size.width : geometry.size.height
+                )
+                .rotationEffect(.degrees(Double(angle)))
+                .frame(width: geometry.size.width, height: geometry.size.height)
+        }
     }
 }
 
@@ -1172,26 +1195,25 @@ private struct RenameItemView: View {
 private struct ContentEditorView: View {
     let item: ClipboardItem
     let onCancel: () -> Void
-    let onSave: (ClipboardPayload) -> Void
+    let onSave: (ClipboardPayload, Int?) -> Void
     @State private var text: String
-    @State private var imagePayload: ClipboardPayload?
+    @State private var imageAngle: Int
     @FocusState private var textEditorFocused: Bool
 
     init(
         item: ClipboardItem,
         onCancel: @escaping () -> Void,
-        onSave: @escaping (ClipboardPayload) -> Void
+        onSave: @escaping (ClipboardPayload, Int?) -> Void
     ) {
         self.item = item
         self.onCancel = onCancel
         self.onSave = onSave
         if case let .text(plainText, _) = item.payload {
             _text = State(initialValue: plainText)
-            _imagePayload = State(initialValue: nil)
         } else {
             _text = State(initialValue: "")
-            _imagePayload = State(initialValue: item.payload)
         }
+        _imageAngle = State(initialValue: item.imageAngle)
     }
 
     var body: some View {
@@ -1229,9 +1251,16 @@ private struct ContentEditorView: View {
                     .keyboardShortcut("]", modifiers: .command)
                 }
             } else {
-                Text("编辑文本")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.76))
+                HStack(spacing: 10) {
+                    Text("编辑文本")
+                    if editableLanguage == "json" {
+                        Button("格式化", action: formatJSON)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.76))
             }
 
             HStack {
@@ -1313,14 +1342,12 @@ private struct ContentEditorView: View {
 
     @ViewBuilder
     private var imageEditor: some View {
-        if case let .image(data, width, height, _) = imagePayload,
+        if case let .image(data, width, height, _) = item.payload,
            let image = NSImage(data: data) {
             VStack(spacing: 10) {
                 ZStack {
                     ImageCheckerboard()
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    RotatedImageView(image: image, angle: imageAngle)
                         .padding(12)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1332,7 +1359,7 @@ private struct ContentEditorView: View {
                 .padding(.top, 12)
 
                 HStack {
-                    Text("\(width) × \(height)")
+                    Text(displayedDimensions(width: width, height: height))
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.56))
                     Spacer()
@@ -1375,26 +1402,60 @@ private struct ContentEditorView: View {
     private func save() {
         switch item.payload {
         case .text:
-            onSave(.text(plainText: text, rtfData: nil))
+            onSave(.text(plainText: text, rtfData: nil), nil)
         case .image:
-            if let imagePayload { onSave(imagePayload) }
+            onSave(item.payload, imageAngle)
         }
     }
 
     private func rotateImage(clockwise: Bool) {
-        guard case let .image(data, _, _, _) = imagePayload,
-              let rotated = ImageRotation.rotate(data, clockwise: clockwise) else { return }
-        imagePayload = .image(
-            data: rotated.data,
-            width: rotated.width,
-            height: rotated.height,
-            format: .png
-        )
+        imageAngle = (imageAngle + (clockwise ? 90 : 270)) % 360
+    }
+
+    private func formatJSON() {
+        guard let formatted = JSONTextFormatter.format(text) else {
+            NSSound.beep()
+            return
+        }
+        text = formatted
+    }
+
+    private func displayedDimensions(width: Int, height: Int) -> String {
+        imageAngle.isMultiple(of: 180) ? "\(width) × \(height)" : "\(height) × \(width)"
+    }
+}
+
+enum JSONTextFormatter {
+    static func format(_ source: String) -> String? {
+        guard let data = source.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(object),
+              let formatted = try? JSONSerialization.data(
+                  withJSONObject: object,
+                  options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+              ) else { return nil }
+        return String(data: formatted, encoding: .utf8)
     }
 }
 
 @MainActor
-private enum ImageRotation {
+enum ImageRotation {
+    static func render(_ data: Data, angle: Int) -> (data: Data, width: Int, height: Int)? {
+        let turns = ((angle % 360) + 360) % 360 / 90
+        guard turns > 0 else {
+            guard let image = NSBitmapImageRep(data: data) else { return nil }
+            return (data, image.pixelsWide, image.pixelsHigh)
+        }
+        var renderedData = data
+        var result: (data: Data, width: Int, height: Int)?
+        for _ in 0 ..< turns {
+            guard let rotated = rotate(renderedData, clockwise: true) else { return nil }
+            renderedData = rotated.data
+            result = rotated
+        }
+        return result
+    }
+
     static func rotate(_ data: Data, clockwise: Bool) -> (data: Data, width: Int, height: Int)? {
         guard let source = NSBitmapImageRep(data: data),
               let sourceImage = source.cgImage else { return nil }
@@ -1458,25 +1519,18 @@ struct ContentPreviewView: View {
 
             switch item.payload {
             case let .text(text, _):
-                ScrollView([.horizontal, .vertical]) {
-                    Text(SyntaxHighlighter.highlighted(
-                        String(text.prefix(200_000)),
-                        language: item.category?.previewLanguage,
-                        fontSize: 14
-                    ))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(22)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
+                PreviewTextScrollView(
+                    text: String(text.prefix(200_000)),
+                    language: item.category?.previewLanguage
+                )
             case let .image(data, width, height, _):
                 VStack(spacing: 12) {
                     if let image = ClipboardImageCache.image(key: item.id.uuidString, data: data) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFit()
+                        RotatedImageView(image: image, angle: item.imageAngle)
                     }
-                    Text("\(width) × \(height)")
+                    Text(item.imageAngle.isMultiple(of: 180)
+                        ? "\(width) × \(height)"
+                        : "\(height) × \(width)")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -1489,6 +1543,133 @@ struct ContentPreviewView: View {
 
     private var categoryName: String {
         item.category?.name ?? (item.payload.isText ? "文本" : "图片")
+    }
+}
+
+private struct PreviewTextScrollView: NSViewRepresentable {
+    let text: String
+    let language: String?
+
+    func makeNSView(context: Context) -> PreviewKeyboardScrollView {
+        let scrollView = PreviewKeyboardScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = .textBackgroundColor
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 22, height: 22)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: 0,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        scrollView.documentView = textView
+        update(textView, in: scrollView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: PreviewKeyboardScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        update(textView, in: scrollView)
+    }
+
+    private func update(_ textView: NSTextView, in scrollView: NSScrollView) {
+        let attributed = NSAttributedString(SyntaxHighlighter.highlighted(
+            text,
+            language: language,
+            fontSize: 14
+        ))
+        if !textView.attributedString().isEqual(to: attributed) {
+            textView.textStorage?.setAttributedString(attributed)
+        }
+        let width = max(1, scrollView.contentSize.width)
+        textView.setFrameSize(NSSize(width: width, height: textView.frame.height))
+        if let textContainer = textView.textContainer,
+           let layoutManager = textView.layoutManager {
+            textContainer.containerSize = NSSize(
+                width: max(1, width - textView.textContainerInset.width * 2),
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            layoutManager.ensureLayout(for: textContainer)
+            let usedHeight = layoutManager.usedRect(for: textContainer).height
+                + textView.textContainerInset.height * 2
+            textView.setFrameSize(NSSize(
+                width: width,
+                height: max(scrollView.contentSize.height, usedHeight)
+            ))
+        }
+    }
+}
+
+private final class PreviewKeyboardScrollView: NSScrollView {
+    private var keyboardScrollTargetY: CGFloat?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePreviewScroll(_:)),
+            name: .clipDeckPreviewScroll,
+            object: nil
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func layout() {
+        super.layout()
+        guard let textView = documentView as? NSTextView else { return }
+        let width = max(1, contentSize.width)
+        guard abs(textView.frame.width - width) > 0.5 else { return }
+        textView.setFrameSize(NSSize(width: width, height: textView.frame.height))
+        textView.textContainer?.containerSize.width = max(
+            1,
+            width - textView.textContainerInset.width * 2
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handlePreviewScroll(_ notification: Notification) {
+        scrollVertically(direction: notification.userInfo?["direction"] as? Int ?? 0)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        keyboardScrollTargetY = nil
+        super.scrollWheel(with: event)
+    }
+
+    private func scrollVertically(direction: Int) {
+        guard direction != 0, let documentView else { return }
+        let current = contentView.bounds.origin
+        let maximumY = max(0, documentView.frame.height - contentView.bounds.height)
+        let startingY = keyboardScrollTargetY ?? current.y
+        let targetY = min(max(0, startingY + CGFloat(direction) * 48), maximumY)
+        keyboardScrollTargetY = targetY
+
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            contentView.scroll(to: NSPoint(x: current.x, y: targetY))
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                contentView.animator().setBoundsOrigin(NSPoint(x: current.x, y: targetY))
+            }
+        }
+        reflectScrolledClipView(contentView)
     }
 }
 

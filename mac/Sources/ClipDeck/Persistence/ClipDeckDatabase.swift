@@ -372,6 +372,11 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 table.add(column: "link_preview_fetched", .boolean).notNull().defaults(to: false)
             }
         }
+        migrator.registerMigration("addImageAngle") { database in
+            try database.alter(table: "content") { table in
+                table.add(column: "image_angle", .integer).notNull().defaults(to: 0)
+            }
+        }
         return migrator
     }
 }

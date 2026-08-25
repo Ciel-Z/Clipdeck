@@ -8,6 +8,7 @@ private final class ClipDeckPanel: NSPanel {
     var onSearch: (() -> Void)?
     var onFinishSearch: (() -> Void)?
     var onTypeToSearch: ((String) -> Void)?
+    var onPasteSearch: (() -> Void)?
     var onResumeSearchAndDeleteBackward: (() -> Void)?
     var onCollapseEmptySearch: (() -> Void)?
     var onDeleteSelection: (() -> Void)?
@@ -22,6 +23,7 @@ private final class ClipDeckPanel: NSPanel {
     var isSearchEditing: (() -> Bool)?
     var isSearchFieldFocused: (() -> Bool)?
     var isEditingContent: (() -> Bool)?
+    var isPreviewingContent: (() -> Bool)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -78,6 +80,12 @@ private final class ClipDeckPanel: NSPanel {
             onOpenSelection?()
             return
         }
+        if event.keyCode == 9,
+           shortcutModifiers == .command,
+           isSearchActive?() == true {
+            onPasteSearch?()
+            return
+        }
 
         if event.keyCode == 36 || event.keyCode == 76 {
             if isSearchEditing?() == true {
@@ -116,14 +124,24 @@ private final class ClipDeckPanel: NSPanel {
             return
         }
 
+        if (event.keyCode == 125 || event.keyCode == 126),
+           shortcutModifiers.isEmpty,
+           isPreviewingContent?() == true {
+            NotificationCenter.default.post(
+                name: .clipDeckPreviewScroll,
+                object: nil,
+                userInfo: ["direction": event.keyCode == 125 ? 1 : -1]
+            )
+            return
+        }
+
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if event.keyCode == 49, modifiers.isEmpty, isSearchEditing?() != true {
             onTogglePreview?()
             return
         }
 
-        if isSearchEditing?() != true,
-           AppPreferences.matches(
+        if AppPreferences.matches(
                keyCode: event.keyCode,
                flags: event.modifierFlags,
                configuredKeyCode: AppPreferences.previousCategoryKeyCode,
@@ -132,8 +150,7 @@ private final class ClipDeckPanel: NSPanel {
             onMoveCategory?(-1)
             return
         }
-        if isSearchEditing?() != true,
-           AppPreferences.matches(
+        if AppPreferences.matches(
                keyCode: event.keyCode,
                flags: event.modifierFlags,
                configuredKeyCode: AppPreferences.nextCategoryKeyCode,
@@ -143,7 +160,6 @@ private final class ClipDeckPanel: NSPanel {
             return
         }
         if event.keyCode == 123 || event.keyCode == 124,
-           isSearchEditing?() != true,
            commandModifiers.intersection([.command, .shift, .option, .control]).isEmpty {
             onMoveSelection?(event.keyCode == 123 ? -1 : 1)
             return
@@ -168,8 +184,7 @@ private final class ClipDeckPanel: NSPanel {
             onEscape?()
             return
         }
-        if isSearchEditing?() != true,
-           AppPreferences.matches(
+        if AppPreferences.matches(
                keyCode: event.keyCode,
                flags: event.modifierFlags,
                configuredKeyCode: AppPreferences.previousCategoryKeyCode,
@@ -178,8 +193,7 @@ private final class ClipDeckPanel: NSPanel {
             onMoveCategory?(-1)
             return
         }
-        if isSearchEditing?() != true,
-           AppPreferences.matches(
+        if AppPreferences.matches(
                keyCode: event.keyCode,
                flags: event.modifierFlags,
                configuredKeyCode: AppPreferences.nextCategoryKeyCode,
@@ -190,7 +204,6 @@ private final class ClipDeckPanel: NSPanel {
         }
         let arrowModifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if (event.keyCode == 123 || event.keyCode == 124),
-           isSearchEditing?() != true,
            arrowModifiers.isEmpty {
             onMoveSelection?(event.keyCode == 123 ? -1 : 1)
             return
@@ -260,6 +273,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
         // Visibility is managed by windowDidResignKey. AppKit's automatic
         // deactivation hiding races with activation when invoked from the menu bar.
         panel.hidesOnDeactivate = false
@@ -301,6 +315,18 @@ final class PanelController: NSWindowController, NSWindowDelegate {
             store.beginSearch()
             store.searchQuery.append(characters)
         }
+        panel.onPasteSearch = { [weak store] in
+            guard let store,
+                  let pasted = NSPasteboard.general.string(forType: .string) else { return }
+            let normalized = pasted.replacingOccurrences(
+                of: #"\s+"#,
+                with: " ",
+                options: .regularExpression
+            )
+            guard !normalized.isEmpty else { return }
+            store.setSearchEditing(true)
+            store.searchQuery.append(normalized)
+        }
         panel.onResumeSearchAndDeleteBackward = { [weak store] in
             store?.resumeSearchEditingAndDeleteBackward()
         }
@@ -313,6 +339,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.isEditingContent = { [weak store] in
             store?.editingItemID != nil || store?.renamingItemID != nil
         }
+        panel.isPreviewingContent = { [weak store] in store?.previewedItemID != nil }
         panel.onDeleteSelection = { [weak store] in store?.deleteSelection() }
         panel.onPasteSelection = { [weak store] in
             guard let store, let item = store.selectedItem else { return }
@@ -386,18 +413,35 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         store.selectedItemID = store.selectedItemID ?? store.displayedItems.first?.id
         store.revealSelection()
 
-        // Make the Deck visible immediately even while another application is
-        // frontmost, then transfer keyboard focus to ClipDeck.
+        // A status item click does not activate an accessory application. Show
+        // the panel first, explicitly activate this process, then make the panel
+        // key only once activation has been delivered. Making it key both before
+        // and after activation races with windowDidResignKey and can leave the
+        // keyboard routed to the previously frontmost application.
         panel.orderFrontRegardless()
-        NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
+        let activationRequested = NSRunningApplication.current.activate(
+            options: [.activateAllWindows]
+        )
+        if NSApp.isActive {
+            focusVisiblePanel()
+        }
         NSLog(
-            "ClipDeck panel shown at %@; visible=%@; key=%@; active=%@; target=%@",
+            "ClipDeck panel shown at %@; visible=%@; activationRequested=%@; target=%@",
             NSStringFromRect(panel.frame),
             panel.isVisible ? "true" : "false",
+            activationRequested ? "true" : "false",
+            self.targetApplication?.localizedName ?? "none"
+        )
+    }
+
+    func focusVisiblePanel() {
+        guard let panel = window, panel.isVisible, NSApp.isActive else { return }
+        panel.makeKeyAndOrderFront(nil)
+        NSLog(
+            "ClipDeck panel focus completed; key=%@; active=%@; firstResponder=%@",
             panel.isKeyWindow ? "true" : "false",
             NSApp.isActive ? "true" : "false",
-            self.targetApplication?.localizedName ?? "none"
+            panel.firstResponder.map { String(describing: type(of: $0)) } ?? "none"
         )
     }
 
