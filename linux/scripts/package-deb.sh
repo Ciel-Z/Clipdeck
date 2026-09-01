@@ -23,9 +23,11 @@ install -Dm755 "${repo_root}/linux/packaging/clipdeck-launcher" \
   "${stage_dir}/usr/bin/clipdeck"
 install -Dm644 "${repo_root}/linux/packaging/clipdeck.desktop" \
   "${stage_dir}/usr/share/applications/clipdeck.desktop"
-install -Dm644 "${repo_root}/mac/Assets.xcassets/AppIcon.appiconset/icon-256.png" \
+install -Dm644 "${repo_root}/shared/assets/Assets.xcassets/AppIcon.appiconset/icon-256.png" \
   "${stage_dir}/usr/share/icons/hicolor/256x256/apps/clipdeck.png"
-install -d "${stage_dir}/opt/clipdeck/lib" "${stage_dir}/opt/clipdeck/plugins"
+install -d "${stage_dir}/opt/clipdeck/lib" "${stage_dir}/opt/clipdeck/plugins" \
+  "${stage_dir}/opt/clipdeck/libexec" "${stage_dir}/opt/clipdeck/resources" \
+  "${stage_dir}/opt/clipdeck/translations/qtwebengine_locales"
 
 qt_plugin_dir="$(qmake -qt=5 -query QT_INSTALL_PLUGINS)"
 for plugin_group in platforms platforminputcontexts imageformats iconengines xcbglintegrations sqldrivers; do
@@ -34,9 +36,19 @@ for plugin_group in platforms platforminputcontexts imageformats iconengines xcb
   fi
 done
 
+qt_libexec_dir="$(qmake -qt=5 -query QT_INSTALL_LIBEXECS)"
+install -Dm755 "${qt_libexec_dir}/QtWebEngineProcess" \
+  "${stage_dir}/opt/clipdeck/libexec/QtWebEngineProcess"
+qt_data_dir="$(qmake -qt=5 -query QT_INSTALL_DATA)"
+cp -a "${qt_data_dir}/resources/." "${stage_dir}/opt/clipdeck/resources/"
+qt_translations_dir="$(qmake -qt=5 -query QT_INSTALL_TRANSLATIONS)"
+cp -a "${qt_translations_dir}/qtwebengine_locales/." \
+  "${stage_dir}/opt/clipdeck/translations/qtwebengine_locales/"
+
 mapfile -t qt_libraries < <(
   find \
     "${stage_dir}/opt/clipdeck/bin/clipdeck-linux" \
+    "${stage_dir}/opt/clipdeck/libexec/QtWebEngineProcess" \
     "${stage_dir}/opt/clipdeck/plugins" \
     -type f -print0 \
     | xargs -0 file \
@@ -58,7 +70,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: ClipDeck Contributors
-Depends: ca-certificates, libc6 (>= 2.28), libdbus-1-3, libfontconfig1, libfreetype6, libgcc1, libgl1, libglib2.0-0, libharfbuzz0b, libice6, libjpeg62-turbo, libpng16-16, libsm6, libstdc++6, libx11-6, libx11-xcb1, libxdamage1, libxext6, libxfixes3, libxi6, libxrender1, libxtst6, libxcb1, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-util0, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0
+Depends: ca-certificates, libc6 (>= 2.28), libasound2, libdbus-1-3, libfontconfig1, libfreetype6, libgcc1, libgl1, libglib2.0-0, libharfbuzz0b, libice6, libjpeg62-turbo, libnss3, libpng16-16, libsm6, libstdc++6, libx11-6, libx11-xcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxi6, libxrandr2, libxrender1, libxss1, libxtst6, libxcb1, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-util0, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0
 Description: ClipDeck clipboard history for UOS
  A native clipboard history Deck for UOS with persistent text and image history,
  automatic categories, search, editing and X11 automatic paste through Ctrl+V.

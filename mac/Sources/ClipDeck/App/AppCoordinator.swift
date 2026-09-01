@@ -92,17 +92,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         NSLog("ClipDeck clipboard monitor started")
         loadPersistedHistory()
         panelController.prepareForFirstPresentation()
+        configureApplicationMenu()
         configureStatusItem()
         configureApplicationShortcuts()
         NSLog("ClipDeck status item configured")
 
+        // Start WebKit after the critical Deck path is ready, so the first visit
+        // to the category script editor does not pay the WebContent startup cost.
+        ScriptEditorRuntime.shared.schedulePrewarm()
+
         if isInterfaceCheck {
             panelController.show()
         }
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        panelController?.focusVisiblePanel()
     }
 
     private func loadPersistedHistory() {
@@ -193,6 +194,23 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func pasteSelection(_ item: ClipboardItem, forcePlainText: Bool = false) {
+        if panelController.targetsClipDeck,
+           categorySettingsController?.isVisible == true {
+            let didWrite = pasteService.write(
+                item,
+                to: .general,
+                preserveFormatting: forcePlainText
+                    ? false
+                    : UserDefaults.standard.bool(forKey: PasteService.preserveFormattingKey)
+            )
+            guard didWrite else { return }
+            monitor.suppressCurrentPasteboardChange()
+            panelController.hide()
+            categorySettingsController?.restoreFocusAndPaste()
+            feedbackSoundPlayer.playPaste()
+            return
+        }
+
         let target = panelController.targetApplication ?? lastExternalApplication
         let result = pasteService.paste(item, into: target, forcePlainText: forcePlainText) { [weak self] in
             self?.categorySettingsController?.hide()
@@ -259,16 +277,60 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             // The status button can reclaim key status while its mouse-down is
             // still being dispatched. Present on the next run-loop turn so the
             // Deck remains the focused window after a left click.
+            let targetsClipDeck = self.categorySettingsController?.ownsFocusedWindow == true
+            if targetsClipDeck {
+                self.categorySettingsController?.rememberFocusForDeck()
+            }
             DispatchQueue.main.async { [weak self] in
-                self?.toggleDeckFromStatusItem()
+                self?.toggleDeckFromStatusItem(targetsClipDeck: targetsClipDeck)
             }
             return nil
         }
     }
 
+    private func configureApplicationMenu() {
+        let mainMenu = NSMenu()
+
+        let applicationMenuItem = NSMenuItem()
+        mainMenu.addItem(applicationMenuItem)
+        let applicationMenu = NSMenu(title: "ClipDeck")
+        applicationMenu.addItem(
+            withTitle: "ClipDeck 设置…",
+            action: #selector(openCategorySettings),
+            keyEquivalent: ","
+        ).target = self
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(
+            withTitle: "退出 ClipDeck",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        ).target = NSApp
+        applicationMenuItem.submenu = applicationMenu
+
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = editMenu.addItem(
+            withTitle: "重做",
+            action: Selector(("redo:")),
+            keyEquivalent: "z"
+        )
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
     private func makeStatusBarIcon() -> NSImage? {
         let logicalSize = NSSize(width: 18, height: 18)
-        if let url = Bundle.main.url(forResource: "clipdeck", withExtension: "svg"),
+        if let url = statusBarIconURL(),
            let source = NSImage(contentsOf: url) {
             // AppKit's SVG representation can fail to redraw after an Xcode
             // relaunch. Rasterize it once and retain the pixels on the status
@@ -316,9 +378,27 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         return fallback
     }
 
-    private func toggleDeckFromStatusItem() {
+    private func statusBarIconURL() -> URL? {
+        if let bundled = Bundle.main.url(forResource: "clipdeck", withExtension: "svg") {
+            return bundled
+        }
+
+        // `swift run` does not allow Package.swift to declare a resource above
+        // the package root. Keep development builds pointed at the same shared
+        // asset that Xcode and Linux package directly.
+        let sharedAsset = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // App
+            .deletingLastPathComponent() // ClipDeck
+            .deletingLastPathComponent() // Sources
+            .deletingLastPathComponent() // mac
+            .deletingLastPathComponent() // repository root
+            .appendingPathComponent("shared/assets/clipdeck.svg")
+        return FileManager.default.fileExists(atPath: sharedAsset.path) ? sharedAsset : nil
+    }
+
+    private func toggleDeckFromStatusItem(targetsClipDeck: Bool) {
         NSLog("ClipDeck panel toggled from status item left click")
-        toggleDeck()
+        toggleDeck(targetsClipDeck: targetsClipDeck)
     }
 
     private func configureApplicationShortcuts() {
@@ -356,7 +436,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func toggleDeck() {
+    private func toggleDeck(targetsClipDeck requestedTarget: Bool? = nil) {
         statusItem?.menu?.cancelTracking()
 
         if panelController.isVisible {
@@ -364,9 +444,20 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             return
         }
 
-        rememberFrontmostExternalApplication()
-        categorySettingsController?.hide()
-        panelController.show(targetApplication: lastExternalApplication)
+        let targetsClipDeck = requestedTarget
+            ?? (categorySettingsController?.ownsFocusedWindow == true)
+        if targetsClipDeck {
+            // Keep Settings visible and keep ClipDeck active. The nonactivating
+            // Deck becomes key while the settings window remains ordered in front.
+            categorySettingsController?.rememberFocusForDeck()
+            NSApp.activate()
+        } else {
+            rememberFrontmostExternalApplication()
+        }
+        panelController.show(
+            targetApplication: targetsClipDeck ? nil : lastExternalApplication,
+            targetsClipDeck: targetsClipDeck
+        )
     }
 
     private func rememberFrontmostExternalApplication() {

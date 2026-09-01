@@ -2,6 +2,25 @@ import Foundation
 import JavaScriptCore
 
 final class ClassificationService: @unchecked Sendable {
+    struct ConsoleEntry: Equatable, Sendable {
+        enum Level: String, Sendable {
+            case log
+            case info
+            case warn
+            case error
+            case debug
+        }
+
+        let level: Level
+        let message: String
+    }
+
+    struct EvaluationResult: Sendable {
+        let matches: Bool
+        let error: String?
+        let console: [ConsoleEntry]
+    }
+
     private let repository: HistoryRepository
 
     init(repository: HistoryRepository) {
@@ -38,7 +57,7 @@ final class ClassificationService: @unchecked Sendable {
         return try repository.assignCategory(matchedCategory, to: item)
     }
 
-    static func test(script: String, text: String, previewLanguage: String? = nil) -> (matches: Bool, error: String?) {
+    static func test(script: String, text: String, previewLanguage: String? = nil) -> EvaluationResult {
         let baseInput = makeInput(
             text: text,
             sourceBundleIdentifier: "app.clipdeck.script-test",
@@ -80,22 +99,86 @@ final class ClassificationService: @unchecked Sendable {
         return result
     }
 
-    private static func evaluate(_ script: String, input: [String: Any]) -> (matches: Bool, error: String?) {
-        guard let context = JSContext() else { return (false, "无法创建 JavaScript 执行环境") }
+    private static func evaluate(_ script: String, input: [String: Any]) -> EvaluationResult {
+        guard let context = JSContext() else {
+            return EvaluationResult(
+                matches: false,
+                error: "无法创建 JavaScript 执行环境",
+                console: []
+            )
+        }
         var exceptionMessage: String?
+        var consoleEntries: [ConsoleEntry] = []
         context.exceptionHandler = { _, exception in
             exceptionMessage = exception?.toString() ?? "未知 JavaScript 异常"
         }
+        let consoleSink: @convention(block) (String, String) -> Void = { level, message in
+            guard consoleEntries.count < 200,
+                  let parsedLevel = ConsoleEntry.Level(rawValue: level) else { return }
+            consoleEntries.append(ConsoleEntry(
+                level: parsedLevel,
+                message: String(message.prefix(4_000))
+            ))
+        }
+        context.setObject(consoleSink, forKeyedSubscript: "__clipDeckConsoleSink" as NSString)
+        context.evaluateScript(Self.consoleBridgeScript)
+        if let exceptionMessage {
+            return EvaluationResult(matches: false, error: exceptionMessage, console: consoleEntries)
+        }
         context.evaluateScript(script)
-        if let exceptionMessage { return (false, exceptionMessage) }
+        if let exceptionMessage {
+            return EvaluationResult(matches: false, error: exceptionMessage, console: consoleEntries)
+        }
         guard let function = context.objectForKeyedSubscript("classify"), !function.isUndefined else {
-            return (false, "脚本必须定义 classify(item) 函数")
+            return EvaluationResult(
+                matches: false,
+                error: "脚本必须定义 classify(item) 函数",
+                console: consoleEntries
+            )
         }
         guard let value = function.call(withArguments: [input]) else {
-            return (false, exceptionMessage ?? "分类脚本没有返回值")
+            return EvaluationResult(
+                matches: false,
+                error: exceptionMessage ?? "分类脚本没有返回值",
+                console: consoleEntries
+            )
         }
-        if let exceptionMessage { return (false, exceptionMessage) }
-        guard value.isBoolean else { return (false, "classify(item) 必须返回 Boolean") }
-        return (value.toBool(), nil)
+        if let exceptionMessage {
+            return EvaluationResult(matches: false, error: exceptionMessage, console: consoleEntries)
+        }
+        guard value.isBoolean else {
+            return EvaluationResult(
+                matches: false,
+                error: "classify(item) 必须返回 Boolean",
+                console: consoleEntries
+            )
+        }
+        return EvaluationResult(matches: value.toBool(), error: nil, console: consoleEntries)
     }
+
+    private static let consoleBridgeScript = #"""
+        (() => {
+            const formatValue = value => {
+                if (typeof value === "string") return value;
+                if (typeof value === "undefined") return "undefined";
+                if (typeof value === "function" || typeof value === "symbol") return String(value);
+                try {
+                    const encoded = JSON.stringify(value);
+                    return encoded === undefined ? String(value) : encoded;
+                } catch (_) {
+                    return String(value);
+                }
+            };
+            const emit = level => (...values) => {
+                __clipDeckConsoleSink(level, values.map(formatValue).join(" "));
+            };
+            globalThis.console = Object.freeze({
+                log: emit("log"),
+                info: emit("info"),
+                warn: emit("warn"),
+                error: emit("error"),
+                debug: emit("debug")
+            });
+        })();
+        """#
 }

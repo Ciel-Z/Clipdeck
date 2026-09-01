@@ -18,6 +18,7 @@ docker run --rm \
   --platform linux/amd64 \
   --network none \
   --user "$(id -u):$(id -g)" \
+  --env "CLIPDECK_VERSION=${CLIPDECK_VERSION:-0.3.0~preview7}" \
   --volume "${repo_root}:/workspace" \
   --workdir /workspace \
   "${image_name}" \

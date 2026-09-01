@@ -24,11 +24,16 @@ private final class ClipDeckPanel: NSPanel {
     var isSearchFieldFocused: (() -> Bool)?
     var isEditingContent: (() -> Bool)?
     var isPreviewingContent: (() -> Bool)?
+    private var horizontalWheelTargetX: CGFloat?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, routeVerticalWheelToCards(event) {
+            return
+        }
+
         if event.type == .flagsChanged {
             onQuickPasteModifierChanged?(AppPreferences.isQuickPasteModifierActive(in: event.modifierFlags))
             super.sendEvent(event)
@@ -174,6 +179,72 @@ private final class ClipDeckPanel: NSPanel {
         super.sendEvent(event)
     }
 
+    private func routeVerticalWheelToCards(_ event: NSEvent) -> Bool {
+        let deltaX = event.scrollingDeltaX
+        let deltaY = event.scrollingDeltaY
+        guard abs(deltaY) > abs(deltaX), abs(deltaY) > 0.01,
+              let contentView,
+              let hitView = contentView.hitTest(
+                  contentView.convert(event.locationInWindow, from: nil)
+              ),
+              let scrollView = Self.enclosingScrollView(from: hitView) else {
+            return false
+        }
+
+        let clipView = scrollView.contentView
+        guard let documentView = scrollView.documentView else { return false }
+        let maximumX = max(0, documentView.frame.width - clipView.bounds.width)
+        let maximumY = max(0, documentView.frame.height - clipView.bounds.height)
+
+        // The card strip is tall and overflows only horizontally. This excludes
+        // the compact category strip and vertically scrolling preview/editor.
+        guard clipView.bounds.height >= 120,
+              maximumX > 1,
+              maximumY <= 2 else { return false }
+
+        let current = clipView.bounds.origin
+        if event.phase == .began || event.momentumPhase == .began {
+            horizontalWheelTargetX = current.x
+        }
+        let startingX = horizontalWheelTargetX ?? current.x
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 44
+        let targetX = min(max(0, startingX - deltaY * multiplier), maximumX)
+        horizontalWheelTargetX = targetX
+
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            clipView.scroll(to: NSPoint(x: targetX, y: current.y))
+            scrollView.reflectScrolledClipView(clipView)
+            horizontalWheelTargetX = nil
+            return true
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = event.hasPreciseScrollingDeltas ? 0.08 : 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            clipView.animator().setBoundsOrigin(NSPoint(x: targetX, y: current.y))
+        } completionHandler: { [weak self, weak scrollView] in
+            Task { @MainActor in
+                guard let self else { return }
+                if abs((self.horizontalWheelTargetX ?? targetX) - targetX) < 0.5 {
+                    self.horizontalWheelTargetX = nil
+                }
+                scrollView?.reflectScrolledClipView(clipView)
+            }
+        }
+        return true
+    }
+
+    private static func enclosingScrollView(from view: NSView) -> NSScrollView? {
+        var candidate: NSView? = view
+        while let current = candidate {
+            if let scrollView = current as? NSScrollView {
+                return scrollView
+            }
+            candidate = current.superview
+        }
+        return nil
+    }
+
     override func keyDown(with event: NSEvent) {
         if isEditingContent?() == true {
             super.keyDown(with: event)
@@ -253,6 +324,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
     private let store: InMemoryHistoryStore
     private let onPaste: (ClipboardItem, Bool) -> Void
     private(set) var targetApplication: NSRunningApplication?
+    private(set) var targetsClipDeck = false
     var isVisible: Bool { window?.isVisible == true }
 
     init(
@@ -266,7 +338,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
 
         let panel = ClipDeckPanel(
             contentRect: .zero,
-            styleMask: [.borderless, .fullSizeContentView],
+            styleMask: [.borderless, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
@@ -398,9 +470,15 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         panel.contentView?.layoutSubtreeIfNeeded()
     }
 
-    func show(targetApplication: NSRunningApplication? = nil) {
+    func show(
+        targetApplication: NSRunningApplication? = nil,
+        targetsClipDeck: Bool = false
+    ) {
         guard let panel = window else { return }
-        if let targetApplication,
+        self.targetsClipDeck = targetsClipDeck
+        if targetsClipDeck {
+            self.targetApplication = nil
+        } else if let targetApplication,
            targetApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier,
            !targetApplication.isTerminated {
             self.targetApplication = targetApplication
@@ -413,29 +491,24 @@ final class PanelController: NSWindowController, NSWindowDelegate {
         store.selectedItemID = store.selectedItemID ?? store.displayedItems.first?.id
         store.revealSelection()
 
-        // A status item click does not activate an accessory application. Show
-        // the panel first, explicitly activate this process, then make the panel
-        // key only once activation has been delivered. Making it key both before
-        // and after activation races with windowDidResignKey and can leave the
-        // keyboard routed to the previously frontmost application.
+        // LSUIElement/accessory apps are not guaranteed to receive an application
+        // activation callback after a status-item click in a packaged build. A
+        // nonactivating NSPanel can become key and receive keyboard events while
+        // deliberately leaving the previously frontmost application active.
         panel.orderFrontRegardless()
-        let activationRequested = NSRunningApplication.current.activate(
-            options: [.activateAllWindows]
-        )
-        if NSApp.isActive {
-            focusVisiblePanel()
-        }
+        focusVisiblePanel()
         NSLog(
-            "ClipDeck panel shown at %@; visible=%@; activationRequested=%@; target=%@",
+            "ClipDeck panel shown at %@; visible=%@; key=%@; active=%@; target=%@",
             NSStringFromRect(panel.frame),
             panel.isVisible ? "true" : "false",
-            activationRequested ? "true" : "false",
-            self.targetApplication?.localizedName ?? "none"
+            panel.isKeyWindow ? "true" : "false",
+            NSApp.isActive ? "true" : "false",
+            targetsClipDeck ? "ClipDeck" : (self.targetApplication?.localizedName ?? "none")
         )
     }
 
     func focusVisiblePanel() {
-        guard let panel = window, panel.isVisible, NSApp.isActive else { return }
+        guard let panel = window, panel.isVisible else { return }
         panel.makeKeyAndOrderFront(nil)
         NSLog(
             "ClipDeck panel focus completed; key=%@; active=%@; firstResponder=%@",

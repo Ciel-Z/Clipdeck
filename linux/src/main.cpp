@@ -1,6 +1,11 @@
 #include "history_repository.h"
+#include "platform/linux_application_icon.h"
+#include "platform/x11_global_shortcut.h"
+#include "ui/display_scale.h"
+#include "ui/linux_icons.h"
+#include "ui/script_editor_widget.h"
 
-#include <QAbstractNativeEventFilter>
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
@@ -13,20 +18,29 @@
 #include <QDateTime>
 #include <QDesktopWidget>
 #include <QDesktopServices>
+#include <QDebug>
 #include <QDialog>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QDirIterator>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGroupBox>
+#include <QHash>
+#include <QHideEvent>
+#include <QIcon>
 #include <QFontMetrics>
 #include <QKeyEvent>
 #include <QKeySequenceEdit>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QListWidget>
+#include <QListView>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMap>
-#include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
@@ -35,35 +49,52 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
+#include <QProcess>
+#include <QProxyStyle>
+#include <QPointer>
 #include <QPushButton>
 #include <QRegion>
+#include <QRegularExpression>
 #include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QShortcut>
 #include <QSlider>
 #include <QShowEvent>
+#include <QSocketNotifier>
 #include <QSqlQuery>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QSystemTrayIcon>
 #include <QSyntaxHighlighter>
 #include <QTemporaryDir>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
+#include <QTextOption>
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QUrl>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QTextStream>
 #include <QTransform>
+#include <QSet>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QWheelEvent>
 #include <QX11Info>
+#include <QtWebEngine/QtWebEngine>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
+#include <X11/XKBlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XTest.h>
 #include <xcb/xcb.h>
@@ -71,8 +102,12 @@
 #ifdef KeyPress
 #undef KeyPress
 #endif
+#ifdef KeyRelease
+#undef KeyRelease
+#endif
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -82,9 +117,31 @@
 namespace {
 
 constexpr int kHistoryCapacity = 100;
+constexpr int kInitialImageCapacity = 20;
+constexpr int kImageBatchCapacity = 20;
 constexpr int kHorizontalInset = 8;
 constexpr int kCardSpacing = 24;
 constexpr int kContentInset = 22;
+constexpr auto kShortcutRecordingStarted = "__CLIPDECK_SHORTCUT_RECORDING_STARTED__";
+constexpr auto kShortcutRecordingStopped = "__CLIPDECK_SHORTCUT_RECORDING_STOPPED__";
+constexpr auto kSettingsActivatePrefix = "__CLIPDECK_SETTINGS_ACTIVATE__:";
+
+QKeySequence defaultShowDeckShortcut() {
+    return QKeySequence(Qt::ALT | Qt::SHIFT | Qt::Key_V);
+}
+
+class ClipDeckStyle final : public QProxyStyle {
+public:
+    using QProxyStyle::QProxyStyle;
+
+    void drawPrimitive(PrimitiveElement element, const QStyleOption *option,
+                       QPainter *painter, const QWidget *widget = nullptr) const override {
+        // UOS themes draw an additional native focus rectangle on top of
+        // styled inputs. ClipDeck supplies its own focus border instead.
+        if (element == PE_FrameFocusRect) return;
+        QProxyStyle::drawPrimitive(element, option, painter, widget);
+    }
+};
 
 QKeySequence configuredShortcut(const QString &key, const QKeySequence &fallback) {
     const QString value = QSettings().value(key, fallback.toString(QKeySequence::PortableText)).toString();
@@ -97,10 +154,30 @@ Qt::KeyboardModifiers configuredModifier(const QString &key, Qt::KeyboardModifie
         QSettings().value(key, static_cast<int>(fallback)).toInt());
 }
 
+Qt::KeyboardModifiers standardKeyboardModifiers(Qt::KeyboardModifiers modifiers) {
+    return modifiers & (Qt::ControlModifier | Qt::ShiftModifier
+                        | Qt::AltModifier | Qt::MetaModifier);
+}
+
+unsigned int x11MaskForQtModifiers(Qt::KeyboardModifiers modifiers) {
+    unsigned int mask = 0;
+    if (modifiers.testFlag(Qt::ShiftModifier)) mask |= ShiftMask;
+    if (modifiers.testFlag(Qt::ControlModifier)) mask |= ControlMask;
+    if (modifiers.testFlag(Qt::AltModifier)) mask |= Mod1Mask;
+    if (modifiers.testFlag(Qt::MetaModifier)) mask |= Mod4Mask;
+    return mask;
+}
+
 bool matchesShortcut(const QKeyEvent *event, const QString &key, const QKeySequence &fallback) {
     const QKeySequence configured = configuredShortcut(key, fallback);
+    const Qt::KeyboardModifiers modifiers = standardKeyboardModifiers(event->modifiers());
     return !configured.isEmpty()
-        && configured[0] == (event->key() | static_cast<int>(event->modifiers()));
+        && configured[0] == (event->key() | static_cast<int>(modifiers));
+}
+
+bool isSettingsShortcut(const QKeyEvent *event) {
+    return event->key() == Qt::Key_Comma
+        && standardKeyboardModifiers(event->modifiers()) == Qt::ControlModifier;
 }
 
 Qt::KeyboardModifier modifierForKey(int key) {
@@ -109,6 +186,518 @@ Qt::KeyboardModifier modifierForKey(int key) {
     if (key == Qt::Key_Alt) return Qt::AltModifier;
     if (key == Qt::Key_Meta) return Qt::MetaModifier;
     return Qt::NoModifier;
+}
+
+QString shortcutLabel(const QKeySequence &sequence) {
+    if (sequence.isEmpty()) return QStringLiteral("未设置");
+    return sequence.toString(QKeySequence::NativeText).replace(QStringLiteral("+"), QStringLiteral(" + "));
+}
+
+class ShortcutCaptureButton final : public QPushButton {
+public:
+    explicit ShortcutCaptureButton(const QKeySequence &sequence, QWidget *parent = nullptr)
+        : QPushButton(parent), sequence_(sequence) {
+        setFocusPolicy(Qt::StrongFocus);
+        setMinimumHeight(36);
+        refreshLabel();
+        connect(this, &QPushButton::clicked, this, [this] {
+            if (recording_) return;
+            recording_ = true;
+            if (recordingCallback_) recordingCallback_(true);
+            setText(QStringLiteral("请按新的快捷键…"));
+            setProperty("recording", true);
+            style()->unpolish(this);
+            style()->polish(this);
+            setFocus(Qt::MouseFocusReason);
+        });
+    }
+
+    QKeySequence keySequence() const { return sequence_; }
+    void setChangeCallback(std::function<void(const QKeySequence &)> callback) {
+        changeCallback_ = std::move(callback);
+    }
+    void setRecordingCallback(std::function<void(bool)> callback) {
+        recordingCallback_ = std::move(callback);
+    }
+    void setKeySequence(const QKeySequence &sequence) {
+        const bool changed = sequence_ != sequence;
+        const bool wasRecording = recording_;
+        sequence_ = sequence;
+        recording_ = false;
+        setProperty("recording", false);
+        refreshLabel();
+        style()->unpolish(this);
+        style()->polish(this);
+        if (changed && changeCallback_) changeCallback_(sequence_);
+        if (wasRecording && recordingCallback_) recordingCallback_(false);
+    }
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override {
+        if (!recording_) {
+            QPushButton::keyPressEvent(event);
+            return;
+        }
+        if (event->key() == Qt::Key_Escape) {
+            cancelRecording(true);
+            event->accept();
+            return;
+        }
+        if (modifierForKey(event->key()) != Qt::NoModifier) return;
+        const bool functionKey = event->key() >= Qt::Key_F1 && event->key() <= Qt::Key_F35;
+        const Qt::KeyboardModifiers modifiers = event->modifiers() &
+            (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
+        if (modifiers == Qt::NoModifier && !functionKey) {
+            QApplication::beep();
+            return;
+        }
+        if (keySymForQtKey(event->key()) == NoSymbol) {
+            QApplication::beep();
+            return;
+        }
+        setKeySequence(QKeySequence(event->key() | static_cast<int>(modifiers)));
+    }
+
+    void focusOutEvent(QFocusEvent *event) override {
+        if (recording_) cancelRecording(false);
+        QPushButton::focusOutEvent(event);
+    }
+
+private:
+    void cancelRecording(bool removeFocus) {
+        const bool wasRecording = recording_;
+        recording_ = false;
+        setProperty("recording", false);
+        refreshLabel();
+        style()->unpolish(this);
+        style()->polish(this);
+        update();
+        if (removeFocus && hasFocus()) clearFocus();
+        if (wasRecording && recordingCallback_) recordingCallback_(false);
+    }
+
+    void refreshLabel() { setText(shortcutLabel(sequence_)); }
+    QKeySequence sequence_;
+    bool recording_ = false;
+    std::function<void(const QKeySequence &)> changeCallback_;
+    std::function<void(bool)> recordingCallback_;
+};
+
+class StyledComboBox final : public QComboBox {
+public:
+    explicit StyledComboBox(QWidget *parent = nullptr) : QComboBox(parent) {
+        auto *list = new QListView(this);
+        list->setFrameShape(QFrame::NoFrame);
+        list->setContentsMargins(0, 0, 0, 0);
+        list->setStyleSheet(QStringLiteral(
+            "QListView{background:#29292c;color:#eeeeef;border:0;padding:0;margin:0;outline:0;}"
+            "QListView::item{color:#eeeeef;background:#29292c;padding:7px 10px;min-height:22px;}"
+            "QListView::item:selected,QListView::item:hover{background:#176fd1;color:white;}"));
+        QPalette popupPalette = list->palette();
+        popupPalette.setColor(QPalette::Text, QColor(238, 238, 239));
+        popupPalette.setColor(QPalette::WindowText, QColor(238, 238, 239));
+        popupPalette.setColor(QPalette::HighlightedText, Qt::white);
+        popupPalette.setColor(QPalette::Base, QColor(41, 41, 44));
+        popupPalette.setColor(QPalette::Highlight, QColor(23, 111, 209));
+        list->setPalette(popupPalette);
+        list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        list->setUniformItemSizes(true);
+        setView(list);
+        setMaxVisibleItems(20);
+        preparePopup();
+    }
+
+protected:
+    void showPopup() override {
+        preparePopup();
+        QComboBox::showPopup();
+        preparePopup();
+    }
+
+    void paintEvent(QPaintEvent *event) override {
+        QComboBox::paintEvent(event);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPen pen(QColor(224, 224, 226), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.setPen(pen);
+        const int x = width() - 18;
+        const int y = height() / 2 - 1;
+        QPainterPath chevron;
+        chevron.moveTo(x - 4, y - 2);
+        chevron.lineTo(x, y + 2);
+        chevron.lineTo(x + 4, y - 2);
+        painter.drawPath(chevron);
+    }
+
+private:
+    void preparePopup() {
+        QWidget *popup = view() ? view()->window() : nullptr;
+        if (!popup || !(popup->windowFlags() & Qt::Popup)) return;
+        popup->setAttribute(Qt::WA_StyledBackground, true);
+        popup->setWindowFlag(Qt::FramelessWindowHint, true);
+        popup->setWindowFlag(Qt::NoDropShadowWindowHint, true);
+        popup->setContentsMargins(0, 0, 0, 0);
+        QPalette palette = popup->palette();
+        palette.setColor(QPalette::Window, QColor(41, 41, 44));
+        palette.setColor(QPalette::Base, QColor(41, 41, 44));
+        popup->setPalette(palette);
+        popup->setStyleSheet(QStringLiteral(
+            "QFrame{background:#29292c;border:1px solid #49494e;padding:0;margin:0;}"
+            "QScrollBar{width:0px;height:0px;background:transparent;}"));
+    }
+};
+
+class CategoryListDelegate final : public QStyledItemDelegate {
+public:
+    explicit CategoryListDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+
+    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const override {
+        return QSize(210, 42);
+    }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRect row = option.rect.adjusted(4, 2, -4, -2);
+        if (option.state & QStyle::State_Selected) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(255, 255, 255, 31));
+            painter->drawRoundedRect(row, 9, 9);
+        }
+        QFont textFont = option.font;
+        textFont.setPointSizeF(10.5);
+        textFont.setWeight(QFont::DemiBold);
+        painter->setFont(textFont);
+        painter->setPen((option.state & QStyle::State_Selected)
+            ? QColor(255, 255, 255, 240) : QColor(215, 215, 220));
+        const QString icon = index.data(Qt::UserRole + 1).toString();
+        painter->drawText(QRect(row.x() + 10, row.y(), 28, row.height()),
+                          Qt::AlignCenter, icon.isEmpty() ? QStringLiteral("●") : icon);
+        const QRect nameRect(row.x() + 43, row.y(), std::max(20, row.width() - 112), row.height());
+        painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(textFont).elidedText(index.data(Qt::DisplayRole).toString(),
+                                                           Qt::ElideRight, nameRect.width()));
+        painter->setPen(QPen(QColor(255, 255, 255, 100), 1.4, Qt::SolidLine,
+                             Qt::RoundCap, Qt::RoundJoin));
+        const int handleX = row.right() - 43;
+        for (int offset : {-4, 0, 4}) {
+            painter->drawLine(handleX - 5, row.center().y() + offset,
+                              handleX + 5, row.center().y() + offset);
+        }
+        painter->setBrush(QColor(235, 235, 238, 190));
+        painter->setPen(Qt::NoPen);
+        for (int offset : {-6, 0, 6}) {
+            painter->drawEllipse(QPointF(row.right() - 13 + offset, row.center().y()), 1.5, 1.5);
+        }
+        painter->restore();
+    }
+};
+
+class CategoryListWidget final : public QListWidget {
+public:
+    explicit CategoryListWidget(QWidget *parent = nullptr) : QListWidget(parent) {}
+
+    void setDeleteCallback(std::function<void(int)> callback) {
+        deleteCallback_ = std::move(callback);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        QListWidgetItem *hit = itemAt(event->pos());
+        if (hit && event->pos().x() >= viewport()->width() - 38) {
+            const int hitRow = row(hit);
+            setCurrentRow(hitRow);
+            if (deleteCallback_) deleteCallback_(hitRow);
+            event->accept();
+            return;
+        }
+        QListWidget::mousePressEvent(event);
+    }
+
+private:
+    std::function<void(int)> deleteCallback_;
+};
+
+class CategoryHeaderButton final : public QPushButton {
+public:
+    enum class Symbol { Restore, Add };
+    CategoryHeaderButton(Symbol symbol, QWidget *parent = nullptr)
+        : QPushButton(parent), symbol_(symbol) {
+        setFixedSize(34, 34);
+        setObjectName(QStringLiteral("categoryHeaderButton"));
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override {
+        QPushButton::paintEvent(event);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(235, 235, 238), 1.8, Qt::SolidLine,
+                            Qt::RoundCap, Qt::RoundJoin));
+        const QPoint center = rect().center();
+        if (symbol_ == Symbol::Add) {
+            painter.drawLine(center + QPoint(-6, 0), center + QPoint(6, 0));
+            painter.drawLine(center + QPoint(0, -6), center + QPoint(0, 6));
+        } else {
+            painter.drawArc(QRect(center.x() - 7, center.y() - 7, 14, 14), 35 * 16, 285 * 16);
+            QPainterPath arrow;
+            arrow.moveTo(center + QPoint(-7, -5));
+            arrow.lineTo(center + QPoint(-8, 1));
+            arrow.lineTo(center + QPoint(-2, -1));
+            painter.drawPath(arrow);
+        }
+    }
+
+private:
+    Symbol symbol_;
+};
+
+struct RetentionOption {
+    int days;
+    QString title;
+    double position;
+    bool major;
+};
+
+const QVector<RetentionOption> &retentionOptions() {
+    static const QVector<RetentionOption> options = [] {
+        QVector<RetentionOption> values;
+        for (int day = 1; day <= 6; ++day) {
+            values.append({day, QStringLiteral("%1天").arg(day),
+                           static_cast<double>(day - 1) / 6.0 * 0.25, day == 1});
+        }
+        values.append({7, QStringLiteral("1周"), 0.25, true});
+        values.append({14, QStringLiteral("2周"), 0.25 + 1.0 / 3.0 * 0.25, false});
+        values.append({21, QStringLiteral("3周"), 0.25 + 2.0 / 3.0 * 0.25, false});
+        values.append({30, QStringLiteral("1个月"), 0.5, true});
+        for (int month = 2; month <= 11; ++month) {
+            values.append({month * 30, QStringLiteral("%1个月").arg(month),
+                           0.5 + static_cast<double>(month - 1) / 11.0 * 0.25, false});
+        }
+        values.append({365, QStringLiteral("1年"), 0.75, true});
+        values.append({0, QStringLiteral("永久"), 1.0, true});
+        return values;
+    }();
+    return options;
+}
+
+bool isShorterRetention(int currentDays, int proposedDays) {
+    return currentDays == 0 ? proposedDays != 0
+        : proposedDays != 0 && proposedDays < currentDays;
+}
+
+class RetentionControl final : public QWidget {
+public:
+    explicit RetentionControl(int days, QWidget *parent = nullptr) : QWidget(parent) {
+        setMinimumHeight(94);
+        setValue(days);
+    }
+
+    int value() const { return retentionOptions()[index_].days; }
+    void setChangeCallback(std::function<void(int)> callback) {
+        changeCallback_ = std::move(callback);
+    }
+    void setValue(int days) {
+        int best = 0;
+        int distance = std::numeric_limits<int>::max();
+        for (int index = 0; index < retentionOptions().size(); ++index) {
+            if (retentionOptions()[index].days == days) { best = index; break; }
+            if (retentionOptions()[index].days != 0 && std::abs(retentionOptions()[index].days - days) < distance) {
+                distance = std::abs(retentionOptions()[index].days - days);
+                best = index;
+            }
+        }
+        index_ = best;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const int left = 14;
+        const int right = width() - 14;
+        const int usable = std::max(1, right - left);
+        const int trackY = 40;
+        const double selected = retentionOptions()[index_].position;
+        const int selectedX = left + qRound(usable * selected);
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(58, 58, 62));
+        painter.drawRoundedRect(QRect(left, trackY - 2, usable, 5), 2, 2);
+        painter.setBrush(QColor(22, 131, 255));
+        painter.drawRoundedRect(QRect(left, trackY - 2, std::max(3, selectedX - left), 5), 2, 2);
+        painter.setBrush(QColor(238, 238, 240));
+        painter.drawEllipse(QPoint(selectedX, trackY), 9, 9);
+
+        painter.setPen(QColor(238, 238, 240));
+        QFont valueFont = font();
+        valueFont.setBold(true);
+        painter.setFont(valueFont);
+        const QString valueTitle = retentionOptions()[index_].title;
+        painter.drawText(QRect(std::max(0, selectedX - 45), 3, 90, 20), Qt::AlignCenter, valueTitle);
+
+        painter.setFont(font());
+        painter.setPen(QColor(155, 155, 160));
+        const QVector<QPair<QString, double>> labels = {
+            {QStringLiteral("天"), 0}, {QStringLiteral("周"), 0.25},
+            {QStringLiteral("月"), 0.5}, {QStringLiteral("年"), 0.75},
+            {QStringLiteral("永久"), 1.0}};
+        for (const auto &label : labels) {
+            const int x = left + qRound(usable * label.second);
+            painter.drawText(QRect(x - 30, 68, 60, 20), Qt::AlignCenter, label.first);
+        }
+        for (const RetentionOption &option : retentionOptions()) {
+            const int x = left + qRound(usable * option.position);
+            painter.setBrush(QColor(155, 155, 160, option.major ? 170 : 85));
+            const int radius = option.major ? 2 : 1;
+            painter.drawEllipse(QPoint(x, 61), radius, radius);
+        }
+    }
+
+    void mousePressEvent(QMouseEvent *event) override {
+        dragging_ = true;
+        dragStartDays_ = value();
+        selectAt(event->pos().x());
+    }
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if (event->buttons() & Qt::LeftButton) selectAt(event->pos().x());
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (dragging_ && event->button() == Qt::LeftButton) {
+            dragging_ = false;
+            if (value() != dragStartDays_ && changeCallback_) changeCallback_(value());
+        }
+    }
+
+private:
+    void selectAt(int x) {
+        const double position = std::max(0.0, std::min(1.0,
+            static_cast<double>(x - 14) / std::max(1, width() - 28)));
+        int nearest = 0;
+        for (int index = 1; index < retentionOptions().size(); ++index) {
+            if (std::abs(retentionOptions()[index].position - position) <
+                std::abs(retentionOptions()[nearest].position - position)) nearest = index;
+        }
+        if (nearest != index_) {
+            index_ = nearest;
+            update();
+        }
+    }
+    int index_ = 0;
+    int dragStartDays_ = 0;
+    bool dragging_ = false;
+    std::function<void(int)> changeCallback_;
+};
+
+QString formatJavaScript(const QString &source) {
+    enum class Mode { Code, SingleQuote, DoubleQuote, Template, LineComment, BlockComment, Regex };
+    QString output;
+    Mode mode = Mode::Code;
+    int indentation = 0;
+    int parenthesisDepth = 0;
+    bool escaped = false;
+    bool regexCharacterClass = false;
+    auto trimRight = [&] {
+        output.remove(QRegularExpression(QStringLiteral("[ \\t]+$")));
+    };
+    auto appendIndent = [&] {
+        if (output.isEmpty() || output.endsWith(QLatin1Char('\n'))) {
+            output += QString(indentation * 4, QLatin1Char(' '));
+        }
+    };
+    auto appendNewline = [&] {
+        trimRight();
+        if (!output.isEmpty() && !output.endsWith(QLatin1Char('\n'))) output += QLatin1Char('\n');
+    };
+    auto appendSpace = [&] {
+        if (!output.isEmpty() && !output.endsWith(QLatin1Char(' '))
+            && !output.endsWith(QLatin1Char('\n'))) output += QLatin1Char(' ');
+    };
+    auto startsRegex = [&] {
+        const QString trimmed = output.trimmed();
+        if (trimmed.isEmpty()) return true;
+        if (QStringLiteral("=([{!?:;,").contains(trimmed.back())) return true;
+        for (const QString &keyword : {QStringLiteral("return"), QStringLiteral("case"),
+                                      QStringLiteral("throw"), QStringLiteral("typeof"),
+                                      QStringLiteral("instanceof")}) {
+            if (trimmed.endsWith(keyword)) return true;
+        }
+        return false;
+    };
+
+    for (int index = 0; index < source.size(); ++index) {
+        const QChar character = source[index];
+        const QChar next = index + 1 < source.size() ? source[index + 1] : QChar();
+        if (mode == Mode::SingleQuote || mode == Mode::DoubleQuote || mode == Mode::Template) {
+            output += character;
+            if (escaped) escaped = false;
+            else if (character == QLatin1Char('\\')) escaped = true;
+            else if ((mode == Mode::SingleQuote && character == QLatin1Char('\''))
+                     || (mode == Mode::DoubleQuote && character == QLatin1Char('"'))
+                     || (mode == Mode::Template && character == QLatin1Char('`'))) mode = Mode::Code;
+            continue;
+        }
+        if (mode == Mode::LineComment) {
+            if (character == QLatin1Char('\n')) { appendNewline(); mode = Mode::Code; }
+            else output += character;
+            continue;
+        }
+        if (mode == Mode::BlockComment) {
+            output += character;
+            if (character == QLatin1Char('*') && next == QLatin1Char('/')) {
+                output += next; ++index; appendNewline(); mode = Mode::Code;
+            }
+            continue;
+        }
+        if (mode == Mode::Regex) {
+            output += character;
+            if (escaped) escaped = false;
+            else if (character == QLatin1Char('\\')) escaped = true;
+            else if (character == QLatin1Char('[')) regexCharacterClass = true;
+            else if (character == QLatin1Char(']')) regexCharacterClass = false;
+            else if (character == QLatin1Char('/') && !regexCharacterClass) mode = Mode::Code;
+            continue;
+        }
+
+        if (character.isSpace()) {
+            appendSpace();
+        } else if (character == QLatin1Char('\'') || character == QLatin1Char('"')
+                   || character == QLatin1Char('`')) {
+            appendIndent(); output += character;
+            mode = character == QLatin1Char('\'') ? Mode::SingleQuote
+                : (character == QLatin1Char('"') ? Mode::DoubleQuote : Mode::Template);
+        } else if (character == QLatin1Char('/') && next == QLatin1Char('/')) {
+            appendIndent(); output += QStringLiteral("//"); ++index; mode = Mode::LineComment;
+        } else if (character == QLatin1Char('/') && next == QLatin1Char('*')) {
+            appendIndent(); output += QStringLiteral("/*"); ++index; mode = Mode::BlockComment;
+        } else if (character == QLatin1Char('/') && startsRegex()) {
+            appendIndent(); output += character; regexCharacterClass = false; mode = Mode::Regex;
+        } else if (character == QLatin1Char('{')) {
+            trimRight();
+            if (!output.isEmpty() && !output.endsWith(QLatin1Char(' '))
+                && !output.endsWith(QLatin1Char('\n')) && !output.endsWith(QLatin1Char('('))
+                && !output.endsWith(QLatin1Char('['))) output += QLatin1Char(' ');
+            appendIndent(); output += character; ++indentation; appendNewline();
+        } else if (character == QLatin1Char('}')) {
+            trimRight(); if (!output.isEmpty() && !output.endsWith(QLatin1Char('\n'))) appendNewline();
+            indentation = std::max(0, indentation - 1); appendIndent(); output += character; appendNewline();
+        } else if (character == QLatin1Char(';')) {
+            trimRight(); appendIndent(); output += character;
+            if (parenthesisDepth == 0) appendNewline();
+        } else if (character == QLatin1Char('(')) {
+            appendIndent(); output += character; ++parenthesisDepth;
+        } else if (character == QLatin1Char(')')) {
+            trimRight(); output += character; parenthesisDepth = std::max(0, parenthesisDepth - 1);
+        } else if (character == QLatin1Char(',')) {
+            trimRight(); output += QStringLiteral(", ");
+        } else {
+            appendIndent(); output += character;
+        }
+    }
+    return output.trimmed();
 }
 
 QString relativeTime(const QDateTime &dateTime) {
@@ -224,6 +813,7 @@ struct SourceApplicationInfo {
     QString identifier = QStringLiteral("unknown");
     QString name = QStringLiteral("Unknown");
     QByteArray iconData;
+    QByteArray iconVariantsData;
     QImage icon;
 };
 
@@ -234,6 +824,12 @@ public:
 
 protected:
     void highlightBlock(const QString &text) override {
+        // Never inherit the platform/editor theme's default foreground. UOS
+        // can otherwise leave identifiers and punctuation black on our dark
+        // JavaScript editor even while highlighted tokens remain coloured.
+        QTextCharFormat baseFormat;
+        baseFormat.setForeground(QColor(238, 238, 239));
+        setFormat(0, text.size(), baseFormat);
         auto apply = [this, &text](const QString &pattern, const QColor &color,
                                   QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption) {
             QRegularExpression expression(pattern, options);
@@ -295,7 +891,8 @@ void paintHighlightedText(QPainter &painter, const QRect &rect, const QString &t
     QTextDocument document;
     document.setDocumentMargin(0);
     QFont contentFont = baseFont;
-    contentFont.setPointSizeF(13.5);
+    // Body copy should sit one visual step below the card header.
+    contentFont.setPointSizeF(11.0);
     if (!language.isEmpty() && language != QStringLiteral("text")) {
         contentFont.setFamily(QStringLiteral("monospace"));
         contentFont.setStyleHint(QFont::Monospace);
@@ -318,110 +915,378 @@ void paintHighlightedText(QPainter &painter, const QRect &rect, const QString &t
     painter.restore();
 }
 
-QImage windowIcon(Display *display, Window window) {
-    if (!display || window == None) return {};
-    const Atom iconAtom = XInternAtom(display, "_NET_WM_ICON", True);
-    if (iconAtom == None) return {};
+class ImagePreviewWidget final : public QWidget {
+public:
+    explicit ImagePreviewWidget(QWidget *parent = nullptr) : QWidget(parent) {
+        setMinimumSize(240, 160);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    }
+
+    void setImage(const QImage &image) {
+        image_ = image;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        QPainterPath background;
+        background.addRoundedRect(rect().adjusted(0, 0, -1, -1), 10, 10);
+        painter.fillPath(background, QColor(21, 21, 23));
+        painter.setPen(QPen(QColor(56, 56, 60), 1));
+        painter.drawPath(background);
+        if (image_.isNull()) return;
+
+        const QRect targetBounds = rect().adjusted(10, 10, -10, -10);
+        const QSize fitted = image_.size().scaled(targetBounds.size(), Qt::KeepAspectRatio);
+        const QRect target(targetBounds.center().x() - fitted.width() / 2,
+                           targetBounds.center().y() - fitted.height() / 2,
+                           fitted.width(), fitted.height());
+        painter.setClipPath(background);
+        painter.drawImage(target, image_, image_.rect());
+    }
+
+private:
+    QImage image_;
+};
+
+enum class AlertTone { Information, Warning, Destructive };
+
+bool showClipDeckAlert(QWidget *parent, const QString &title, const QString &message,
+                       const QString &acceptText = QStringLiteral("确定"),
+                       const QString &cancelText = QString(),
+                       AlertTone tone = AlertTone::Information) {
+    QDialog dialog(parent);
+    dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    dialog.setAttribute(Qt::WA_TranslucentBackground, true);
+    dialog.setModal(true);
+    dialog.setMinimumWidth(430);
+    dialog.setMaximumWidth(520);
+    dialog.setStyleSheet(QStringLiteral(
+        "QDialog{background:transparent;color:#eeeeef;border:0;}"
+        "QWidget#alertContent{background:#242427;border:1px solid #4a4a4e;"
+        "border-top-left-radius:16px;border-top-right-radius:16px;}"
+        "QWidget#alertFooter{background:#101012;border:1px solid #343438;border-top:0;"
+        "border-bottom-left-radius:16px;border-bottom-right-radius:16px;}"
+        "QLabel#alertTitle{color:#f3f3f4;font-size:18px;font-weight:700;}"
+        "QLabel#alertMessage{color:#b8b8bd;font-size:14px;}"
+        "QPushButton{background:#3a3a3e;color:#eeeeef;border:0;border-radius:9px;"
+        "padding:9px 18px;min-width:72px;}"
+        "QPushButton:hover{background:#4a4a4f;}"
+        "QPushButton#accept{background:#1683ff;color:white;font-weight:600;}"
+        "QPushButton#destructive{background:#c83b45;color:white;font-weight:600;}"));
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    QWidget *content = new QWidget(&dialog);
+    content->setObjectName(QStringLiteral("alertContent"));
+    QVBoxLayout *contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(22, 20, 22, 18);
+    contentLayout->setSpacing(14);
+    QHBoxLayout *heading = new QHBoxLayout;
+    QLabel *indicator = new QLabel(QStringLiteral("●"), content);
+    indicator->setStyleSheet(tone == AlertTone::Destructive
+        ? QStringLiteral("color:#ff5f68;font-size:16px;")
+        : tone == AlertTone::Warning
+            ? QStringLiteral("color:#ffb44a;font-size:16px;")
+            : QStringLiteral("color:#4da3ff;font-size:16px;"));
+    QLabel *titleLabel = new QLabel(title, content);
+    titleLabel->setObjectName(QStringLiteral("alertTitle"));
+    heading->addWidget(indicator);
+    heading->addWidget(titleLabel, 1);
+    QLabel *messageLabel = new QLabel(message, content);
+    messageLabel->setObjectName(QStringLiteral("alertMessage"));
+    messageLabel->setWordWrap(true);
+    messageLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    contentLayout->addLayout(heading);
+    contentLayout->addWidget(messageLabel);
+    QWidget *footer = new QWidget(&dialog);
+    footer->setObjectName(QStringLiteral("alertFooter"));
+    QHBoxLayout *buttons = new QHBoxLayout(footer);
+    buttons->setContentsMargins(18, 12, 18, 12);
+    buttons->setSpacing(10);
+    buttons->addStretch();
+    if (!cancelText.isEmpty()) {
+        QPushButton *cancel = new QPushButton(cancelText, footer);
+        QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+        buttons->addWidget(cancel);
+    }
+    QPushButton *accept = new QPushButton(acceptText, footer);
+    accept->setObjectName(tone == AlertTone::Destructive
+        ? QStringLiteral("destructive") : QStringLiteral("accept"));
+    accept->setDefault(true);
+    QObject::connect(accept, &QPushButton::clicked, &dialog, &QDialog::accept);
+    buttons->addWidget(accept);
+    layout->addWidget(content);
+    layout->addWidget(footer);
+    dialog.adjustSize();
+    QPainterPath rounded;
+    rounded.addRoundedRect(QRectF(dialog.rect().adjusted(0, 0, -1, -1)), 16, 16);
+    dialog.setMask(QRegion(rounded.toFillPolygon().toPolygon()));
+    return dialog.exec() == QDialog::Accepted;
+}
+
+struct DesktopApplicationEntry {
+    QString path;
+    QString name;
+    QString icon;
+    QString startupWMClass;
+    QString exec;
+    QString execPath;
+    QString execBaseName;
+};
+
+struct X11ApplicationIdentity {
+    Window window = None;
+    qint64 pid = 0;
+    QString wmInstance;
+    QString wmClass;
+    QString executablePath;
+};
+
+QString normalizedApplicationToken(const QString &value) {
+    QString result = value.trimmed().toLower();
+    if (result.endsWith(QStringLiteral(".desktop"))) result.chop(8);
+    result.remove(QRegularExpression(QStringLiteral("[^a-z0-9]+")));
+    return result;
+}
+
+QString unescapeDesktopValue(QString value) {
+    value.replace(QStringLiteral("\\s"), QStringLiteral(" "));
+    value.replace(QStringLiteral("\\n"), QStringLiteral("\n"));
+    value.replace(QStringLiteral("\\t"), QStringLiteral("\t"));
+    value.replace(QStringLiteral("\\r"), QStringLiteral("\r"));
+    value.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
+    return value;
+}
+
+QString desktopExecCommand(const QString &exec) {
+    QString value = exec.trimmed();
+    QStringList tokens;
+    QString token;
+    QChar quote;
+    bool escaped = false;
+    for (const QChar character : value) {
+        if (escaped) { token.append(character); escaped = false; continue; }
+        if (character == QLatin1Char('\\')) { escaped = true; continue; }
+        if (!quote.isNull()) {
+            if (character == quote) quote = QChar();
+            else token.append(character);
+            continue;
+        }
+        if (character == QLatin1Char('\'') || character == QLatin1Char('"')) {
+            quote = character;
+        } else if (character.isSpace()) {
+            if (!token.isEmpty()) { tokens.append(token); token.clear(); }
+        } else {
+            token.append(character);
+        }
+    }
+    if (!token.isEmpty()) tokens.append(token);
+    int index = 0;
+    if (index < tokens.size() && QFileInfo(tokens[index]).fileName() == QStringLiteral("env")) ++index;
+    while (index < tokens.size() && tokens[index].contains(QLatin1Char('='))
+           && !tokens[index].startsWith(QLatin1Char('/'))) ++index;
+    while (index < tokens.size() && tokens[index].startsWith(QLatin1Char('%'))) ++index;
+    return index < tokens.size() ? tokens[index] : QString();
+}
+
+QVector<DesktopApplicationEntry> scanDesktopApplications() {
+    QVector<DesktopApplicationEntry> entries;
+    const QStringList roots = {
+        QDir::home().filePath(QStringLiteral(".local/share/applications")),
+        QStringLiteral("/usr/share/applications")
+    };
+    QSet<QString> visited;
+    for (const QString &root : roots) {
+        if (!QFileInfo(root).isDir()) continue;
+        QDirIterator iterator(root, QStringList{QStringLiteral("*.desktop")}, QDir::Files,
+                              QDirIterator::Subdirectories);
+        while (iterator.hasNext()) {
+            const QString path = iterator.next();
+            const QString desktopID = QFileInfo(path).fileName().toLower();
+            if (visited.contains(desktopID)) continue; // User entry overrides system entry.
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+            DesktopApplicationEntry entry;
+            entry.path = path;
+            QString localizedName;
+            bool inDesktopEntry = false;
+            while (!file.atEnd()) {
+                const QString line = QString::fromUtf8(file.readLine()).trimmed();
+                if (line.startsWith(QLatin1Char('['))) {
+                    inDesktopEntry = line == QStringLiteral("[Desktop Entry]");
+                    continue;
+                }
+                if (!inDesktopEntry || line.isEmpty() || line.startsWith(QLatin1Char('#'))) continue;
+                const int separator = line.indexOf(QLatin1Char('='));
+                if (separator <= 0) continue;
+                const QString key = line.left(separator);
+                const QString value = unescapeDesktopValue(line.mid(separator + 1));
+                if (key == QStringLiteral("Name")) entry.name = value;
+                else if ((key == QStringLiteral("Name[zh_CN]") || key == QStringLiteral("Name[zh]"))
+                         && localizedName.isEmpty()) localizedName = value;
+                else if (key == QStringLiteral("Icon")) entry.icon = value;
+                else if (key == QStringLiteral("StartupWMClass")) entry.startupWMClass = value;
+                else if (key == QStringLiteral("Exec")) entry.exec = value;
+            }
+            if (!localizedName.isEmpty()) entry.name = localizedName;
+            entry.execPath = desktopExecCommand(entry.exec);
+            entry.execBaseName = QFileInfo(entry.execPath).fileName();
+            if (!entry.name.isEmpty() || !entry.exec.isEmpty() || !entry.startupWMClass.isEmpty()) {
+                entries.append(entry);
+                visited.insert(desktopID);
+            }
+        }
+    }
+    return entries;
+}
+
+const QVector<DesktopApplicationEntry> &desktopApplications() {
+    static const QVector<DesktopApplicationEntry> entries = scanDesktopApplications();
+    return entries;
+}
+
+QString canonicalExecutablePath(const QString &path) {
+    if (path.isEmpty()) return {};
+    QFileInfo info(path);
+    const QString canonical = info.canonicalFilePath();
+    return canonical.isEmpty() ? info.absoluteFilePath() : canonical;
+}
+
+int desktopMatchScore(const DesktopApplicationEntry &entry,
+                      const X11ApplicationIdentity &identity) {
+    const QString instance = normalizedApplicationToken(identity.wmInstance);
+    const QString wmClass = normalizedApplicationToken(identity.wmClass);
+    const QString startup = normalizedApplicationToken(entry.startupWMClass);
+    if (!startup.isEmpty() && (startup == instance || startup == wmClass)) return 300;
+
+    const QString actualExe = canonicalExecutablePath(identity.executablePath);
+    QString desktopExe = entry.execPath;
+    if (!desktopExe.isEmpty() && !QFileInfo(desktopExe).isAbsolute()) {
+        desktopExe = QStandardPaths::findExecutable(desktopExe);
+    }
+    if (!actualExe.isEmpty() && !desktopExe.isEmpty()
+        && canonicalExecutablePath(desktopExe) == actualExe) return 200;
+
+    const QString actualBase = normalizedApplicationToken(QFileInfo(actualExe).fileName());
+    const QString execBase = normalizedApplicationToken(entry.execBaseName);
+    const QString desktopBase = normalizedApplicationToken(QFileInfo(entry.path).completeBaseName());
+    if (!actualBase.isEmpty() && (actualBase == execBase || actualBase == desktopBase)) return 120;
+    if ((!instance.isEmpty() && (instance == execBase || instance == desktopBase))
+        || (!wmClass.isEmpty() && (wmClass == execBase || wmClass == desktopBase))) return 100;
+    return 0;
+}
+
+qint64 windowPID(Display *display, Window window) {
+    const Atom pidAtom = XInternAtom(display, "_NET_WM_PID", True);
+    if (pidAtom == None) return 0;
     Atom actualType = None;
     int actualFormat = 0;
     unsigned long itemCount = 0;
     unsigned long bytesAfter = 0;
     unsigned char *raw = nullptr;
-    if (XGetWindowProperty(display, window, iconAtom, 0, 1024 * 1024, False, XA_CARDINAL,
-                           &actualType, &actualFormat, &itemCount, &bytesAfter, &raw) != Success
-        || !raw || actualFormat != 32) {
-        if (raw) XFree(raw);
-        return {};
+    const int status = XGetWindowProperty(display, window, pidAtom, 0, 1, False,
+                                          XA_CARDINAL, &actualType, &actualFormat,
+                                          &itemCount, &bytesAfter, &raw);
+    qint64 pid = 0;
+    if (status == Success && raw && actualFormat == 32 && itemCount > 0) {
+        pid = static_cast<qint64>(*reinterpret_cast<unsigned long *>(raw));
     }
+    if (raw) XFree(raw);
+    return pid;
+}
 
-    const auto *values = reinterpret_cast<unsigned long *>(raw);
-    unsigned long offset = 0;
-    QImage best;
-    int bestDistance = std::numeric_limits<int>::max();
-    while (offset + 2 <= itemCount) {
-        const int width = static_cast<int>(values[offset]);
-        const int height = static_cast<int>(values[offset + 1]);
-        const unsigned long pixelCount = width > 0 && height > 0
-            ? static_cast<unsigned long>(width) * static_cast<unsigned long>(height) : 0;
-        if (pixelCount == 0 || offset + 2 + pixelCount > itemCount) break;
-        const int distance = std::abs(std::max(width, height) - 64);
-        if (width <= 512 && height <= 512 && distance < bestDistance) {
-            QImage candidate(width, height, QImage::Format_ARGB32);
-            for (int y = 0; y < height; ++y) {
-                for (int x = 0; x < width; ++x) {
-                    candidate.setPixel(x, y, static_cast<QRgb>(values[offset + 2 + y * width + x]));
-                }
-            }
-            best = candidate;
-            bestDistance = distance;
-        }
-        offset += 2 + pixelCount;
+X11ApplicationIdentity activeX11Application(Display *display) {
+    X11ApplicationIdentity identity;
+    // _NET_ACTIVE_WINDOW identifies the managed client window.  Do not walk
+    // upward to the window-manager frame: PID and WM_CLASS live on the client.
+    identity.window = activeTopLevelWindow(display);
+    if (identity.window == None) {
+        Window focused = None;
+        int revertTo = RevertToNone;
+        XGetInputFocus(display, &focused, &revertTo);
+        identity.window = topLevelWindow(display, focused);
     }
-    XFree(raw);
-    return best;
+    if (identity.window == None) return identity;
+    identity.pid = windowPID(display, identity.window);
+    XClassHint classHint{};
+    if (XGetClassHint(display, identity.window, &classHint)) {
+        if (classHint.res_name) {
+            identity.wmInstance = QString::fromLocal8Bit(classHint.res_name);
+            XFree(classHint.res_name);
+        }
+        if (classHint.res_class) {
+            identity.wmClass = QString::fromLocal8Bit(classHint.res_class);
+            XFree(classHint.res_class);
+        }
+    }
+    if (identity.pid > 0) {
+        identity.executablePath = QFileInfo(
+            QStringLiteral("/proc/%1/exe").arg(identity.pid)).symLinkTarget();
+        identity.executablePath = canonicalExecutablePath(identity.executablePath);
+    }
+    return identity;
 }
 
 SourceApplicationInfo activeApplication(Display *display) {
     SourceApplicationInfo result;
-    if (!display) {
-        return result;
-    }
-    Window focused = None;
-    int revertTo = RevertToNone;
-    XGetInputFocus(display, &focused, &revertTo);
-    const Window topLevel = topLevelWindow(display, focused);
-    if (topLevel == None) {
-        return result;
+    if (!display) return result;
+    const X11ApplicationIdentity identity = activeX11Application(display);
+    const DesktopApplicationEntry *matched = nullptr;
+    int matchedScore = 0;
+    for (const DesktopApplicationEntry &entry : desktopApplications()) {
+        const int score = desktopMatchScore(entry, identity);
+        if (score > matchedScore) { matched = &entry; matchedScore = score; }
     }
 
-    XClassHint classHint{};
-    if (XGetClassHint(display, topLevel, &classHint)) {
-        if (classHint.res_class) {
-            result.identifier = QString::fromLocal8Bit(classHint.res_class);
-            result.name = result.identifier;
-            XFree(classHint.res_class);
+    QString iconValue;
+    QString iconPath;
+    int pngVariantCount = 0;
+    bool hasSvgVariant = false;
+    if (matched) {
+        result.identifier = QFileInfo(matched->path).fileName();
+        result.name = matched->name.isEmpty() ? identity.wmClass : matched->name;
+        iconValue = matched->icon;
+        const bool isClipDeck = QFileInfo(matched->path).fileName().compare(
+            QStringLiteral("clipdeck.desktop"), Qt::CaseInsensitive) == 0;
+        if (isClipDeck) {
+            // The macOS application artwork contains a platform-style baked
+            // shadow. Linux docks and cards add their own treatment, so use a
+            // clean, shadow-free source icon here.
+            result.icon = shadowFreeClipDeckIcon();
+        } else {
+            const LinuxApplicationIconSet iconSet = resolveLinuxApplicationIconSet(iconValue);
+            result.iconVariantsData = iconSet.serialize();
+            iconPath = iconSet.selectedPath;
+            pngVariantCount = iconSet.pngVariants.size();
+            hasSvgVariant = !iconSet.svgData.isEmpty();
+            result.icon = iconSet.rasterize(QSize(256, 256), 1.0);
         }
-        if (classHint.res_name) {
-            if (result.name == QStringLiteral("Unknown")) {
-                result.name = QString::fromLocal8Bit(classHint.res_name);
-            }
-            XFree(classHint.res_name);
-        }
+    } else {
+        result.identifier = !identity.wmClass.isEmpty() ? identity.wmClass : identity.wmInstance;
+        result.name = !identity.wmClass.isEmpty() ? identity.wmClass
+                                                  : (!identity.wmInstance.isEmpty() ? identity.wmInstance
+                                                                                   : QStringLiteral("Unknown"));
     }
-    char *windowName = nullptr;
-    if (XFetchName(display, topLevel, &windowName) && windowName) {
-        const QString title = QString::fromLocal8Bit(windowName).trimmed();
-        if (!title.isEmpty() && result.name == QStringLiteral("Unknown")) {
-            result.name = title;
-        }
-        XFree(windowName);
-    }
-    result.icon = windowIcon(display, topLevel);
     if (!result.icon.isNull()) {
         QBuffer buffer(&result.iconData);
         buffer.open(QIODevice::WriteOnly);
         result.icon.save(&buffer, "PNG");
     }
+    qInfo().noquote()
+        << QStringLiteral("[ClipDeck][X11Source] window=0x%1 pid=%2 WM_CLASS(instance=\"%3\", class=\"%4\") exe=\"%5\" desktop=\"%6\" score=%7 Icon=\"%8\" iconPath=\"%9\" svg=%10 pngVariants=%11")
+               .arg(static_cast<qulonglong>(identity.window), 0, 16)
+               .arg(identity.pid)
+               .arg(identity.wmInstance, identity.wmClass, identity.executablePath,
+                    matched ? matched->path : QString())
+               .arg(matchedScore)
+               .arg(iconValue, iconPath)
+               .arg(hasSvgVariant ? QStringLiteral("yes") : QStringLiteral("no"))
+               .arg(pngVariantCount);
     return result;
-}
-
-QIcon transparentTrayIcon() {
-    // UOS displays application icons literally in the tray. Drawing a small
-    // monochrome glyph keeps the panel transparent instead of showing the
-    // coloured square background from the regular application icon.
-    QPixmap pixmap(44, 44);
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    QPen pen(QColor(235, 235, 235), 4.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-    painter.setPen(pen);
-    painter.drawPolyline(QPolygonF({QPointF(17, 12), QPointF(9, 22), QPointF(17, 32)}));
-    painter.drawPolyline(QPolygonF({QPointF(27, 12), QPointF(35, 22), QPointF(27, 32)}));
-    painter.drawLine(QPointF(25, 9), QPointF(19, 35));
-    painter.end();
-    pixmap.setDevicePixelRatio(2.0);
-    return QIcon(pixmap);
 }
 
 bool setLaunchAtLogin(bool enabled) {
@@ -439,40 +1304,171 @@ bool setLaunchAtLogin(bool enabled) {
     return true;
 }
 
+QIcon searchFieldIcon(bool closeIcon, qreal dpr) {
+    // Generate the raster at the current screen scale instead of assuming
+    // either 1x or 2x. For example, 125% uses 40 physical pixels for the
+    // 32 logical-pixel action icon.
+    dpr = std::max<qreal>(1.0, dpr);
+    QPixmap pixmap(DisplayScale::rasterSize(QSize(32, 32), dpr));
+    pixmap.fill(Qt::transparent);
+    pixmap.setDevicePixelRatio(dpr);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(QColor(255, 255, 255, closeIcon ? 122 : 218), 2,
+                        Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (closeIcon) {
+        painter.setBrush(QColor(255, 255, 255, 34));
+        painter.drawEllipse(QRectF(6.5, 6.5, 19, 19));
+        painter.drawLine(QPointF(12, 12), QPointF(20, 20));
+        painter.drawLine(QPointF(20, 12), QPointF(12, 20));
+    } else {
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QRectF(7, 7, 13, 13));
+        painter.drawLine(QPointF(18.5, 18.5), QPointF(25, 25));
+    }
+    return QIcon(pixmap);
+}
+
+int normalizedImageAngle(int angle) {
+    return ((angle % 360) + 360) % 360;
+}
+
+QImage imageAtAngle(const QImage &image, int angle) {
+    angle = normalizedImageAngle(angle);
+    if (image.isNull() || angle == 0) return image;
+    QTransform transform;
+    transform.rotate(angle);
+    return image.transformed(transform, Qt::SmoothTransformation);
+}
+
+QSize imageSizeAtAngle(const QSize &size, int angle) {
+    angle = normalizedImageAngle(angle);
+    return angle == 90 || angle == 270 ? QSize(size.height(), size.width()) : size;
+}
+
+QIcon imageRotationIcon(bool clockwise) {
+    const qreal dpr = DisplayScale::factor();
+    QPixmap pixmap(DisplayScale::rasterSize(QSize(28, 28), dpr));
+    pixmap.fill(Qt::transparent);
+    pixmap.setDevicePixelRatio(dpr);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(QColor(242, 242, 244, 225), 1.8,
+                        Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawArc(QRectF(6.5, 6.5, 15, 15), clockwise ? 35 * 16 : 145 * 16, 275 * 16);
+    QPainterPath arrow;
+    if (clockwise) {
+        arrow.moveTo(21.2, 5.8);
+        arrow.lineTo(21.7, 11.0);
+        arrow.lineTo(16.7, 9.2);
+    } else {
+        arrow.moveTo(6.8, 5.8);
+        arrow.lineTo(6.3, 11.0);
+        arrow.lineTo(11.3, 9.2);
+    }
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(242, 242, 244, 225));
+    painter.drawPath(arrow);
+    return QIcon(pixmap);
+}
+
 class DeckWindow final : public QWidget {
 public:
     explicit DeckWindow(Display *display, HistoryRepository *repository, QWidget *parent = nullptr)
         : QWidget(parent), display_(display), repository_(repository) {
         setWindowTitle(QStringLiteral("ClipDeck"));
-        setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint);
+        setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint
+                       | Qt::NoDropShadowWindowHint | Qt::WindowDoesNotAcceptFocus);
+        setAttribute(Qt::WA_X11DoNotAcceptFocus, true);
         setAttribute(Qt::WA_TranslucentBackground, true);
         setAttribute(Qt::WA_NoSystemBackground, true);
         setAutoFillBackground(false);
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
         searchEdit_ = new QLineEdit(this);
-        searchEdit_->setPlaceholderText(QStringLiteral("搜索剪贴板历史"));
+        searchEdit_->setPlaceholderText(QStringLiteral("搜索文本"));
         searchEdit_->setClearButtonEnabled(false);
         searchEdit_->setVisible(false);
         searchEdit_->setStyleSheet(QStringLiteral(
-            "QLineEdit{color:white;background:rgba(255,255,255,34);border:1px solid rgba(255,255,255,38);"
-            "border-radius:17px;padding:5px 13px;font-size:13px;}"
-            "QLineEdit:focus{color:white;background:rgba(255,255,255,44);"
-            "border:1px solid rgba(255,255,255,66);}"));
+            "QLineEdit{color:white;background:rgba(62,62,66,220);border:0;"
+            "border-radius:17px;padding:5px 8px;font-size:14px;font-weight:500;outline:0;"
+            "selection-background-color:rgba(100,100,106,150);selection-color:white;}"
+            "QLineEdit:!focus{background:rgba(62,62,66,220);border:0;}"
+            "QLineEdit:focus{color:white;background:rgba(68,68,72,232);border:0;"
+            "selection-background-color:#1683ff;}"));
         QPalette searchPalette = searchEdit_->palette();
         searchPalette.setColor(QPalette::Text, QColor(255, 255, 255, 235));
         searchEdit_->setPalette(searchPalette);
-        QAction *closeSearch = searchEdit_->addAction(
-            style()->standardIcon(QStyle::SP_DialogCloseButton), QLineEdit::TrailingPosition);
-        QObject::connect(closeSearch, &QAction::triggered, this, [this] { endSearch(); });
+        searchDebounce_ = new QTimer(this);
+        searchDebounce_->setSingleShot(true);
+        searchDebounce_->setInterval(90);
+        QObject::connect(searchDebounce_, &QTimer::timeout, this, [this] { reload(); });
+        blurUpdateTimer_ = new QTimer(this);
+        blurUpdateTimer_->setSingleShot(true);
+        blurUpdateTimer_->setInterval(24);
+        QObject::connect(blurUpdateTimer_, &QTimer::timeout, this, [this] {
+            if (isVisible() && !resizing_) enableKWinBlur();
+        });
+        resizeReleaseTimer_ = new QTimer(this);
+        resizeReleaseTimer_->setInterval(16);
+        QObject::connect(resizeReleaseTimer_, &QTimer::timeout, this, [this] {
+            if (resizing_ && !(QApplication::mouseButtons() & Qt::LeftButton)) {
+                finishLiveResize();
+            }
+        });
+        resizeFrameTimer_ = new QTimer(this);
+        resizeFrameTimer_->setSingleShot(true);
+        resizeFrameTimer_->setInterval(8);
+        QObject::connect(resizeFrameTimer_, &QTimer::timeout, this, [this] {
+            applyPendingResizeGeometry();
+        });
+        outsideClickTimer_ = new QTimer(this);
+        outsideClickTimer_->setInterval(20);
+        QObject::connect(outsideClickTimer_, &QTimer::timeout, this, [this] {
+            if (!display_ || !isVisible()) return;
+            Window root = None;
+            Window child = None;
+            int rootX = 0;
+            int rootY = 0;
+            int windowX = 0;
+            int windowY = 0;
+            unsigned int mask = 0;
+            if (!XQueryPointer(display_, DefaultRootWindow(display_), &root, &child,
+                               &rootX, &rootY, &windowX, &windowY, &mask)) return;
+            const unsigned int buttons = mask & (Button1Mask | Button2Mask | Button3Mask);
+            const bool newlyPressed = (buttons & ~lastPointerButtonMask_) != 0;
+            lastPointerButtonMask_ = buttons;
+            if (newlyPressed && !frameGeometry().contains(QPoint(rootX, rootY))) hide();
+        });
+        QAction *leadingSearchAction = searchEdit_->addAction(
+            searchFieldIcon(false, DisplayScale::factor()), QLineEdit::LeadingPosition);
+        leadingSearchAction->setEnabled(false);
+        QAction *closeSearchAction = searchEdit_->addAction(
+            searchFieldIcon(true, DisplayScale::factor()), QLineEdit::TrailingPosition);
+        QObject::connect(closeSearchAction, &QAction::triggered, this, [this] { endSearch(); });
         searchEdit_->installEventFilter(this);
         QObject::connect(searchEdit_, &QLineEdit::textChanged, this, [this](const QString &value) {
             searchQuery_ = value.trimmed();
-            reload();
+            if (searchActive_) searchDebounce_->start();
         });
         QObject::connect(searchEdit_, &QLineEdit::returnPressed, this, [this] {
             setFocus(Qt::ShortcutFocusReason);
+            pasteSelected(false);
         });
+        searchAnimation_ = new QVariantAnimation(this);
+        searchAnimation_->setDuration(140);
+        searchAnimation_->setEasingCurve(QEasingCurve::OutCubic);
+        QObject::connect(searchAnimation_, &QVariantAnimation::valueChanged, this,
+                         [this](const QVariant &value) {
+            searchExpansion_ = value.toReal();
+            updateSearchGeometry();
+            update();
+        });
+        QObject::connect(searchAnimation_, &QVariantAnimation::finished, this, [this] {
+            if (!searchActive_ && searchExpansion_ <= 0.001) searchEdit_->hide();
+        });
+        refreshCategoryValues();
         reload();
         QTimer::singleShot(0, this, [this] {
             const int count = std::min(20, static_cast<int>(items_.size()));
@@ -493,12 +1489,15 @@ public:
         item.sourceName = source.name;
         item.sourceIcon = source.icon;
         item.sourceIconData = source.iconData;
+        item.sourceIconVariantsData = source.iconVariantsData;
         item.category = repository_->classifyText(text, source.identifier, source.name,
                                                    QDateTime::currentDateTime());
         item.copiedAt = QDateTime::currentDateTime();
         item = repository_->save(item);
         fetchLinkMetadataIfNeeded(item);
         selectedCategory_ = QStringLiteral("History");
+        selectedIndex_ = -1;
+        scrollOffset_ = 0;
         reload();
     }
 
@@ -521,9 +1520,12 @@ public:
         item.sourceName = source.name;
         item.sourceIcon = source.icon;
         item.sourceIconData = source.iconData;
+        item.sourceIconVariantsData = source.iconVariantsData;
         item.copiedAt = QDateTime::currentDateTime();
         repository_->save(item);
         selectedCategory_ = QStringLiteral("History");
+        selectedIndex_ = -1;
+        scrollOffset_ = 0;
         reload();
     }
 
@@ -537,6 +1539,8 @@ public:
 
     void showNearPointer() {
         rememberPasteTarget();
+        quickPasteOverlay_ = false;
+        nonActivatingPresentation_ = true;
 
         QDesktopWidget *desktop = QApplication::desktop();
         const int screenNumber = desktop->screenNumber(QCursor::pos());
@@ -554,34 +1558,50 @@ public:
             height);
         clampScrollOffset();
         show();
-        enableKWinBlur();
         raise();
-        activateWindow();
+        // Keep the source application's X input focus untouched. The keyboard
+        // grab routes Deck navigation keys here without causing browser DOM
+        // fields (for example online Excel search) to blur.
         setFocus(Qt::ShortcutFocusReason);
-        requestDeckFocus();
+        setDeckInputHint(false);
+        grabDeckKeyboard(0);
+        lastPointerButtonMask_ = 0;
+        if (outsideClickTimer_) outsideClickTimer_->start();
     }
 
-    void pasteSelected(bool forcePlainText = false) {
+    void pasteSelected(bool forcePlainText = false, bool quickPaste = false) {
         if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) {
             return;
         }
 
         suppressClipboardCaptureUntil_ = QDateTime::currentMSecsSinceEpoch() + 800;
-        if (items_[selectedIndex_].isImage()) {
-            QApplication::clipboard()->setImage(items_[selectedIndex_].image, QClipboard::Clipboard);
+        const ClipboardItem selectedItem = items_[selectedIndex_];
+        if (selectedItem.isImage()) {
+            QApplication::clipboard()->setImage(
+                imageAtAngle(selectedItem.image, selectedItem.imageAngle), QClipboard::Clipboard);
         } else {
             QSettings settings;
             const bool preserveFormatting = !forcePlainText && settings.value(
                 QStringLiteral("paste/preserveFormatting"), false).toBool();
-            if (preserveFormatting && !items_[selectedIndex_].richTextHtml.isEmpty()) {
+            if (preserveFormatting && !selectedItem.richTextHtml.isEmpty()) {
                 auto *mimeData = new QMimeData;
-                mimeData->setText(items_[selectedIndex_].text);
-                mimeData->setHtml(items_[selectedIndex_].richTextHtml);
+                mimeData->setText(selectedItem.text);
+                mimeData->setHtml(selectedItem.richTextHtml);
                 QApplication::clipboard()->setMimeData(mimeData, QClipboard::Clipboard);
             } else {
-                QApplication::clipboard()->setText(items_[selectedIndex_].text, QClipboard::Clipboard);
+                QApplication::clipboard()->setText(selectedItem.text, QClipboard::Clipboard);
             }
         }
+        // In non-activating presentation the source application's input
+        // focus is intentionally left untouched. Remember that state before
+        // hideEvent clears it, and synchronously release the X keyboard grab
+        // before injecting Ctrl+V. Otherwise the synthetic paste keystroke can
+        // still be delivered back to Deck itself.
+        // The focus-preservation contract starts as soon as Deck is shown;
+        // mouse activation may select a card before the asynchronous keyboard
+        // grab succeeds, so it must not depend on keyboardGrabbed_.
+        const bool preservedSourceFocus = nonActivatingPresentation_;
+        releaseDeckKeyboard();
         hide();
 
         if (!display_ || pasteTarget_ == None) {
@@ -589,9 +1609,36 @@ public:
         }
 
         const Window target = pasteTarget_;
-        QTimer::singleShot(30, this, [this, target] {
-            activateTarget(target);
-            waitForTargetAndPaste(target, 0);
+        QTimer::singleShot(20, this,
+                           [this, target, quickPaste, forcePlainText, preservedSourceFocus] {
+            const bool heldControlPaste = quickPaste && configuredModifier(
+                QStringLiteral("shortcuts/quickPasteModifier"), Qt::ControlModifier)
+                    == Qt::ControlModifier;
+            if (heldControlPaste) {
+                if (preservedSourceFocus) {
+                    pasteUsingPreservedFocus(target, true);
+                } else {
+                    activateTarget(target);
+                    restorePasteWidgetFocus(target);
+                    waitForTargetAndPaste(target, 0, true);
+                }
+            } else if (forcePlainText && configuredModifier(
+                           QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier)
+                           == Qt::ShiftModifier) {
+                // Shift+Enter used to wait until Shift was physically released,
+                // making plain-text paste noticeably slower. Restore focus at
+                // once and temporarily suppress Shift only around synthetic
+                // Ctrl+V; the clipboard payload is already plain text.
+                if (preservedSourceFocus) {
+                    pasteUsingPreservedFocus(target, false, true);
+                } else {
+                    activateTarget(target);
+                    restorePasteWidgetFocus(target);
+                    waitForTargetAndPaste(target, 0, false, true);
+                }
+            } else {
+                waitForPasteModifiersReleased(target, 0, preservedSourceFocus);
+            }
         });
     }
 
@@ -599,10 +1646,38 @@ public:
         return QDateTime::currentMSecsSinceEpoch() <= suppressClipboardCaptureUntil_;
     }
 
-    void refresh() { reload(); }
-    void beginSearchForRenderCheck() { search(); }
+    void refresh() {
+        refreshCategoryValues();
+        reload();
+    }
+    void beginSearchForRenderCheck() {
+        search();
+        if (searchAnimation_) searchAnimation_->stop();
+        searchExpansion_ = 1.0;
+        updateSearchGeometry();
+        update();
+    }
+    void showNextCategoryPageForRenderCheck() { changeCategoryPage(1); }
     void setSettingsCallback(std::function<void(int)> callback) {
         settingsCallback_ = std::move(callback);
+    }
+
+    bool handleNativeQuickPaste(unsigned int keycode, unsigned int state) {
+        if (!isVisible() || !display_) return false;
+        const KeySym base = XkbKeycodeToKeysym(
+            display_, static_cast<KeyCode>(keycode), 0, 0);
+        if (base < XK_1 || base > XK_9) return false;
+        const unsigned int relevant = state & (ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
+        const unsigned int configured = x11MaskForQtModifiers(configuredModifier(
+            QStringLiteral("shortcuts/quickPasteModifier"), Qt::ControlModifier));
+        if (relevant != configured) return false;
+        const int index = static_cast<int>(base - XK_1);
+        if (index < static_cast<int>(items_.size())) {
+            selectedIndex_ = index;
+            quickPasteOverlay_ = false;
+            QTimer::singleShot(0, this, [this] { pasteSelected(false, true); });
+        }
+        return true;
     }
 
 protected:
@@ -613,25 +1688,33 @@ protected:
 
     void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
+        // WA_NoSystemBackground leaves the translucent backing store intact.
+        // Clear it explicitly so live top-edge resizing cannot retain pixels
+        // from older window geometries as horizontal ghost lines.
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(rect(), Qt::transparent);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
         painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::TextAntialiasing);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, !resizing_);
 
         QPainterPath deckPath;
-        deckPath.addRoundedRect(rect().adjusted(1, 1, -1, -1), 24, 24);
-        painter.fillPath(deckPath, QColor(15, 16, 17, 58));
-        painter.setPen(QPen(QColor(255, 255, 255, 55), 1));
-        painter.drawPath(deckPath);
+        deckPath.addRoundedRect(QRectF(0, 0, width(), height()), 24, 24);
+        // Match the macOS material stack: compositor blur behind the window, a
+        // restrained dark tint, then a very light vertical sheen.  Keep this
+        // per-pixel instead of changing window opacity so cards remain opaque.
+        // UOS does not provide the same behind-window material response as
+        // macOS.  Use the slightly darker macOS neutral (#c9c9c9) and a
+        // stronger black-grey tint so bright windows do not wash the Deck out.
+        // This remains per-pixel; cards are still fully opaque.
+        painter.fillPath(deckPath, QColor(184, 184, 184, 138));
+        painter.fillPath(deckPath, QColor(0, 0, 0, 72));
 
-        QLinearGradient sheen(0, 0, 0, height());
-        sheen.setColorAt(0, QColor(255, 255, 255, 10));
-        sheen.setColorAt(0.45, QColor(255, 255, 255, 0));
-        sheen.setColorAt(1, QColor(0, 0, 0, 10));
-        painter.fillPath(deckPath, sheen);
-
-        if (resizing_) {
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(255, 255, 255, 82));
-            painter.drawRoundedRect(QRect(width() / 2 - 22, 7, 44, 3), 2, 2);
-        }
+        QLinearGradient materialSheen(0, 0, 0, height());
+        materialSheen.setColorAt(0, QColor(255, 255, 255, 15));
+        materialSheen.setColorAt(0.50, QColor(255, 255, 255, 0));
+        materialSheen.setColorAt(1, QColor(0, 0, 0, 15));
+        painter.fillPath(deckPath, materialSheen);
 
         paintHeader(painter);
         if (items_.empty()) {
@@ -644,7 +1727,29 @@ protected:
     void resizeEvent(QResizeEvent *event) override {
         QWidget::resizeEvent(event);
         updateSearchGeometry();
-        if (isVisible()) enableKWinBlur();
+        // XShape + KWin blur property updates are synchronous X11 operations.
+        // Coalesce ordinary resizes and never perform them for every live-drag
+        // frame; doing so produced the stacked lines above the Deck on UOS.
+        if (isVisible() && !resizing_ && blurUpdateTimer_) blurUpdateTimer_->start();
+    }
+
+    int quickPasteIndexForEvent(const QKeyEvent *event) const {
+        if (event->key() >= Qt::Key_1 && event->key() <= Qt::Key_9) {
+            return event->key() - Qt::Key_1;
+        }
+        if (display_ && event->nativeScanCode() != 0) {
+            const KeySym base = XkbKeycodeToKeysym(
+                display_, static_cast<KeyCode>(event->nativeScanCode()), 0, 0);
+            if (base >= XK_1 && base <= XK_9) return static_cast<int>(base - XK_1);
+        }
+        // Fallback for platforms that do not expose the X11 scan code.
+        const int shiftedDigits[] = {Qt::Key_Exclam, Qt::Key_At, Qt::Key_NumberSign,
+            Qt::Key_Dollar, Qt::Key_Percent, Qt::Key_AsciiCircum, Qt::Key_Ampersand,
+            Qt::Key_Asterisk, Qt::Key_ParenLeft};
+        for (int index = 0; index < 9; ++index) {
+            if (event->key() == shiftedDigits[index]) return index;
+        }
+        return -1;
     }
 
     bool eventFilter(QObject *watched, QEvent *event) override {
@@ -658,6 +1763,38 @@ protected:
                 endSearch();
                 return true;
             }
+            const Qt::KeyboardModifiers modifiers = keyEvent->modifiers()
+                & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
+            const Qt::KeyboardModifiers quickModifier = configuredModifier(
+                QStringLiteral("shortcuts/quickPasteModifier"), Qt::ControlModifier);
+            if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+                setFocus(Qt::ShortcutFocusReason);
+                pasteSelected(modifiers == configuredModifier(
+                    QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier));
+                return true;
+            }
+            const bool quickNumber = modifiers == quickModifier
+                && quickPasteIndexForEvent(keyEvent) >= 0;
+            // Once a query exists, bare arrows browse the filtered cards while
+            // the editor keeps focus. Modified arrows remain text navigation.
+            if (!searchEdit_->text().isEmpty() && modifiers == Qt::NoModifier
+                && (keyEvent->key() == Qt::Key_Left
+                    || keyEvent->key() == Qt::Key_Right)) {
+                moveSelection(keyEvent->key() == Qt::Key_Left ? -1 : 1);
+                return true;
+            }
+            const bool deckShortcut = isSettingsShortcut(keyEvent);
+            if (quickNumber || deckShortcut || modifierForKey(keyEvent->key()) == quickModifier) {
+                keyPressEvent(keyEvent);
+                return true;
+            }
+        }
+        if (watched == searchEdit_ && event->type() == QEvent::KeyRelease) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (modifierForKey(keyEvent->key()) != Qt::NoModifier) {
+                keyReleaseEvent(keyEvent);
+                return true;
+            }
         }
         return QWidget::eventFilter(watched, event);
     }
@@ -667,14 +1804,26 @@ protected:
         hide();
     }
 
+    void hideEvent(QHideEvent *event) override {
+        releaseDeckKeyboard();
+        if (outsideClickTimer_) outsideClickTimer_->stop();
+        nonActivatingPresentation_ = false;
+        quickPasteOverlay_ = false;
+        QWidget::hideEvent(event);
+    }
+
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_Escape) {
             if (searchActive_) endSearch();
             else hide();
             return;
         }
+        if (isSettingsShortcut(event)) {
+            if (settingsCallback_) settingsCallback_(0);
+            return;
+        }
         if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-            pasteSelected(event->modifiers() == configuredModifier(
+            pasteSelected(standardKeyboardModifiers(event->modifiers()) == configuredModifier(
                 QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier));
             return;
         }
@@ -713,6 +1862,16 @@ protected:
             editSelected();
             return;
         }
+        if (event->modifiers() == Qt::ControlModifier
+            && event->key() == Qt::Key_BracketLeft) {
+            rotateSelected(-90);
+            return;
+        }
+        if (event->modifiers() == Qt::ControlModifier
+            && event->key() == Qt::Key_BracketRight) {
+            rotateSelected(90);
+            return;
+        }
         if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_R) {
             renameSelected();
             return;
@@ -727,13 +1886,14 @@ protected:
         }
         const Qt::KeyboardModifiers quickPasteModifier = configuredModifier(
             QStringLiteral("shortcuts/quickPasteModifier"), Qt::ControlModifier);
-        if (event->modifiers() == quickPasteModifier
-            && event->key() >= Qt::Key_1 && event->key() <= Qt::Key_9) {
-            const int index = event->key() - Qt::Key_1;
+        const int quickPasteIndex = quickPasteIndexForEvent(event);
+        if (standardKeyboardModifiers(event->modifiers()) == quickPasteModifier
+            && quickPasteIndex >= 0) {
+            const int index = quickPasteIndex;
             if (index < static_cast<int>(items_.size())) {
                 selectedIndex_ = index;
                 quickPasteOverlay_ = false;
-                pasteSelected();
+                pasteSelected(false, true);
             }
             return;
         }
@@ -770,14 +1930,21 @@ protected:
         if (event->button() != Qt::LeftButton) {
             return QWidget::mousePressEvent(event);
         }
-        if (event->pos().y() <= 8) {
+        if (event->pos().y() <= 12) {
             resizing_ = true;
+            if (blurUpdateTimer_) blurUpdateTimer_->stop();
+            suspendKWinBlur();
             resizeStartGlobalY_ = event->globalY();
             resizeStartGeometry_ = geometry();
+            pendingResizeHeight_ = height();
+            // The pointer immediately leaves the frameless window when its top
+            // edge is dragged upward. Keep receiving moves until release.
+            grabMouse(Qt::SizeVerCursor);
+            if (resizeReleaseTimer_) resizeReleaseTimer_->start();
             return;
         }
         if (event->pos().y() < 60) {
-            const QStringList categories = categoryValues();
+            const QStringList &categories = categoryValues();
             const int first = categoryPageStart_;
             const int last = std::min(categories.size(), first + kCategoriesPerPage);
             for (int index = first; index < last; ++index) {
@@ -793,7 +1960,11 @@ protected:
             }
             if (previousCategoryRect().contains(event->pos())) { changeCategoryPage(-1); return; }
             if (nextCategoryRect().contains(event->pos())) { changeCategoryPage(1); return; }
-            if ((addRect().contains(event->pos()) || moreRect().contains(event->pos())) && settingsCallback_) {
+            if (addRect().contains(event->pos()) && settingsCallback_) {
+                settingsCallback_(5); // Category page in new-category mode.
+                return;
+            }
+            if (moreRect().contains(event->pos()) && settingsCallback_) {
                 settingsCallback_(3);
                 return;
             }
@@ -805,8 +1976,11 @@ protected:
                 searchEdit_->clearFocus();
                 setFocus(Qt::MouseFocusReason);
             }
-            centerSelection();
+            // A mouse-selected card is already under the pointer. Moving the
+            // row here (even just enough to reveal a clipped edge) changes the
+            // hit target between the two presses of a double click.
             update();
+            maybeLoadMoreImages();
         }
     }
 
@@ -818,20 +1992,17 @@ protected:
             const int maximumHeight = std::max(250, std::min(420, static_cast<int>(available.height() * 0.42)));
             const int newHeight = std::max(250, std::min(maximumHeight,
                 resizeStartGeometry_.height() + resizeStartGlobalY_ - event->globalY()));
-            setGeometry(resizeStartGeometry_.x(), bottom - newHeight,
-                        resizeStartGeometry_.width(), newHeight);
-            clampScrollOffset();
-            update();
+            pendingResizeHeight_ = newHeight;
+            if (resizeFrameTimer_ && !resizeFrameTimer_->isActive()) resizeFrameTimer_->start();
             return;
         }
-        setCursor(event->pos().y() <= 8 ? Qt::SizeVerCursor : Qt::ArrowCursor);
+        setCursor(event->pos().y() <= 12 ? Qt::SizeVerCursor : Qt::ArrowCursor);
         QWidget::mouseMoveEvent(event);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
         if (resizing_ && event->button() == Qt::LeftButton) {
-            resizing_ = false;
-            QSettings().setValue(QStringLiteral("deck/preferredHeight"), height());
+            finishLiveResize();
             return;
         }
         QWidget::mouseReleaseEvent(event);
@@ -841,7 +2012,7 @@ protected:
         const int index = cardIndexAt(event->pos());
         if (event->button() == Qt::LeftButton && index >= 0) {
             selectedIndex_ = index;
-            pasteSelected(event->modifiers() == configuredModifier(
+            pasteSelected(standardKeyboardModifiers(event->modifiers()) == configuredModifier(
                 QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier));
             return;
         }
@@ -855,6 +2026,7 @@ protected:
         scrollOffset_ -= delta / 2;
         clampScrollOffset();
         update();
+        maybeLoadMoreImages();
         event->accept();
     }
 
@@ -866,26 +2038,39 @@ protected:
         selectedIndex_ = index;
         update();
         QMenu menu(this);
-        QAction *pasteAction = menu.addAction(QStringLiteral("粘贴\tEnter"));
-        QAction *previewAction = menu.addAction(QStringLiteral("预览\tSpace"));
+        auto addShortcutAction = [&menu](const QString &title, const QKeySequence &shortcut) {
+            QAction *action = menu.addAction(title);
+            action->setShortcut(shortcut);
+            action->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+            action->setShortcutVisibleInContextMenu(true);
+            return action;
+        };
+        QAction *pasteAction = addShortcutAction(QStringLiteral("粘贴"), QKeySequence(Qt::Key_Return));
+        QAction *previewAction = addShortcutAction(QStringLiteral("预览"), QKeySequence(Qt::Key_Space));
         QAction *openAction = nullptr;
         if (items_[index].isText()) {
             const QUrl url(items_[index].text.trimmed());
             if (url.isValid() && (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))) {
-                openAction = menu.addAction(QStringLiteral("访问\tCtrl+O"));
+                openAction = addShortcutAction(QStringLiteral("访问"),
+                                               QKeySequence(Qt::CTRL | Qt::Key_O));
             }
         }
         menu.addSeparator();
-        QAction *editAction = menu.addAction(QStringLiteral("编辑\tCtrl+E"));
-        QAction *renameAction = menu.addAction(QStringLiteral("重命名\tCtrl+R"));
+        QAction *editAction = addShortcutAction(QStringLiteral("编辑"),
+                                               QKeySequence(Qt::CTRL | Qt::Key_E));
+        QAction *renameAction = addShortcutAction(QStringLiteral("重命名"),
+                                                 QKeySequence(Qt::CTRL | Qt::Key_R));
         QAction *rotateLeftAction = nullptr;
         QAction *rotateRightAction = nullptr;
         if (items_[index].isImage()) {
-            rotateLeftAction = menu.addAction(QStringLiteral("向左旋转\tCtrl+["));
-            rotateRightAction = menu.addAction(QStringLiteral("向右旋转\tCtrl+]"));
+            rotateLeftAction = addShortcutAction(QStringLiteral("向左旋转"),
+                                                 QKeySequence(Qt::CTRL | Qt::Key_BracketLeft));
+            rotateRightAction = addShortcutAction(QStringLiteral("向右旋转"),
+                                                  QKeySequence(Qt::CTRL | Qt::Key_BracketRight));
         }
         menu.addSeparator();
-        QAction *deleteAction = menu.addAction(QStringLiteral("删除\tCtrl+Delete"));
+        QAction *deleteAction = addShortcutAction(QStringLiteral("删除"),
+                                                 QKeySequence(Qt::CTRL | Qt::Key_Delete));
         const QAction *chosen = menu.exec(event->globalPos());
         if (chosen == pasteAction) pasteSelected();
         else if (chosen == previewAction) previewSelected();
@@ -899,10 +2084,13 @@ protected:
 
     void changeEvent(QEvent *event) override {
         QWidget::changeEvent(event);
+        if (nonActivatingPresentation_) return;
         if (event->type() != QEvent::ActivationChange || isActiveWindow() || !isVisible()) {
             return;
         }
-        QTimer::singleShot(0, this, [this] {
+        const int delay = static_cast<int>(std::max<qint64>(0,
+            focusAcquisitionDeadline_ - QDateTime::currentMSecsSinceEpoch()));
+        QTimer::singleShot(delay, this, [this] {
             if (isVisible() && !isActiveWindow()
                 && QApplication::activeModalWidget() == nullptr
                 && QApplication::activePopupWidget() == nullptr) {
@@ -912,8 +2100,33 @@ protected:
     }
 
 private:
+    void applyPendingResizeGeometry() {
+        if (!resizing_ || pendingResizeHeight_ <= 0) return;
+        const int bottom = resizeStartGeometry_.bottom() + 1;
+        setGeometry(resizeStartGeometry_.x(), bottom - pendingResizeHeight_,
+                    resizeStartGeometry_.width(), pendingResizeHeight_);
+        clampScrollOffset();
+        update();
+    }
+
+    void finishLiveResize() {
+        if (!resizing_) return;
+        if (resizeFrameTimer_) resizeFrameTimer_->stop();
+        applyPendingResizeGeometry();
+        resizing_ = false;
+        if (QWidget::mouseGrabber() == this) releaseMouse();
+        if (resizeReleaseTimer_) resizeReleaseTimer_->stop();
+        QSettings().setValue(QStringLiteral("deck/preferredHeight"), height());
+        textCardCache_.clear();
+        if (blurUpdateTimer_) blurUpdateTimer_->start(0);
+        update();
+    }
+
     QRect cardsViewport() const {
-        return QRect(0, 66, width(), height() - 80);
+        // Keep the three vertical breathing spaces visually equal: window top
+        // to category strip, category strip to cards, and cards to bottom.
+        // At normal Deck heights these are all 18 px.
+        return QRect(0, 59, width(), height() - 65);
     }
 
     int cardSide() const {
@@ -940,11 +2153,9 @@ private:
     }
 
     void paintHeader(QPainter &painter) {
-        QFont font = this->font();
-        font.setPointSize(11);
-        font.setBold(true);
+        QFont font = categoryFont();
         painter.setFont(font);
-        const QStringList categories = categoryValues();
+        const QStringList &categories = categoryValues();
         const QColor dots[] = {QColor(160, 170, 180), QColor(255, 56, 71), QColor(255, 145, 48),
                                QColor(175, 82, 222), QColor(50, 173, 230), QColor(52, 199, 89),
                                QColor(255, 55, 95), QColor(88, 86, 214), QColor(100, 210, 190)};
@@ -954,7 +2165,9 @@ private:
             const QRect itemRect = categoryRect(index - first);
             if (categories[index] == selectedCategory_) {
                 painter.setPen(Qt::NoPen);
-                painter.setBrush(QColor(255, 255, 255, 38));
+                // Give the pill enough local contrast that compositor blur
+                // does not soften its edge and label on bright backgrounds.
+                painter.setBrush(QColor(62, 62, 66, 205));
                 painter.drawRoundedRect(itemRect, 16, 16);
             }
             if (index == 0) {
@@ -962,10 +2175,17 @@ private:
                 painter.setBrush(Qt::NoBrush);
                 painter.setPen(QPen(QColor(220, 225, 230), 1.5, Qt::SolidLine,
                                     Qt::RoundCap, Qt::RoundJoin));
-                painter.drawEllipse(center, 5, 5);
+                // Match SF Symbols' clock.arrow.circlepath used by macOS:
+                // one circular arrow around a small pair of clock hands.
+                painter.drawArc(QRect(center.x() - 8, center.y() - 8, 16, 16),
+                                28 * 16, 292 * 16);
+                QPainterPath arrowHead;
+                arrowHead.moveTo(center + QPoint(-7, -6));
+                arrowHead.lineTo(center + QPoint(-8, 0));
+                arrowHead.lineTo(center + QPoint(-2, -2));
+                painter.drawPath(arrowHead);
                 painter.drawLine(center, center + QPoint(0, -3));
                 painter.drawLine(center, center + QPoint(3, 1));
-                painter.drawArc(QRect(center.x() - 8, center.y() - 8, 16, 16), 110 * 16, 75 * 16);
             } else {
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(dots[index % 9]);
@@ -976,7 +2196,7 @@ private:
                              categories[index]);
         }
 
-        if (!searchActive_) {
+        if (searchExpansion_ <= 0.001) {
             const QPoint center = searchRect().center() + QPoint(-1, -1);
             painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(QColor(255, 255, 255, 210), 2, Qt::SolidLine,
@@ -1021,6 +2241,84 @@ private:
         painter.setPen(QColor(255, 255, 255, 135));
         painter.drawText(cardsViewport().adjusted(0, 34, 0, 0), Qt::AlignCenter,
                          QStringLiteral("复制或剪切的文本和图片会出现在这里"));
+    }
+
+    QImage cardThumbnail(const ClipboardItem &item) {
+        const auto found = imageThumbnailCache_.constFind(item.databaseID);
+        if (found != imageThumbnailCache_.constEnd()) return found.value();
+        QImage image = imageAtAngle(item.image, item.imageAngle);
+        if (image.width() > 768 || image.height() > 768) {
+            image = image.scaled(768, 768, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+        imageThumbnailCache_.insert(item.databaseID, image);
+        return image;
+    }
+
+    QImage decodedLinkAsset(const ClipboardItem &item, bool icon) {
+        QHash<qint64, QImage> &cache = icon ? linkIconCache_ : linkPreviewCache_;
+        const auto found = cache.constFind(item.databaseID);
+        if (found != cache.constEnd()) return found.value();
+        QImage image;
+        image.loadFromData(icon ? item.linkIconData : item.linkPreviewData);
+        if (!image.isNull()) cache.insert(item.databaseID, image);
+        return image;
+    }
+
+    QImage renderedSourceIcon(const ClipboardItem &item, int logicalSide) {
+        const qreal dpr = DisplayScale::factor();
+        const QSize physicalSize = DisplayScale::rasterSize(QSize(logicalSide, logicalSide), dpr);
+        const QString key = QStringLiteral("%1:%2:%3:%4")
+            .arg(item.sourceID)
+            .arg(physicalSize.width())
+            .arg(qRound(dpr * 100.0))
+            .arg(qHash(item.sourceIconVariantsData.isEmpty()
+                           ? item.sourceIconData : item.sourceIconVariantsData));
+        const auto found = sourceIconRenderCache_.constFind(key);
+        if (found != sourceIconRenderCache_.constEnd()) return found.value();
+        if (sourceIconRenderCache_.size() > 128) sourceIconRenderCache_.clear();
+
+        QImage rendered;
+        if (!item.sourceIconVariantsData.isEmpty()) {
+            const LinuxApplicationIconSet iconSet =
+                LinuxApplicationIconSet::deserialize(item.sourceIconVariantsData);
+            rendered = iconSet.rasterize(physicalSize, dpr);
+        }
+        if (rendered.isNull() && !item.sourceIcon.isNull()) {
+            const QImage scaled = item.sourceIcon.scaled(
+                physicalSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            rendered = QImage(physicalSize, QImage::Format_ARGB32_Premultiplied);
+            rendered.fill(Qt::transparent);
+            QPainter iconPainter(&rendered);
+            iconPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+            iconPainter.drawImage(QPoint((physicalSize.width() - scaled.width()) / 2,
+                                         (physicalSize.height() - scaled.height()) / 2), scaled);
+            iconPainter.end();
+            rendered.setDevicePixelRatio(dpr);
+        }
+        if (!rendered.isNull()) sourceIconRenderCache_.insert(key, rendered);
+        return rendered;
+    }
+
+    QImage renderedCardText(const ClipboardItem &item, const QSize &size) {
+        const qreal dpr = DisplayScale::factor();
+        const int dprKey = qRound(dpr * 100.0);
+        const QString key = QStringLiteral("%1:%2x%3:%4:%5:%6")
+            .arg(item.databaseID).arg(size.width()).arg(size.height())
+            .arg(qHash(item.text)).arg(item.previewLanguage).arg(dprKey);
+        const auto found = textCardCache_.constFind(key);
+        if (found != textCardCache_.constEnd()) return found.value();
+        if (textCardCache_.size() > 160) textCardCache_.clear();
+        const QSize pixelSize(static_cast<int>(std::ceil(size.width() * dpr)),
+                              static_cast<int>(std::ceil(size.height() * dpr)));
+        QImage image(pixelSize, QImage::Format_ARGB32_Premultiplied);
+        image.setDevicePixelRatio(dpr);
+        image.fill(Qt::transparent);
+        QPainter cachePainter(&image);
+        cachePainter.setRenderHint(QPainter::TextAntialiasing);
+        paintHighlightedText(cachePainter, QRect(QPoint(0, 0), size),
+                             item.text, item.previewLanguage, font());
+        textCardCache_.insert(key, image);
+        return image;
     }
 
     void paintCards(QPainter &painter) {
@@ -1085,12 +2383,13 @@ private:
                                 ? QColor(255, 255, 255, 14) : QColor(0, 0, 0, 30));
                     }
                 }
-                const QSize fitted = item.image.size().scaled(
+                const QImage thumbnail = cardThumbnail(item);
+                const QSize fitted = thumbnail.size().scaled(
                     contentArea.adjusted(8, 8, -8, -8).size(), Qt::KeepAspectRatio);
                 const QRect imageRect(contentArea.center().x() - fitted.width() / 2,
                                       contentArea.center().y() - fitted.height() / 2,
                                       fitted.width(), fitted.height());
-                painter.drawImage(imageRect, item.image);
+                painter.drawImage(imageRect, thumbnail, thumbnail.rect());
             } else if (parsedColor.isValid()) {
                 painter.fillRect(contentArea, parsedColor);
             } else if (isLink) {
@@ -1098,15 +2397,21 @@ private:
                 const QRect previewArea = expanded
                     ? QRect(contentArea.x(), contentArea.y(), contentArea.width(), contentArea.height() - footerHeight)
                     : contentArea;
-                QImage linkPreview;
-                if (!item.linkPreviewData.isEmpty()) linkPreview.loadFromData(item.linkPreviewData);
+                const QImage linkPreview = decodedLinkAsset(item, false);
                 if (expanded && !linkPreview.isNull()) {
-                    const QImage scaled = linkPreview.scaled(
-                        previewArea.size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-                    const QRect source((scaled.width() - previewArea.width()) / 2,
-                                       (scaled.height() - previewArea.height()) / 2,
-                                       previewArea.width(), previewArea.height());
-                    painter.drawImage(previewArea, scaled, source);
+                    const double targetAspect = previewArea.width() / double(previewArea.height());
+                    const double sourceAspect = linkPreview.width() / double(linkPreview.height());
+                    QRect source = linkPreview.rect();
+                    if (sourceAspect > targetAspect) {
+                        const int width = qRound(linkPreview.height() * targetAspect);
+                        source.setLeft((linkPreview.width() - width) / 2);
+                        source.setWidth(width);
+                    } else {
+                        const int height = qRound(linkPreview.width() / targetAspect);
+                        source.setTop((linkPreview.height() - height) / 2);
+                        source.setHeight(height);
+                    }
+                    painter.drawImage(previewArea, linkPreview, source);
                     painter.fillRect(previewArea, QColor(0, 0, 0, 18));
                 }
                 const int iconSize = expanded ? std::min(58, std::max(42, qRound(card.height() * 0.25))) : 36;
@@ -1117,8 +2422,7 @@ private:
                     painter.setPen(Qt::NoPen);
                     painter.setBrush(QColor(245, 245, 247, 245));
                     painter.drawRoundedRect(iconRect, qRound(iconSize * 0.23), qRound(iconSize * 0.23));
-                    QImage linkIcon;
-                    if (!item.linkIconData.isEmpty()) linkIcon.loadFromData(item.linkIconData);
+                    const QImage linkIcon = decodedLinkAsset(item, true);
                     if (!linkIcon.isNull()) {
                         painter.drawImage(iconRect.adjusted(5, 5, -5, -5), linkIcon);
                     } else {
@@ -1138,8 +2442,7 @@ private:
                     painter.setBrush(QColor(245, 245, 247, 245));
                     painter.setPen(Qt::NoPen);
                     painter.drawRoundedRect(smallIcon, 7, 7);
-                    QImage linkIcon;
-                    if (!item.linkIconData.isEmpty()) linkIcon.loadFromData(item.linkIconData);
+                    const QImage linkIcon = decodedLinkAsset(item, true);
                     if (!linkIcon.isNull()) {
                         painter.drawImage(smallIcon.adjusted(4, 4, -4, -4), linkIcon);
                     } else {
@@ -1173,7 +2476,16 @@ private:
                 const QRect textRect = expanded
                     ? contentArea.adjusted(14, 13, -14, -34)
                     : contentArea.adjusted(14, 37, -14, -12);
-                paintHighlightedText(painter, textRect, item.text, item.previewLanguage, font());
+                if (resizing_) {
+                    QFont quickFont = font();
+                    quickFont.setPointSizeF(11.0);
+                    painter.setFont(quickFont);
+                    painter.setPen(QColor(255, 255, 255, 230));
+                    painter.drawText(textRect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                                     item.text.left(1200));
+                } else {
+                    painter.drawImage(textRect.topLeft(), renderedCardText(item, textRect.size()));
+                }
             }
             painter.restore();
 
@@ -1194,43 +2506,60 @@ private:
             }
 
             QFont metaFont = font();
-            metaFont.setPointSizeF(expanded ? 11.5 : 9.5);
+            metaFont.setPointSizeF(expanded ? 12.0 : 10.0);
             metaFont.setBold(true);
             painter.setFont(metaFont);
-            painter.setPen(Qt::white);
             const QString headerTitle = isLink ? QStringLiteral("链接") : item.title;
             QString categoryLabel = item.category;
             if (item.previewLanguage == QStringLiteral("code")) {
                 const QString detected = HistoryRepository::detectedCodeLanguage(item.text);
                 if (!detected.isEmpty()) categoryLabel = displayCodeLanguage(detected);
             }
-            if (expanded) {
-                painter.drawText(QRect(card.x() + 14, card.y() + 7, card.width() - 70, 23),
-                                 Qt::AlignLeft | Qt::AlignVCenter,
-                                 categoryLabel.isEmpty() ? headerTitle
-                                     : headerTitle + QStringLiteral("  ") + categoryLabel);
-            } else {
-                painter.drawText(QRect(card.x() + 11, card.y() + 7, card.width() - 48, 24),
-                                 Qt::AlignLeft | Qt::AlignVCenter,
-                                 categoryLabel.isEmpty() ? headerTitle
-                                     : headerTitle + QStringLiteral("  ") + categoryLabel
-                                         + QStringLiteral("  ") + relativeTime(item.copiedAt));
-            }
+            auto drawHeaderText = [&](const QRect &target, int flags, const QString &text,
+                                      const QColor &foreground) {
+                if (parsedColor.isValid()) {
+                    // Match macOS colour swatches: a compact dark halo keeps
+                    // white metadata readable over yellow/white/pastel fills.
+                    painter.setPen(QColor(0, 0, 0, 118));
+                    for (const QPoint &offset : {QPoint(-1, 0), QPoint(1, 0),
+                                                  QPoint(0, -1), QPoint(0, 2)}) {
+                        painter.drawText(target.translated(offset), flags, text);
+                    }
+                }
+                painter.setPen(foreground);
+                painter.drawText(target, flags, text);
+            };
+            const QString titleText = categoryLabel.isEmpty() ? headerTitle
+                : expanded ? headerTitle + QStringLiteral("  ") + categoryLabel
+                : headerTitle + QStringLiteral("  ") + categoryLabel
+                    + QStringLiteral("  ") + relativeTime(item.copiedAt);
+            const QRect titleRect = expanded
+                ? QRect(card.x() + 14, card.y() + 7, card.width() - 70, 23)
+                : QRect(card.x() + 11, card.y() + 7, card.width() - 48, 24);
+            drawHeaderText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
+                           titleText, Qt::white);
 
             QFont smallFont = font();
             smallFont.setPointSizeF(9.5);
             if (expanded) {
                 painter.setFont(smallFont);
-                painter.setPen(QColor(255, 255, 255, 198));
-                painter.drawText(QRect(card.x() + 14, card.y() + 28, card.width() - 70, 18),
-                                 Qt::AlignLeft | Qt::AlignVCenter, relativeTime(item.copiedAt));
+                drawHeaderText(QRect(card.x() + 14, card.y() + 28,
+                                     card.width() - 70, 18),
+                               Qt::AlignLeft | Qt::AlignVCenter,
+                               relativeTime(item.copiedAt),
+                               QColor(255, 255, 255, 198));
             }
             const int sourceSize = expanded ? headerHeight - 8 : 18;
             const QRect sourceRect(card.right() - sourceSize - (expanded ? 8 : 11),
                                    card.y() + (expanded ? 4 : 9),
                                    sourceSize, sourceSize);
-            if (!item.sourceIcon.isNull()) {
-                painter.drawImage(sourceRect, item.sourceIcon);
+            const bool clipDeckSource = item.sourceID.contains(QStringLiteral("clipdeck"), Qt::CaseInsensitive)
+                || item.sourceName.compare(QStringLiteral("ClipDeck"), Qt::CaseInsensitive) == 0;
+            const QImage sourceIcon = clipDeckSource
+                ? shadowFreeClipDeckIcon()
+                : renderedSourceIcon(item, sourceSize);
+            if (!sourceIcon.isNull()) {
+                painter.drawImage(sourceRect, sourceIcon);
             } else {
                 painter.setPen(QColor(255, 255, 255, 225));
                 painter.setBrush(QColor(255, 255, 255, 38));
@@ -1243,8 +2572,10 @@ private:
             painter.setFont(smallFont);
             painter.setPen(QColor(255, 255, 255, 115));
             if (expanded && !isLink) {
+                const QSize displayedImageSize = imageSizeAtAngle(item.image.size(), item.imageAngle);
                 const QString footer = item.isImage()
-                    ? QStringLiteral("%1 × %2").arg(item.image.width()).arg(item.image.height())
+                    ? QStringLiteral("%1 × %2")
+                        .arg(displayedImageSize.width()).arg(displayedImageSize.height())
                     : parsedColor.isValid() ? item.text.trimmed()
                     : QStringLiteral("%1 个字符").arg(item.text.size());
                 if (item.isImage() || parsedColor.isValid()) {
@@ -1293,10 +2624,54 @@ private:
             selectedIndex_ + direction));
         centerSelection();
         update();
+        maybeLoadMoreImages();
+    }
+
+    void maybeLoadMoreImages() {
+        if (selectedCategory_ != QStringLiteral("Images") || !imageHasMore_
+            || imageBatchLoading_ || items_.empty()) return;
+        const int loaded = static_cast<int>(items_.size());
+        const int maximumScroll = std::max(0,
+            kContentInset * 2 + loaded * (cardSide() + kCardSpacing) - kCardSpacing
+            - cardsViewport().width());
+        const bool selectionNearEnd = selectedIndex_ >= loaded - 5;
+        const bool viewportNearEnd = scrollOffset_ >= std::max(0,
+            maximumScroll - 2 * (cardSide() + kCardSpacing));
+        if (!selectionNearEnd && !viewportNearEnd) return;
+
+        imageBatchLoading_ = true;
+        const int offset = loaded;
+        const QString expectedSearch = searchQuery_;
+        const int generation = imageLoadGeneration_;
+        QTimer::singleShot(0, this, [this, offset, expectedSearch, generation] {
+            if (selectedCategory_ != QStringLiteral("Images")
+                || imageLoadGeneration_ != generation
+                || searchQuery_ != expectedSearch
+                || static_cast<int>(items_.size()) != offset) {
+                imageBatchLoading_ = false;
+                return;
+            }
+            const int remaining = std::max(0, kHistoryCapacity - offset);
+            const int requested = std::min(kImageBatchCapacity, remaining);
+            if (requested <= 0) {
+                imageHasMore_ = false;
+                imageBatchLoading_ = false;
+                return;
+            }
+            const QVector<ClipboardItem> next = repository_->fetch(
+                QStringLiteral("图片"), expectedSearch, requested, offset);
+            for (const ClipboardItem &item : next) items_.push_back(item);
+            imageLoadLimit_ = static_cast<int>(items_.size());
+            imageHasMore_ = next.size() == requested
+                && imageLoadLimit_ < kHistoryCapacity;
+            imageBatchLoading_ = false;
+            clampScrollOffset();
+            update();
+        });
     }
 
     void changeCategory(int direction) {
-        const QStringList categories = categoryValues();
+        const QStringList &categories = categoryValues();
         const int current = std::max(0, categories.indexOf(selectedCategory_));
         const int next = (current + direction + categories.size()) % categories.size();
         selectedCategory_ = categories[next];
@@ -1330,42 +2705,104 @@ private:
         update();
     }
 
-    QStringList categoryValues() const {
-        QStringList values{QStringLiteral("History"), QStringLiteral("Text"), QStringLiteral("Images")};
-        for (const ClipboardCategory &category : repository_->categories()) values.append(category.name);
-        return values;
+    const QStringList &categoryValues() const {
+        return categoryValuesCache_;
+    }
+
+    void refreshCategoryValues() {
+        QStringList values{QStringLiteral("History"), QStringLiteral("Text"),
+                           QStringLiteral("Images")};
+        for (const ClipboardCategory &category : repository_->categories()) {
+            values.append(category.name);
+        }
+        categoryValuesCache_ = std::move(values);
+        categoryWidthsCache_.clear();
+        categoryWidthsCache_.reserve(categoryValuesCache_.size());
+        const QFontMetrics metrics(categoryFont());
+        for (const QString &category : categoryValuesCache_) {
+            categoryWidthsCache_.append(std::max(76, std::min(148,
+                metrics.horizontalAdvance(category) + 35)));
+        }
+        if (!categoryValuesCache_.contains(selectedCategory_)) {
+            selectedCategory_ = QStringLiteral("History");
+        }
+        categoryPageStart_ = std::min(categoryPageStart_,
+            std::max(0, categoryValuesCache_.size() - kCategoriesPerPage));
+    }
+
+    QFont categoryFont() const {
+        QFont value = font();
+        value.setPointSizeF(10.5);
+        value.setWeight(QFont::DemiBold);
+        return value;
+    }
+
+    int categoryItemWidth(int categoryIndex) const {
+        if (categoryIndex < 0 || categoryIndex >= categoryWidthsCache_.size()) return 84;
+        return categoryWidthsCache_[categoryIndex];
+    }
+
+    int visibleCategoryStripWidth() const {
+        const QStringList &categories = categoryValues();
+        const int count = std::max(0, std::min(kCategoriesPerPage,
+            categories.size() - categoryPageStart_));
+        int result = 0;
+        for (int slot = 0; slot < count; ++slot) {
+            result += categoryItemWidth(categoryPageStart_ + slot);
+            if (slot + 1 < count) result += 8;
+        }
+        return result;
     }
 
     QRect categoryRect(int index) const {
-        return QRect(categoryStripX() + index * 104, 12, 96, 35);
+        int x = categoryStripX();
+        for (int slot = 0; slot < index; ++slot) {
+            x += categoryItemWidth(categoryPageStart_ + slot) + 8;
+        }
+        return QRect(x, 18, categoryItemWidth(categoryPageStart_ + index), 35);
     }
 
     QRect searchRect() const {
-        return QRect(toolbarStartX(), 12, searchActive_ ? 230 : 36, 35);
+        return QRect(toolbarStartX(), 18, searchControlWidth(), 34);
+    }
+
+    int searchControlWidth() const {
+        return qRound(28.0 + (230.0 - 28.0) * searchExpansion_);
     }
 
     int toolbarStartX() const {
-        const int searchWidth = searchActive_ ? 230 : 36;
-        const int toolbarWidth = searchWidth + 20 + kCategoriesPerPage * 104 + 3 * 38;
+        const int searchWidth = searchControlWidth();
+        const int toolbarWidth = searchWidth + 20 + visibleCategoryStripWidth() + 3 * 38;
         return std::max(62, (width() - toolbarWidth) / 2);
     }
-    int categoryStripX() const { return toolbarStartX() + (searchActive_ ? 250 : 56); }
-    QRect previousCategoryRect() const { return QRect(categoryStripX() + 624, 12, 34, 35); }
-    QRect nextCategoryRect() const { return QRect(categoryStripX() + 662, 12, 34, 35); }
-    QRect addRect() const { return QRect(categoryStripX() + 700, 12, 34, 35); }
-    QRect moreRect() const { return QRect(width() - 68, 12, 42, 35); }
+    int categoryStripX() const { return toolbarStartX() + searchControlWidth() + 20; }
+    QRect previousCategoryRect() const {
+        return QRect(categoryStripX() + visibleCategoryStripWidth() + 4, 18, 34, 35);
+    }
+    QRect nextCategoryRect() const { return previousCategoryRect().translated(38, 0); }
+    QRect addRect() const { return previousCategoryRect().translated(76, 0); }
+    QRect moreRect() const { return QRect(width() - 68, 18, 42, 35); }
 
     void search() {
         const bool starting = !searchActive_;
         if (starting) {
             searchActive_ = true;
             selectedCategory_ = QStringLiteral("History");
+            categoryPageStart_ = 0;
             reload();
         }
         updateSearchGeometry();
         searchEdit_->setText(searchQuery_);
         searchEdit_->show();
         searchEdit_->raise();
+        if (searchAnimation_) {
+            searchAnimation_->stop();
+            searchAnimation_->setStartValue(searchExpansion_);
+            searchAnimation_->setEndValue(1.0);
+            searchAnimation_->start();
+        } else {
+            searchExpansion_ = 1.0;
+        }
         searchEdit_->setFocus(Qt::ShortcutFocusReason);
         searchEdit_->setCursorPosition(searchEdit_->text().size());
     }
@@ -1374,20 +2811,37 @@ private:
         searchActive_ = false;
         searchQuery_.clear();
         searchEdit_->clear();
-        searchEdit_->hide();
+        if (searchDebounce_) searchDebounce_->stop();
         selectedCategory_ = QStringLiteral("History");
+        categoryPageStart_ = 0;
         setFocus(Qt::ShortcutFocusReason);
         reload();
+        if (searchAnimation_) {
+            searchAnimation_->stop();
+            searchAnimation_->setStartValue(searchExpansion_);
+            searchAnimation_->setEndValue(0.0);
+            searchAnimation_->start();
+        } else {
+            searchExpansion_ = 0.0;
+            searchEdit_->hide();
+        }
     }
 
     void updateSearchGeometry() {
-        if (searchActive_) searchEdit_->setGeometry(searchRect().adjusted(0, -2, 0, 1));
+        if (searchEdit_) searchEdit_->setGeometry(searchRect());
     }
 
     void preparePopover(QDialog &dialog, const QSize &size) const {
         dialog.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+        dialog.setAttribute(Qt::WA_TranslucentBackground, true);
+        dialog.setAttribute(Qt::WA_NoSystemBackground, true);
         dialog.setModal(true);
         dialog.resize(size);
+        // Do not use an XShape window mask here.  UOS/DDE rasterizes the
+        // rounded mask into visible horizontal scan bands at its top and
+        // bottom edges.  WA_TranslucentBackground plus the stylesheet's
+        // antialiased border radius supplies the rounded corners per pixel.
+        dialog.clearMask();
         const QRect card = selectedIndex_ >= 0 ? cardRect(selectedIndex_) : rect();
         const QPoint cardTopLeft = mapToGlobal(card.topLeft());
         const QRect globalCard(cardTopLeft, card.size());
@@ -1400,13 +2854,149 @@ private:
         dialog.move(x, y);
         dialog.setStyleSheet(QStringLiteral(
             "QDialog{background:#242427;color:#eee;border:1px solid #49494d;border-radius:14px;}"
-            "QPlainTextEdit{background:#111113;color:#eee;border:1px solid #38383c;border-radius:10px;padding:10px;}"
-            "QLineEdit{background:#333337;color:#eee;border:0;border-radius:9px;padding:8px 12px;}"
+            "QPlainTextEdit{background:#111113;color:#eee;border:1px solid #38383c;border-radius:10px;"
+            "padding:10px;outline:0;selection-background-color:#48484d;}"
+            "QPlainTextEdit:!focus{background:#111113;border-color:#38383c;}"
+            "QPlainTextEdit:focus{background:#151518;border-color:#1683ff;selection-background-color:#1683ff;}"
+            "QLineEdit{background:#333337;color:#eee;border:1px solid transparent;border-radius:9px;"
+            "padding:8px 12px;outline:0;selection-background-color:#48484d;}"
+            "QLineEdit:!focus{background:#333337;border-color:transparent;}"
+            "QLineEdit:focus{background:#39393d;border-color:#1683ff;selection-background-color:#1683ff;}"
+            "QWidget#previewHeader{background:#2b2b2e;border:0;border-top-left-radius:14px;"
+            "border-top-right-radius:14px;}"
+            "QLabel#previewCategory{color:#f4f4f5;font-size:18px;font-weight:700;}"
+            "QLabel#previewSource{color:#b0b0b5;font-size:13px;font-weight:500;}"
+            "QLabel#previewTime{color:#9a9aa0;font-size:11px;}"
+            "QPlainTextEdit#contentPreview{background:#151517;color:#eeeeef;border:0;"
+            "border-top:1px solid #3a3a3d;border-bottom-left-radius:14px;"
+            "border-bottom-right-radius:14px;padding:22px;font-size:14px;}"
+            "QDialog#contentEditorDialog{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #2e2e35,stop:1 #212126);border:1px solid #49494d;border-radius:14px;}"
+            "QWidget#editorToolbar{background:rgba(255,255,255,9);border-bottom:1px solid #414146;"
+            "border-top-left-radius:14px;border-top-right-radius:14px;}"
+            "QLabel#editorHeading{color:rgba(255,255,255,194);font-size:15px;font-weight:600;}"
+            "QWidget#editorBody{background:transparent;}"
+            "QPlainTextEdit#contentEditor{background:rgba(0,0,0,143);color:#eeeeef;"
+            "border:1px solid rgba(255,255,255,23);border-radius:12px;padding:16px;outline:0;}"
+            "QPlainTextEdit#contentEditor:focus{background:rgba(0,0,0,143);"
+            "border:1px solid rgba(255,255,255,23);selection-background-color:#1683ff;}"
+            "QLabel#editorStatistics{color:rgba(255,255,255,128);font-size:12px;font-weight:500;}"
+            "QPushButton#editorCancel,QPushButton#editorSave{border:0;border-radius:17px;"
+            "min-width:68px;max-width:68px;min-height:34px;max-height:34px;padding:0;}"
+            "QPushButton#editorCancel{background:rgba(255,255,255,18);color:#eeeeef;}"
+            "QPushButton#editorSave{background:#1683ff;color:white;font-weight:600;}"
+            "QPushButton#editorTool{background:transparent;border:0;border-radius:17px;"
+            "min-width:34px;max-width:34px;min-height:34px;max-height:34px;padding:0;font-size:18px;}"
+            "QPushButton#editorTool:hover{background:rgba(255,255,255,16);}"
             "QPushButton{background:#3a3a3e;color:#eee;border:0;border-radius:17px;padding:8px 18px;}"
             "QPushButton#primary{background:#1683ff;color:white;font-weight:600;}"));
     }
 
     void previewSelected() {
+        if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        ClipboardItem item = items_[selectedIndex_];
+        QDialog dialog(this);
+        preparePopover(dialog, QSize(560, 360));
+        bool editRequested = false;
+        bool imageAngleChanged = false;
+        QShortcut *edit = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_E), &dialog);
+        QObject::connect(edit, &QShortcut::activated, &dialog, [&] {
+            editRequested = true;
+            dialog.accept();
+        });
+        auto closeAndMove = [this, &dialog](int direction) {
+            dialog.reject();
+            moveSelection(direction);
+        };
+        QShortcut *previous = new QShortcut(QKeySequence(Qt::Key_Left), &dialog);
+        QShortcut *next = new QShortcut(QKeySequence(Qt::Key_Right), &dialog);
+        QObject::connect(previous, &QShortcut::activated, &dialog,
+                         [closeAndMove] { closeAndMove(-1); });
+        QObject::connect(next, &QShortcut::activated, &dialog,
+                         [closeAndMove] { closeAndMove(1); });
+        QVBoxLayout *layout = new QVBoxLayout(&dialog);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        QWidget *header = new QWidget(&dialog);
+        header->setObjectName(QStringLiteral("previewHeader"));
+        header->setFixedHeight(58);
+        QHBoxLayout *headerLayout = new QHBoxLayout(header);
+        headerLayout->setContentsMargins(22, 0, 22, 0);
+        headerLayout->setSpacing(12);
+        QLabel *category = new QLabel(item.category.isEmpty()
+            ? (item.isImage() ? QStringLiteral("图片") : QStringLiteral("文本")) : item.category, header);
+        category->setObjectName(QStringLiteral("previewCategory"));
+        QLabel *source = new QLabel(item.sourceName, header);
+        source->setObjectName(QStringLiteral("previewSource"));
+        QLabel *time = new QLabel(item.copiedAt.toString(QStringLiteral("yyyy-MM-dd  HH:mm")), header);
+        time->setObjectName(QStringLiteral("previewTime"));
+        headerLayout->addWidget(category);
+        headerLayout->addWidget(source);
+        headerLayout->addStretch();
+        headerLayout->addWidget(time);
+        layout->addWidget(header);
+        QPlainTextEdit *previewText = nullptr;
+        ImagePreviewWidget *imagePreview = nullptr;
+        if (item.isImage()) {
+            imagePreview = new ImagePreviewWidget(&dialog);
+            imagePreview->setImage(imageAtAngle(item.image, item.imageAngle));
+            layout->addWidget(imagePreview, 1);
+
+            auto rotatePreview = [this, &item, imagePreview, &imageAngleChanged](int degrees) {
+                item.imageAngle = normalizedImageAngle(item.imageAngle + degrees);
+                if (!repository_->updateImageAngle(item.databaseID, item.imageAngle)) return;
+                imageThumbnailCache_.remove(item.databaseID);
+                imagePreview->setImage(imageAtAngle(item.image, item.imageAngle));
+                imageAngleChanged = true;
+            };
+            QShortcut *rotateLeft = new QShortcut(
+                QKeySequence(Qt::CTRL | Qt::Key_BracketLeft), &dialog);
+            QShortcut *rotateRight = new QShortcut(
+                QKeySequence(Qt::CTRL | Qt::Key_BracketRight), &dialog);
+            QObject::connect(rotateLeft, &QShortcut::activated, &dialog,
+                             [rotatePreview] { rotatePreview(-90); });
+            QObject::connect(rotateRight, &QShortcut::activated, &dialog,
+                             [rotatePreview] { rotatePreview(90); });
+        } else {
+            QPlainTextEdit *text = new QPlainTextEdit(item.text.left(200000), &dialog);
+            previewText = text;
+            text->setObjectName(QStringLiteral("contentPreview"));
+            text->setReadOnly(true);
+            QFont textFont = text->font();
+            if (!item.previewLanguage.isEmpty() && item.previewLanguage != QStringLiteral("text")) {
+                textFont.setFamily(QStringLiteral("monospace"));
+                textFont.setStyleHint(QFont::Monospace);
+                text->setLineWrapMode(QPlainTextEdit::NoWrap);
+            } else {
+                text->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+                text->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+                text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            }
+            textFont.setPointSize(14);
+            text->setFont(textFont);
+            new CardSyntaxHighlighter(text->document(), item.previewLanguage);
+            layout->addWidget(text, 1);
+        }
+        if (previewText) {
+            auto installScrollShortcut = [&dialog, previewText](int key, int direction) {
+                QShortcut *shortcut = new QShortcut(QKeySequence(key), &dialog);
+                QObject::connect(shortcut, &QShortcut::activated, &dialog,
+                                 [previewText, direction] {
+                    QScrollBar *bar = previewText->verticalScrollBar();
+                    const int step = std::max(1, bar->singleStep());
+                    bar->setValue(bar->value() + direction * step);
+                });
+            };
+            installScrollShortcut(Qt::Key_Up, -1);
+            installScrollShortcut(Qt::Key_Down, 1);
+            previewText->setFocus(Qt::PopupFocusReason);
+        }
+        dialog.exec();
+        if (imageAngleChanged) reload();
+        if (editRequested) editSelected();
+    }
+
+    void editSelected() {
         if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
         const ClipboardItem item = items_[selectedIndex_];
         QDialog dialog(this);
@@ -1414,106 +3004,109 @@ private:
         QVBoxLayout *layout = new QVBoxLayout(&dialog);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
-        QWidget *header = new QWidget(&dialog);
-        QHBoxLayout *headerLayout = new QHBoxLayout(header);
-        headerLayout->setContentsMargins(22, 10, 22, 10);
-        QLabel *category = new QLabel(item.category.isEmpty()
-            ? (item.isImage() ? QStringLiteral("图片") : QStringLiteral("文本")) : item.category, header);
-        QFont categoryFont = category->font(); categoryFont.setPointSize(14); categoryFont.setBold(true);
-        category->setFont(categoryFont);
-        QLabel *source = new QLabel(item.sourceName, header);
-        source->setStyleSheet(QStringLiteral("color:#9b9ba0;"));
-        QLabel *time = new QLabel(item.copiedAt.toString(QStringLiteral("yyyy-MM-dd  HH:mm")), header);
-        time->setStyleSheet(QStringLiteral("color:#8d8d92;"));
-        headerLayout->addWidget(category);
-        headerLayout->addWidget(source);
-        headerLayout->addStretch();
-        headerLayout->addWidget(time);
-        layout->addWidget(header);
-        if (item.isImage()) {
-            QLabel *label = new QLabel(&dialog);
-            label->setAlignment(Qt::AlignCenter);
-            label->setStyleSheet(QStringLiteral("background:#151517;border-top:1px solid #3a3a3d;"));
-            label->setPixmap(QPixmap::fromImage(item.image)
-                                 .scaled(510, 260, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-            layout->addWidget(label, 1);
-        } else {
-            QPlainTextEdit *text = new QPlainTextEdit(item.text.left(200000), &dialog);
-            text->setReadOnly(true);
-            text->setLineWrapMode(QPlainTextEdit::NoWrap);
-            QFont textFont = text->font();
-            if (!item.previewLanguage.isEmpty() && item.previewLanguage != QStringLiteral("text")) {
-                textFont.setFamily(QStringLiteral("monospace"));
-                textFont.setStyleHint(QFont::Monospace);
-            }
-            textFont.setPointSize(12); text->setFont(textFont);
-            new CardSyntaxHighlighter(text->document(), item.previewLanguage);
-            layout->addWidget(text, 1);
-        }
-        dialog.exec();
-    }
 
-    void editSelected() {
-        if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
-        const ClipboardItem item = items_[selectedIndex_];
-        QDialog dialog(this);
-        preparePopover(dialog, QSize(560, 430));
-        QVBoxLayout *layout = new QVBoxLayout(&dialog);
-        layout->setContentsMargins(12, 10, 12, 10);
-        layout->setSpacing(10);
-        QHBoxLayout *toolbar = new QHBoxLayout;
-        QPushButton *cancel = new QPushButton(QStringLiteral("取消"), &dialog);
-        QPushButton *save = new QPushButton(QStringLiteral("保存"), &dialog);
-        save->setObjectName(QStringLiteral("primary"));
+        QWidget *toolbarWidget = new QWidget(&dialog);
+        toolbarWidget->setObjectName(QStringLiteral("previewHeader"));
+        toolbarWidget->setFixedHeight(58);
+        QHBoxLayout *toolbar = new QHBoxLayout(toolbarWidget);
+        toolbar->setContentsMargins(14, 0, 14, 0);
+        toolbar->setSpacing(10);
+        QPushButton *cancel = new QPushButton(QStringLiteral("取消"), toolbarWidget);
+        cancel->setObjectName(QStringLiteral("editorCancel"));
+        QPushButton *save = new QPushButton(QStringLiteral("保存"), toolbarWidget);
+        save->setObjectName(QStringLiteral("editorSave"));
+        QLabel *statistics = new QLabel(toolbarWidget);
+        statistics->setObjectName(QStringLiteral("editorStatistics"));
+        QPushButton *formatJSON = nullptr;
+        const bool isJSON = item.previewLanguage == QStringLiteral("json")
+            || item.category.compare(QStringLiteral("JSON"), Qt::CaseInsensitive) == 0;
         toolbar->addWidget(cancel);
         toolbar->addStretch();
-        QLabel *heading = new QLabel(item.isImage() ? QStringLiteral("编辑图片") : QStringLiteral("编辑文本"), &dialog);
-        QFont headingFont = heading->font(); headingFont.setBold(true); heading->setFont(headingFont);
-        toolbar->insertWidget(1, heading, 0, Qt::AlignCenter);
-        toolbar->addWidget(save);
-        layout->addLayout(toolbar);
-
-        QImage editedImage = item.image;
-        QPlainTextEdit *editor = nullptr;
-        QLabel *imageLabel = nullptr;
-        QLabel *statistics = new QLabel(&dialog);
-        statistics->setStyleSheet(QStringLiteral("color:#8f8f94;font-size:12px;"));
+        QPushButton *rotateLeft = nullptr;
+        QPushButton *rotateRight = nullptr;
         if (item.isImage()) {
-            QHBoxLayout *imageTools = new QHBoxLayout;
-            QPushButton *rotateLeft = new QPushButton(QStringLiteral("↶  向左旋转"), &dialog);
-            QPushButton *rotateRight = new QPushButton(QStringLiteral("↷  向右旋转"), &dialog);
-            imageTools->addStretch(); imageTools->addWidget(rotateLeft); imageTools->addWidget(rotateRight); imageTools->addStretch();
-            layout->addLayout(imageTools);
-            imageLabel = new QLabel(&dialog);
-            imageLabel->setAlignment(Qt::AlignCenter);
-            imageLabel->setStyleSheet(QStringLiteral("background:#151517;border:1px solid #38383c;border-radius:10px;"));
-            auto updateImagePreview = [&] {
-                imageLabel->setPixmap(QPixmap::fromImage(editedImage)
-                    .scaled(500, 280, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-                statistics->setText(QStringLiteral("%1 × %2").arg(editedImage.width()).arg(editedImage.height()));
-            };
-            QObject::connect(rotateLeft, &QPushButton::clicked, [&] {
-                QTransform transform; transform.rotate(-90);
-                editedImage = editedImage.transformed(transform, Qt::SmoothTransformation);
-                updateImagePreview();
-            });
-            QObject::connect(rotateRight, &QPushButton::clicked, [&] {
-                QTransform transform; transform.rotate(90);
-                editedImage = editedImage.transformed(transform, Qt::SmoothTransformation);
-                updateImagePreview();
-            });
-            updateImagePreview();
-            layout->addWidget(imageLabel, 1);
+            rotateLeft = new QPushButton(toolbarWidget);
+            rotateRight = new QPushButton(toolbarWidget);
+            rotateLeft->setObjectName(QStringLiteral("editorTool"));
+            rotateRight->setObjectName(QStringLiteral("editorTool"));
+            rotateLeft->setIcon(imageRotationIcon(false));
+            rotateRight->setIcon(imageRotationIcon(true));
+            rotateLeft->setIconSize(QSize(24, 24));
+            rotateRight->setIconSize(QSize(24, 24));
+            rotateLeft->setToolTip(QStringLiteral("向左旋转"));
+            rotateRight->setToolTip(QStringLiteral("向右旋转"));
+            toolbar->addWidget(rotateLeft);
+            toolbar->addWidget(rotateRight);
         } else {
-            editor = new QPlainTextEdit(item.text, &dialog);
+            QLabel *heading = new QLabel(QStringLiteral("编辑文本"), toolbarWidget);
+            heading->setObjectName(QStringLiteral("previewCategory"));
+            toolbar->addWidget(heading);
+        }
+        toolbar->addStretch();
+        toolbar->addWidget(statistics);
+        if (!item.isImage() && isJSON) {
+            formatJSON = new QPushButton(QStringLiteral("格式化"), toolbarWidget);
+            formatJSON->setToolTip(QStringLiteral("格式化 JSON"));
+            toolbar->addWidget(formatJSON);
+        }
+        toolbar->addWidget(save);
+        layout->addWidget(toolbarWidget);
+
+        QWidget *body = new QWidget(&dialog);
+        body->setObjectName(QStringLiteral("editorBody"));
+        QVBoxLayout *bodyLayout = new QVBoxLayout(body);
+        bodyLayout->setContentsMargins(0, 0, 0, 0);
+        bodyLayout->setSpacing(0);
+
+        int editedImageAngle = item.imageAngle;
+        QPlainTextEdit *editor = nullptr;
+        ImagePreviewWidget *imagePreview = nullptr;
+        if (item.isImage()) {
+            imagePreview = new ImagePreviewWidget(body);
+            auto updateImagePreview = [imagePreview, statistics, &item, &editedImageAngle] {
+                const QImage displayedImage = imageAtAngle(item.image, editedImageAngle);
+                imagePreview->setImage(displayedImage);
+                statistics->setText(QStringLiteral("%1 × %2  ·  %3°")
+                    .arg(displayedImage.width()).arg(displayedImage.height())
+                    .arg(normalizedImageAngle(editedImageAngle)));
+            };
+            QObject::connect(rotateLeft, &QPushButton::clicked, &dialog,
+                             [&editedImageAngle, updateImagePreview] {
+                editedImageAngle = normalizedImageAngle(editedImageAngle - 90);
+                updateImagePreview();
+            });
+            QObject::connect(rotateRight, &QPushButton::clicked, &dialog,
+                             [&editedImageAngle, updateImagePreview] {
+                editedImageAngle = normalizedImageAngle(editedImageAngle + 90);
+                updateImagePreview();
+            });
+            QShortcut *rotateLeftShortcut = new QShortcut(
+                QKeySequence(Qt::CTRL | Qt::Key_BracketLeft), &dialog);
+            QShortcut *rotateRightShortcut = new QShortcut(
+                QKeySequence(Qt::CTRL | Qt::Key_BracketRight), &dialog);
+            QObject::connect(rotateLeftShortcut, &QShortcut::activated,
+                             rotateLeft, &QPushButton::click);
+            QObject::connect(rotateRightShortcut, &QShortcut::activated,
+                             rotateRight, &QPushButton::click);
+            updateImagePreview();
+            bodyLayout->addWidget(imagePreview, 1);
+        } else {
+            editor = new QPlainTextEdit(item.text, body);
+            editor->setObjectName(QStringLiteral("contentPreview"));
             QFont editorFont = editor->font();
             if (!item.previewLanguage.isEmpty() && item.previewLanguage != QStringLiteral("text")) {
                 editorFont.setFamily(QStringLiteral("monospace"));
                 editorFont.setStyleHint(QFont::Monospace);
+                editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+            } else {
+                editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+                editor->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+                editor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             }
-            editorFont.setPointSize(12); editor->setFont(editorFont);
+            editorFont.setPointSize(14);
+            editor->setFont(editorFont);
             new CardSyntaxHighlighter(editor->document(), item.previewLanguage);
-            layout->addWidget(editor, 1);
+            bodyLayout->addWidget(editor, 1);
             auto updateStatistics = [editor, statistics] {
                 const QString text = editor->toPlainText();
                 statistics->setText(QStringLiteral("%1 个字符  ·  %2 个单词  ·  %3 行")
@@ -1522,17 +3115,32 @@ private:
                     .arg(std::max(1, text.count(QLatin1Char('\n')) + 1)));
             };
             QObject::connect(editor, &QPlainTextEdit::textChanged, updateStatistics);
+            if (formatJSON) {
+                QObject::connect(formatJSON, &QPushButton::clicked, &dialog,
+                                 [editor, &dialog] {
+                    QJsonParseError error;
+                    const QJsonDocument document = QJsonDocument::fromJson(
+                        editor->toPlainText().toUtf8(), &error);
+                    if (error.error != QJsonParseError::NoError || document.isNull()) {
+                        showClipDeckAlert(&dialog, QStringLiteral("无法格式化 JSON"),
+                            QStringLiteral("第 %1 字节附近存在语法错误：%2")
+                                .arg(error.offset).arg(error.errorString()),
+                            QStringLiteral("知道了"), QString(), AlertTone::Warning);
+                        return;
+                    }
+                    editor->setPlainText(QString::fromUtf8(document.toJson(QJsonDocument::Indented)));
+                });
+            }
             updateStatistics();
             editor->setFocus();
         }
-        layout->addWidget(statistics);
+        layout->addWidget(body, 1);
         QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
         QObject::connect(save, &QPushButton::clicked, &dialog, &QDialog::accept);
         if (dialog.exec() != QDialog::Accepted) return;
         if (item.isImage()) {
-            QByteArray pngData;
-            QBuffer buffer(&pngData); buffer.open(QIODevice::WriteOnly); editedImage.save(&buffer, "PNG");
-            repository_->updateImage(item.databaseID, pngData, editedImage);
+            repository_->updateImageAngle(item.databaseID, editedImageAngle);
+            imageThumbnailCache_.remove(item.databaseID);
         } else if (editor) {
             const QString value = editor->toPlainText();
             repository_->updateText(item.databaseID, value, repository_->classifyText(value));
@@ -1571,14 +3179,10 @@ private:
     void rotateSelected(int degrees) {
         if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())
             || !items_[selectedIndex_].isImage()) return;
-        QTransform transform;
-        transform.rotate(degrees);
-        const QImage image = items_[selectedIndex_].image.transformed(transform, Qt::SmoothTransformation);
-        QByteArray pngData;
-        QBuffer buffer(&pngData);
-        buffer.open(QIODevice::WriteOnly);
-        image.save(&buffer, "PNG");
-        repository_->updateImage(items_[selectedIndex_].databaseID, pngData, image);
+        const ClipboardItem &item = items_[selectedIndex_];
+        repository_->updateImageAngle(
+            item.databaseID, normalizedImageAngle(item.imageAngle + degrees));
+        imageThumbnailCache_.remove(items_[selectedIndex_].databaseID);
         reload();
     }
 
@@ -1761,17 +3365,123 @@ private:
     }
 
     void rememberPasteTarget() {
+        pasteTarget_ = None;
+        pasteTargetInputWindow_ = None;
         if (!display_) {
-            pasteTarget_ = None;
             return;
+        }
+        // _NET_ACTIVE_WINDOW is the EWMH client window.  Walking X input
+        // focus up to the root returns the window-manager frame instead; that
+        // frame never equals _NET_ACTIVE_WINDOW and prevented automatic paste.
+        QWidget *focusedWidget = QApplication::focusWidget();
+        if (focusedWidget && focusedWidget != this
+                && focusedWidget->window() != this) {
+            pasteTargetWidget_ = focusedWidget;
+        } else {
+            pasteTargetWidget_.clear();
         }
         Window focused = None;
         int revertTo = RevertToNone;
         XGetInputFocus(display_, &focused, &revertTo);
-        const Window target = topLevelWindow(display_, focused);
+        pasteTargetInputWindow_ = focused;
+        Window target = activeTopLevelWindow(display_);
+        if (target == None) {
+            target = focused;
+        }
         if (target != None && target != static_cast<Window>(winId())) {
             pasteTarget_ = target;
         }
+        qInfo().noquote() << QStringLiteral(
+            "[ClipDeck][Paste] remembered target=0x%1 input=0x%2")
+            .arg(static_cast<qulonglong>(pasteTarget_), 0, 16)
+            .arg(static_cast<qulonglong>(pasteTargetInputWindow_), 0, 16);
+    }
+
+    bool pasteModifierPressed() const {
+        if (!display_) return false;
+        char keys[32]{};
+        XQueryKeymap(display_, keys);
+        const KeySym modifiers[] = {XK_Control_L, XK_Control_R, XK_Shift_L, XK_Shift_R,
+                                    XK_Alt_L, XK_Alt_R, XK_Meta_L, XK_Meta_R,
+                                    XK_Super_L, XK_Super_R};
+        for (const KeySym symbol : modifiers) {
+            const KeyCode code = XKeysymToKeycode(display_, symbol);
+            if (code != 0 && (keys[code / 8] & (1 << (code % 8)))) return true;
+        }
+        return false;
+    }
+
+    void waitForPasteModifiersReleased(Window target, int attempt,
+                                       bool preservedSourceFocus = false) {
+        // Ctrl+number is handled while Ctrl is still physically down. Sending
+        // synthetic Ctrl+V at that point can be swallowed, or release the
+        // user's Ctrl before the target receives V. Wait for the gesture to
+        // finish before restoring focus and emitting paste.
+        if (pasteModifierPressed()) {
+            if (attempt >= 150) {
+                qWarning() << "[ClipDeck][Paste] modifier release timed out";
+                return;
+            }
+            QTimer::singleShot(20, this, [this, target, attempt, preservedSourceFocus] {
+                waitForPasteModifiersReleased(target, attempt + 1, preservedSourceFocus);
+            });
+            return;
+        }
+        if (preservedSourceFocus) {
+            pasteUsingPreservedFocus(target);
+            return;
+        }
+        activateTarget(target);
+        restorePasteWidgetFocus(target);
+        waitForTargetAndPaste(target, 0);
+    }
+
+    void pasteUsingPreservedFocus(Window target, bool useHeldControl = false,
+                                  bool temporarilyReleaseShift = false) {
+        if (!display_ || target == None) return;
+        Window focused = None;
+        int revertTo = RevertToNone;
+        XGetInputFocus(display_, &focused, &revertTo);
+        const bool focusPreserved = pasteTargetInputWindow_ != None
+            && focused == pasteTargetInputWindow_;
+        qInfo().noquote() << QStringLiteral(
+            "[ClipDeck][Paste] preserved target=0x%1 expectedInput=0x%2 currentInput=0x%3 ok=%4")
+            .arg(static_cast<qulonglong>(target), 0, 16)
+            .arg(static_cast<qulonglong>(pasteTargetInputWindow_), 0, 16)
+            .arg(static_cast<qulonglong>(focused), 0, 16)
+            .arg(focusPreserved);
+        if (focusPreserved) {
+            if (useHeldControl && controlKeyPressed()) sendVWhileControlHeld();
+            else sendControlV(temporarilyReleaseShift);
+            return;
+        }
+
+        // The compositor really moved focus despite the non-activating hint.
+        // Fall back to the established activation path only in that case.
+        activateTarget(target);
+        restorePasteWidgetFocus(target);
+        waitForTargetAndPaste(target, 0, useHeldControl, temporarilyReleaseShift);
+    }
+
+    void restorePasteWidgetFocus(Window target) {
+        QWidget *widget = pasteTargetWidget_.data();
+        if (!widget || !widget->window()
+                || static_cast<Window>(widget->window()->winId()) != target) return;
+        widget->window()->raise();
+        widget->window()->activateWindow();
+        widget->setFocus(Qt::OtherFocusReason);
+    }
+
+    void restoreExternalInputFocus(Window target) {
+        if (!display_ || pasteTargetWidget_ || pasteTargetInputWindow_ == None
+                || pasteTargetInputWindow_ == target
+                || pasteTargetInputWindow_ == static_cast<Window>(winId())) return;
+        // Some X11 applications keep keyboard input in a child surface. Restore
+        // that surface only after the WM has reactivated its top-level window.
+        // Browser DOM inputs normally share the top-level X window; in that
+        // case deliberately do nothing and let the browser restore activeElement.
+        XSetInputFocus(display_, pasteTargetInputWindow_, RevertToPointerRoot, CurrentTime);
+        XFlush(display_);
     }
 
     void activateTarget(Window target) {
@@ -1788,26 +3498,47 @@ private:
         event.xclient.data.l[1] = CurrentTime;
         XSendEvent(display_, DefaultRootWindow(display_), False,
                    SubstructureRedirectMask | SubstructureNotifyMask, &event);
+        XRaiseWindow(display_, target);
+        // Never force an external application's top-level X window to become
+        // the input window. Browsers use the normal WM activation sequence to
+        // restore the focused DOM element; forcing the top-level here makes
+        // online Excel fall back from its search field to the selected cell.
+        if (target == static_cast<Window>(winId())) {
+            XSetInputFocus(display_, target, RevertToPointerRoot, CurrentTime);
+        }
+        XFlush(display_);
+    }
+
+    void suspendKWinBlur() {
+        clearMask();
+        if (!display_) return;
+        const Atom blur = XInternAtom(display_, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
+        XDeleteProperty(display_, static_cast<Window>(winId()), blur);
         XFlush(display_);
     }
 
     void enableKWinBlur() {
-        QPainterPath roundedPath;
-        roundedPath.addRoundedRect(QRectF(rect().adjusted(1, 1, -1, -1)), 24, 24);
-        const QRegion roundedRegion(roundedPath.toFillPolygon().toPolygon());
-        setMask(roundedRegion);
+        // Do not apply an XShape polygon.  UOS discretizes its rounded edge
+        // into horizontal scan bands which appear as repeated top/bottom
+        // lines. The translucent backing store already supplies per-pixel
+        // rounded corners, including antialiasing.
+        clearMask();
         if (!display_) return;
+        // Never use whole-window opacity: that would also fade the cards.
+        const Atom windowOpacity = XInternAtom(display_, "_NET_WM_WINDOW_OPACITY", False);
+        XDeleteProperty(display_, static_cast<Window>(winId()), windowOpacity);
+        // Explicitly keep compositing enabled for this top-level utility window.
+        const Atom bypassCompositor = XInternAtom(display_, "_NET_WM_BYPASS_COMPOSITOR", False);
+        const unsigned long compositorValue = 0;
+        XChangeProperty(display_, static_cast<Window>(winId()), bypassCompositor,
+                        XA_CARDINAL, 32, PropModeReplace,
+                        reinterpret_cast<const unsigned char *>(&compositorValue), 1);
+        // On UOS the KWin blur-behind property makes this translucent surface
+        // noticeably greyer and can leave repeated horizontal compositor
+        // artifacts.  The unblurred state seen during live resize is the
+        // intended material, so keep only per-pixel transparency.
         const Atom blur = XInternAtom(display_, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
-        QVector<unsigned long> values;
-        for (const QRect &rectangle : roundedRegion.rects()) {
-            values.append(static_cast<unsigned long>(rectangle.x()));
-            values.append(static_cast<unsigned long>(rectangle.y()));
-            values.append(static_cast<unsigned long>(rectangle.width()));
-            values.append(static_cast<unsigned long>(rectangle.height()));
-        }
-        XChangeProperty(display_, static_cast<Window>(winId()), blur, XA_CARDINAL, 32,
-                        PropModeReplace,
-                        reinterpret_cast<const unsigned char *>(values.constData()), values.size());
+        XDeleteProperty(display_, static_cast<Window>(winId()), blur);
         XFlush(display_);
     }
 
@@ -1825,7 +3556,52 @@ private:
         });
     }
 
-    void sendControlV() {
+    void setDeckInputHint(bool acceptsFocus) {
+        if (!display_ || winId() == 0) return;
+        XWMHints *hints = XGetWMHints(display_, static_cast<Window>(winId()));
+        if (!hints) hints = XAllocWMHints();
+        if (!hints) return;
+        hints->flags |= InputHint;
+        hints->input = acceptsFocus ? True : False;
+        XSetWMHints(display_, static_cast<Window>(winId()), hints);
+        XFree(hints);
+        XFlush(display_);
+    }
+
+    void grabDeckKeyboard(int attempt) {
+        if (!display_ || !isVisible()) return;
+        const int result = XGrabKeyboard(display_, static_cast<Window>(winId()), False,
+                                         GrabModeAsync, GrabModeAsync, CurrentTime);
+        if (result == GrabSuccess) {
+            keyboardGrabbed_ = true;
+            qInfo() << "[ClipDeck][Focus] non-activating keyboard grab active";
+            return;
+        }
+        if (attempt < 8) {
+            QTimer::singleShot(20, this, [this, attempt] { grabDeckKeyboard(attempt + 1); });
+            return;
+        }
+        // Some desktop components may already own an active keyboard grab.
+        // Preserve Deck usability in that exceptional case, accepting that
+        // the source application will temporarily lose focus.
+        qWarning() << "[ClipDeck][Focus] keyboard grab failed, using activating fallback"
+                   << result;
+        nonActivatingPresentation_ = false;
+        setDeckInputHint(true);
+        requestDeckFocus();
+    }
+
+    void releaseDeckKeyboard() {
+        if (!display_ || !keyboardGrabbed_) return;
+        XUngrabKeyboard(display_, CurrentTime);
+        // XSync is intentional: Ctrl+V must not be synthesized until the X
+        // server has actually processed the ungrab request.
+        XSync(display_, False);
+        keyboardGrabbed_ = false;
+        qInfo() << "[ClipDeck][Focus] keyboard grab released";
+    }
+
+    void sendControlV(bool temporarilyReleaseShift = false) {
         if (!display_) {
             return;
         }
@@ -1834,28 +3610,89 @@ private:
         if (control == 0 || v == 0) {
             return;
         }
+        std::vector<KeyCode> heldShiftKeys;
+        if (temporarilyReleaseShift) {
+            char keys[32]{};
+            XQueryKeymap(display_, keys);
+            for (const KeySym symbol : {XK_Shift_L, XK_Shift_R}) {
+                const KeyCode code = XKeysymToKeycode(display_, symbol);
+                if (code != 0 && (keys[code / 8] & (1 << (code % 8)))) {
+                    heldShiftKeys.push_back(code);
+                    XTestFakeKeyEvent(display_, code, False, CurrentTime);
+                }
+            }
+        }
         XTestFakeKeyEvent(display_, control, True, CurrentTime);
         XTestFakeKeyEvent(display_, v, True, CurrentTime);
         XTestFakeKeyEvent(display_, v, False, CurrentTime);
         XTestFakeKeyEvent(display_, control, False, CurrentTime);
+        for (const KeyCode code : heldShiftKeys) {
+            XTestFakeKeyEvent(display_, code, True, CurrentTime);
+        }
         XFlush(display_);
     }
 
-    void waitForTargetAndPaste(Window target, int attempt) {
+    void sendVWhileControlHeld() {
+        if (!display_) return;
+        const KeyCode v = XKeysymToKeycode(display_, XK_v);
+        if (v == 0) return;
+        XTestFakeKeyEvent(display_, v, True, CurrentTime);
+        XTestFakeKeyEvent(display_, v, False, CurrentTime);
+        XFlush(display_);
+    }
+
+    bool controlKeyPressed() const {
+        if (!display_) return false;
+        char keys[32]{};
+        XQueryKeymap(display_, keys);
+        for (const KeySym symbol : {XK_Control_L, XK_Control_R}) {
+            const KeyCode code = XKeysymToKeycode(display_, symbol);
+            if (code != 0 && (keys[code / 8] & (1 << (code % 8)))) return true;
+        }
+        return false;
+    }
+
+    void waitForTargetAndPaste(Window target, int attempt, bool useHeldControl = false,
+                               bool temporarilyReleaseShift = false) {
         if (!display_ || target == None) return;
         if (activeTopLevelWindow(display_) == target) {
-            sendControlV();
+            // The WM may acknowledge _NET_ACTIVE_WINDOW asynchronously. Set
+            // the remembered Qt child focus again immediately before paste so
+            // a QWebEngine editor receives Ctrl+V rather than the dialog shell.
+            restorePasteWidgetFocus(target);
+            restoreExternalInputFocus(target);
+            if (useHeldControl && controlKeyPressed()) sendVWhileControlHeld();
+            else sendControlV(temporarilyReleaseShift);
             return;
         }
-        if (attempt >= 30) {
-            return; // Clipboard is already populated; the user can paste manually.
+        if (attempt >= 40) {
+            // Some UOS window managers update _NET_ACTIVE_WINDOW late or not
+            // at all for utility windows. The target is the window captured
+            // before Deck appeared, so make one final focused paste attempt
+            // instead of silently dropping the operation.
+            qWarning() << "[ClipDeck][Paste] active-window wait timed out; forcing target paste";
+            activateTarget(target);
+            restorePasteWidgetFocus(target);
+            restoreExternalInputFocus(target);
+            if (useHeldControl && controlKeyPressed()) sendVWhileControlHeld();
+            else sendControlV(temporarilyReleaseShift);
+            return;
         }
-        QTimer::singleShot(25, this, [this, target, attempt] {
-            waitForTargetAndPaste(target, attempt + 1);
+        QTimer::singleShot(10, this,
+                          [this, target, attempt, useHeldControl, temporarilyReleaseShift] {
+            waitForTargetAndPaste(
+                target, attempt + 1, useHeldControl, temporarilyReleaseShift);
         });
     }
 
     void reload() {
+        const bool categoryChanged = loadedCategory_ != selectedCategory_;
+        if (categoryChanged) {
+            loadedCategory_ = selectedCategory_;
+            imageLoadLimit_ = kInitialImageCapacity;
+            imageBatchLoading_ = false;
+            ++imageLoadGeneration_;
+        }
         const qint64 selectedDatabaseID = selectedIndex_ >= 0
             && selectedIndex_ < static_cast<int>(items_.size())
             ? items_[selectedIndex_].databaseID : -1;
@@ -1863,7 +3700,15 @@ private:
         if (selectedCategory_ == QStringLiteral("Text")) repositoryCategory = QStringLiteral("文本");
         else if (selectedCategory_ == QStringLiteral("Images")) repositoryCategory = QStringLiteral("图片");
         else if (selectedCategory_ != QStringLiteral("History")) repositoryCategory = selectedCategory_;
-        items_ = repository_->fetch(repositoryCategory, searchQuery_, kHistoryCapacity).toStdVector();
+        const int fetchLimit = selectedCategory_ == QStringLiteral("Images")
+            ? std::min(kHistoryCapacity, std::max(kInitialImageCapacity, imageLoadLimit_))
+            : kHistoryCapacity;
+        items_ = repository_->fetch(repositoryCategory, searchQuery_, fetchLimit).toStdVector();
+        imageLoadLimit_ = selectedCategory_ == QStringLiteral("Images")
+            ? static_cast<int>(items_.size()) : kInitialImageCapacity;
+        imageHasMore_ = selectedCategory_ == QStringLiteral("Images")
+            && static_cast<int>(items_.size()) == fetchLimit
+            && fetchLimit < kHistoryCapacity;
         selectedIndex_ = -1;
         if (selectedDatabaseID >= 0) {
             for (int index = 0; index < static_cast<int>(items_.size()); ++index) {
@@ -1882,52 +3727,121 @@ private:
     HistoryRepository *repository_ = nullptr;
     QNetworkAccessManager network_;
     Window pasteTarget_ = None;
+    Window pasteTargetInputWindow_ = None;
+    QPointer<QWidget> pasteTargetWidget_;
     std::vector<ClipboardItem> items_;
+    QStringList categoryValuesCache_;
+    QVector<int> categoryWidthsCache_;
+    QString loadedCategory_;
+    int imageLoadLimit_ = kInitialImageCapacity;
+    int imageLoadGeneration_ = 0;
+    bool imageHasMore_ = false;
+    bool imageBatchLoading_ = false;
     int selectedIndex_ = -1;
     int scrollOffset_ = 0;
     qint64 suppressClipboardCaptureUntil_ = 0;
+    qint64 focusAcquisitionDeadline_ = 0;
+    bool nonActivatingPresentation_ = false;
+    bool keyboardGrabbed_ = false;
+    unsigned int lastPointerButtonMask_ = 0;
     bool resizing_ = false;
     int resizeStartGlobalY_ = 0;
     QRect resizeStartGeometry_;
     int categoryPageStart_ = 0;
     static constexpr int kCategoriesPerPage = 6;
     QLineEdit *searchEdit_ = nullptr;
+    QVariantAnimation *searchAnimation_ = nullptr;
+    qreal searchExpansion_ = 0.0;
+    QTimer *searchDebounce_ = nullptr;
+    QTimer *blurUpdateTimer_ = nullptr;
+    QTimer *resizeReleaseTimer_ = nullptr;
+    QTimer *resizeFrameTimer_ = nullptr;
+    QTimer *outsideClickTimer_ = nullptr;
+    QHash<qint64, QImage> imageThumbnailCache_;
+    QHash<qint64, QImage> linkPreviewCache_;
+    QHash<qint64, QImage> linkIconCache_;
+    QHash<QString, QImage> sourceIconRenderCache_;
+    QHash<QString, QImage> textCardCache_;
     std::function<void(int)> settingsCallback_;
     QString selectedCategory_ = QStringLiteral("History");
     QString searchQuery_;
     bool searchActive_ = false;
     bool quickPasteOverlay_ = false;
+    int pendingResizeHeight_ = 0;
 };
 
 void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPage = 0,
                   std::function<void()> shortcutChanged = {},
-                  const QString &renderPath = QString()) {
+                  const QString &renderPath = QString(),
+                  bool beginNewCategory = false,
+                  std::function<void(bool)> shortcutRecordingChanged = {},
+                  bool enableCommandInput = false) {
     QSettings settings;
+    const auto refreshDeck = [deck] { if (deck) deck->refresh(); };
     QDialog dialog;
     dialog.setWindowTitle(QStringLiteral("ClipDeck 设置"));
-    dialog.resize(980, 680);
-    dialog.setMinimumSize(920, 640);
+    // The category editor uses the same logical three-column geometry as the
+    // macOS settings window: navigation, category list, and a full editor.
+    dialog.resize(1220, 880);
+    dialog.setMinimumSize(1080, 720);
     dialog.setStyleSheet(QStringLiteral(
-        "QDialog{background:#1d1d1f;color:#eeeeef;}"
+        "QDialog{background:#1d1d1f;color:#eeeeef;} QDialog QWidget{color:#eeeeef;}"
         "QListWidget#sidebar{background:#28282a;border:0;padding:18px 10px;color:#aaa;font-size:17px;font-weight:600;}"
-        "QListWidget#sidebar::item{height:56px;padding-left:18px;border-radius:12px;}"
+        "QListWidget#sidebar::item{height:56px;padding-left:18px;border-radius:12px;color:#cfcfd3;}"
         "QListWidget#sidebar::item:selected{background:#4a4a4d;color:white;}"
-        "QListWidget#categoryList,QPlainTextEdit,QLineEdit{background:#151517;color:#eee;border:1px solid #343438;border-radius:9px;padding:8px;}"
+        "QListWidget#categoryList,QPlainTextEdit,QLineEdit{background:#151517;color:#eee;border:1px solid #343438;"
+        "border-radius:9px;padding:8px;outline:0;selection-background-color:#48484d;selection-color:white;}"
+        "QPlainTextEdit:!focus,QLineEdit:!focus{background:#151517;border-color:#343438;}"
+        "QPlainTextEdit:focus,QLineEdit:focus{background:#19191c;border-color:#1683ff;selection-background-color:#1683ff;}"
         "QListWidget#categoryList::item{height:34px;padding-left:8px;}"
         "QListWidget#categoryList::item:selected{background:#176fd1;color:white;}"
         "QMenu{background:#29292c;color:#eee;border:1px solid #444;padding:5px;}"
         "QMenu::item:selected{background:#176fd1;color:white;}"
         "QWidget#page{background:#1d1d1f;}"
+        "QWidget#categorySidebar{background:#1b1b1d;}"
+        "QWidget#categorySidebar,QWidget#categorySidebar QLabel,QWidget#categorySidebar QListWidget{color:#dedee1;}"
+        "QListWidget#categoryList{background:transparent;border:0;border-radius:0;padding:0;outline:0;}"
+        "QListWidget#categoryList::item{background:transparent;padding:0;}"
+        "QListWidget#categoryList::item:selected{background:transparent;}"
+        "QFrame#categoryDivider{color:#343437;background:#343437;max-width:1px;border:0;}"
+        "QScrollArea#categoryEditorScroll,QWidget#categoryEditor{background:#1d1d1f;border:0;}"
+        "QWidget#categoryEditor,QWidget#categoryEditor QLabel,QWidget#categoryEditor QPushButton{color:#dedee1;}"
+        "QLabel#categoryEditorTitle{font-size:25px;font-weight:700;color:#eeeeef;}"
+        "QLabel#categorySectionTitle{font-size:18px;font-weight:700;color:#e8e8ea;}"
+        "QLabel#categoryRowLabel{font-size:15px;font-weight:600;color:#e2e2e5;}"
+        "QFrame#categorySection{background:#202022;border:1px solid #2b2b2e;border-radius:14px;}"
+        "QFrame#categorySection QFrame{color:#38383c;}"
+        "QFrame#categorySection QPlainTextEdit{background:transparent;border:0;border-radius:0;padding:12px 16px;}"
+        "QFrame#categorySection QPlainTextEdit:focus{background:#232326;border:0;}"
+        "QFrame#categorySection QLineEdit,QFrame#categorySection QComboBox{color:#eeeeef;}"
+        "QPlainTextEdit#categoryScript,QPlainTextEdit#categoryTestText{color:#eeeeef;}"
+        "QPushButton#categoryHeaderButton{background:transparent;border:0;padding:0;}"
+        "QPushButton#categoryHeaderButton:hover{background:#343437;}"
+        "QPushButton#categorySave{background:#087ff5;color:white;font-weight:600;padding:9px 18px;}"
+        "QPushButton#categorySave:hover{background:#168cff;}"
         "QLabel{color:#dedee1;font-size:14px;} QLabel#title{font-size:30px;font-weight:700;}"
         "QLabel#subtitle{color:#8f8f94;font-size:16px;}"
         "QGroupBox{background:#202022;border:1px solid #2b2b2e;border-radius:14px;margin-top:14px;padding:22px 18px 16px;}"
         "QGroupBox::title{color:#e5e5e7;font-size:18px;font-weight:700;subcontrol-origin:margin;left:4px;}"
-        "QComboBox,QSpinBox{background:#303033;color:#eee;border:0;border-radius:9px;padding:8px 12px;min-width:130px;}"
-        "QPushButton{background:#343437;color:#eee;border:0;border-radius:9px;padding:9px 16px;}"
-        "QPushButton:hover{background:#444448;} QCheckBox{spacing:12px;font-size:15px;}"
-        "QSlider::groove:horizontal{height:5px;background:#363639;border-radius:2px;}"
-        "QSlider::sub-page:horizontal{background:#1683ff;border-radius:2px;}"
-        "QSlider::handle:horizontal{background:#eee;width:18px;margin:-7px 0;border-radius:9px;}"));
+        "QComboBox,QSpinBox{background:#303033;color:#eee;border:1px solid #3b3b3f;border-radius:9px;"
+        "padding:8px 34px 8px 12px;min-width:130px;outline:0;selection-background-color:#1683ff;}"
+        "QComboBox:hover,QSpinBox:hover{background:#39393d;border-color:#55555a;}"
+        "QComboBox:!focus,QSpinBox:!focus{background:#303033;border-color:#3b3b3f;}"
+        "QComboBox:focus,QSpinBox:focus{background:#39393d;border-color:#1683ff;}"
+        "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:30px;border:0;}"
+        "QComboBox::down-arrow{image:none;width:0;height:0;}"
+        "QComboBox QAbstractItemView{background:#29292c;color:#eee;border:1px solid #49494e;border-radius:9px;padding:5px;selection-background-color:#176fd1;selection-color:white;outline:0;}"
+        "QPushButton{background:#343437;color:#eee;border:1px solid transparent;border-radius:9px;padding:9px 16px;outline:0;}"
+        "QPushButton:hover{background:#444448;} QPushButton:focus{border-color:#1683ff;}"
+        "QPushButton[recording=\"true\"]{background:#176fd1;border:1px solid #62aaff;}"
+        "QCheckBox{spacing:12px;font-size:15px;color:#eee;} QCheckBox:disabled{color:#8f8f94;}"));
+    dialog.setStyleSheet(dialog.styleSheet() + QStringLiteral(
+        "QScrollBar:vertical{background:#1b1b1d;width:9px;margin:2px;border:0;}"
+        "QScrollBar::handle:vertical{background:#55555a;min-height:28px;border-radius:4px;}"
+        "QScrollBar:horizontal{background:#1b1b1d;height:9px;margin:2px;border:0;}"
+        "QScrollBar::handle:horizontal{background:#55555a;min-width:28px;border-radius:4px;}"
+        "QScrollBar::add-line,QScrollBar::sub-line{width:0;height:0;background:transparent;}"
+        "QScrollBar::add-page,QScrollBar::sub-page{background:transparent;}"));
 
     QHBoxLayout *root = new QHBoxLayout(&dialog);
     root->setContentsMargins(0, 0, 0, 0);
@@ -1960,7 +3874,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     auto generalPage = makePage(QStringLiteral("通用"), QStringLiteral("设置 ClipDeck 的默认行为"));
     QGroupBox *pasteBox = new QGroupBox(QStringLiteral("粘贴"), generalPage.first);
     QFormLayout *pasteForm = new QFormLayout(pasteBox);
-    QComboBox *pasteFormat = new QComboBox(pasteBox);
+    QComboBox *pasteFormat = new StyledComboBox(pasteBox);
     pasteFormat->addItems({QStringLiteral("纯文本"), QStringLiteral("保留格式")});
     pasteFormat->setCurrentIndex(settings.value(QStringLiteral("paste/preserveFormatting"), false).toBool() ? 1 : 0);
     pasteForm->addRow(QStringLiteral("默认粘贴格式"), pasteFormat);
@@ -1970,46 +3884,51 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QVBoxLayout *startupLayout = new QVBoxLayout(startupBox);
     QCheckBox *launchAtLogin = new QCheckBox(QStringLiteral("登录 UOS 时自动启动"), startupBox);
     launchAtLogin->setChecked(QFile::exists(QDir::home().filePath(QStringLiteral(".config/autostart/clipdeck.desktop"))));
+    QObject::connect(launchAtLogin, &QCheckBox::toggled, &dialog,
+                     [launchAtLogin, &dialog](bool enabled) {
+        if (setLaunchAtLogin(enabled)) return;
+        const QSignalBlocker blocker(launchAtLogin);
+        launchAtLogin->setChecked(!enabled);
+        showClipDeckAlert(&dialog, QStringLiteral("无法更改开机启动"),
+                          enabled ? QStringLiteral("无法创建 UOS 开机启动项。")
+                                  : QStringLiteral("无法移除 UOS 开机启动项。"),
+                          QStringLiteral("知道了"), QString(), AlertTone::Warning);
+    });
     startupLayout->addWidget(launchAtLogin);
     generalPage.second->addWidget(startupBox);
     QGroupBox *historyBox = new QGroupBox(QStringLiteral("保留历史"), generalPage.first);
     QVBoxLayout *historyLayout = new QVBoxLayout(historyBox);
     QLabel *retentionValue = new QLabel(historyBox);
     retentionValue->setAlignment(Qt::AlignCenter);
-    QSlider *retention = new QSlider(Qt::Horizontal, historyBox);
-    const QVector<int> retentionOptions = {
-        1, 2, 3, 4, 5, 6, 7, 14, 21, 30, 60, 90, 120, 150, 180,
-        210, 240, 270, 300, 330, 365, 0
-    };
-    retention->setRange(0, retentionOptions.size() - 1);
     const int savedRetention = settings.value(QStringLiteral("history/retentionDays"), 30).toInt();
-    int retentionIndex = retentionOptions.indexOf(savedRetention);
-    if (retentionIndex < 0) {
-        retentionIndex = 0;
-        int closest = std::numeric_limits<int>::max();
-        for (int index = 0; index < retentionOptions.size() - 1; ++index) {
-            const int distance = std::abs(retentionOptions[index] - savedRetention);
-            if (distance < closest) { closest = distance; retentionIndex = index; }
-        }
-    }
-    retention->setValue(retentionIndex);
-    auto selectedRetentionDays = [retention, &retentionOptions] {
-        return retentionOptions[std::max(0, std::min(retention->value(), retentionOptions.size() - 1))];
-    };
-    auto updateRetention = [retentionValue, &retentionOptions](int index) {
-        const int days = retentionOptions[index];
-        QString label;
-        if (days == 0) label = QStringLiteral("永久");
-        else if (days == 7) label = QStringLiteral("1 周");
-        else if (days == 30) label = QStringLiteral("1 个月");
-        else if (days == 365) label = QStringLiteral("1 年");
-        else label = QStringLiteral("%1 天").arg(days);
-        retentionValue->setText(label);
-    };
-    updateRetention(retention->value());
-    QObject::connect(retention, &QSlider::valueChanged, updateRetention);
-    historyLayout->addWidget(retentionValue);
+    retentionValue->hide();
+    RetentionControl *retention = new RetentionControl(savedRetention, historyBox);
     historyLayout->addWidget(retention);
+    auto selectedRetentionDays = [retention] { return retention->value(); };
+    int currentRetentionDays = savedRetention;
+    retention->setChangeCallback([&, retention](int days) {
+        if (days == currentRetentionDays) return;
+        const bool shorter = isShorterRetention(currentRetentionDays, days);
+        if (shorter) {
+            QString title = QStringLiteral("%1天").arg(days);
+            for (const RetentionOption &option : retentionOptions()) {
+                if (option.days == days) { title = option.title; break; }
+            }
+            if (!showClipDeckAlert(&dialog, QStringLiteral("缩短历史保留期限？"),
+                    QStringLiteral("将永久删除最近复制时间早于%1的历史项目，然后应用新期限。此操作无法撤销。")
+                        .arg(title),
+                    QStringLiteral("删除并应用"), QStringLiteral("取消"),
+                    AlertTone::Destructive)) {
+                retention->setValue(currentRetentionDays);
+                return;
+            }
+            repository->clearExpired(days);
+            refreshDeck();
+        }
+        currentRetentionDays = days;
+        settings.setValue(QStringLiteral("history/retentionDays"), days);
+        settings.sync();
+    });
     generalPage.second->addWidget(historyBox);
     generalPage.second->addStretch();
     pages->addWidget(generalPage.first);
@@ -2019,29 +3938,48 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QFormLayout *imageForm = new QFormLayout(imageBox);
     QCheckBox *recordImages = new QCheckBox(QStringLiteral("记录图片剪贴板内容"), imageBox);
     recordImages->setChecked(settings.value(QStringLiteral("clipboard/recordsImages"), true).toBool());
-    QSpinBox *maximumImage = new QSpinBox(imageBox);
-    maximumImage->setRange(1, 100);
-    maximumImage->setSuffix(QStringLiteral(" MB"));
-    maximumImage->setValue(settings.value(QStringLiteral("clipboard/maximumImageMegabytes"), 10).toInt());
+    QComboBox *maximumImage = new StyledComboBox(imageBox);
+    for (const int size : {1, 2, 5, 10, 20}) maximumImage->addItem(QStringLiteral("%1 MB").arg(size), size);
+    maximumImage->setCurrentIndex(std::max(0, maximumImage->findData(
+        settings.value(QStringLiteral("clipboard/maximumImageMegabytes"), 10).toInt())));
     imageForm->addRow(recordImages);
     imageForm->addRow(QStringLiteral("最大图片大小"), maximumImage);
     imagePage.second->addWidget(imageBox);
     imagePage.second->addStretch();
     pages->addWidget(imagePage.first);
 
-    auto keyboardPage = makePage(QStringLiteral("键盘快捷键"), QStringLiteral("使用键盘快速操作 ClipDeck"));
-    QGroupBox *keyBox = new QGroupBox(QStringLiteral("全局与 Deck"), keyboardPage.first);
+    auto keyboardPage = makePage(QStringLiteral("键盘快捷键"), QStringLiteral("点击快捷键区域，然后按下新的组合键"));
+    QGroupBox *keyBox = new QGroupBox(QStringLiteral("全局与 Deck · Esc 取消录制"), keyboardPage.first);
     QFormLayout *keyForm = new QFormLayout(keyBox);
-    QKeySequenceEdit *showDeckShortcut = new QKeySequenceEdit(
-        configuredShortcut(QStringLiteral("shortcuts/showDeck"), QKeySequence(Qt::Key_F12)), keyBox);
-    QKeySequenceEdit *previousCategoryShortcut = new QKeySequenceEdit(
+    ShortcutCaptureButton *showDeckShortcut = new ShortcutCaptureButton(
+        configuredShortcut(QStringLiteral("shortcuts/showDeck"), defaultShowDeckShortcut()), keyBox);
+    ShortcutCaptureButton *previousCategoryShortcut = new ShortcutCaptureButton(
         configuredShortcut(QStringLiteral("shortcuts/previousCategory"),
                            QKeySequence(Qt::CTRL | Qt::Key_Left)), keyBox);
-    QKeySequenceEdit *nextCategoryShortcut = new QKeySequenceEdit(
+    ShortcutCaptureButton *nextCategoryShortcut = new ShortcutCaptureButton(
         configuredShortcut(QStringLiteral("shortcuts/nextCategory"),
                            QKeySequence(Qt::CTRL | Qt::Key_Right)), keyBox);
+    auto applyShortcut = [&settings, shortcutChanged](const QString &key,
+                                                       const QKeySequence &sequence) {
+        settings.setValue(key, sequence.toString(QKeySequence::PortableText));
+        settings.sync();
+        if (shortcutChanged) shortcutChanged();
+    };
+    showDeckShortcut->setChangeCallback([&applyShortcut](const QKeySequence &sequence) {
+        applyShortcut(QStringLiteral("shortcuts/showDeck"), sequence);
+    });
+    previousCategoryShortcut->setChangeCallback([&applyShortcut](const QKeySequence &sequence) {
+        applyShortcut(QStringLiteral("shortcuts/previousCategory"), sequence);
+    });
+    nextCategoryShortcut->setChangeCallback([&applyShortcut](const QKeySequence &sequence) {
+        applyShortcut(QStringLiteral("shortcuts/nextCategory"), sequence);
+    });
+    for (ShortcutCaptureButton *capture : {showDeckShortcut, previousCategoryShortcut,
+                                            nextCategoryShortcut}) {
+        capture->setRecordingCallback(shortcutRecordingChanged);
+    }
     auto modifierPicker = [keyBox](Qt::KeyboardModifiers current) {
-        QComboBox *picker = new QComboBox(keyBox);
+        QComboBox *picker = new StyledComboBox(keyBox);
         picker->addItem(QStringLiteral("Ctrl"), static_cast<int>(Qt::ControlModifier));
         picker->addItem(QStringLiteral("Shift"), static_cast<int>(Qt::ShiftModifier));
         picker->addItem(QStringLiteral("Alt"), static_cast<int>(Qt::AltModifier));
@@ -2053,6 +3991,18 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         configuredModifier(QStringLiteral("shortcuts/quickPasteModifier"), Qt::ControlModifier));
     QComboBox *plainTextModifier = modifierPicker(
         configuredModifier(QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier));
+    QObject::connect(quickPasteModifier, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [&settings, quickPasteModifier](int) {
+        settings.setValue(QStringLiteral("shortcuts/quickPasteModifier"),
+                          quickPasteModifier->currentData().toInt());
+        settings.sync();
+    });
+    QObject::connect(plainTextModifier, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [&settings, plainTextModifier](int) {
+        settings.setValue(QStringLiteral("shortcuts/plainTextModifier"),
+                          plainTextModifier->currentData().toInt());
+        settings.sync();
+    });
     keyForm->addRow(QStringLiteral("显示 / 隐藏 Deck"), showDeckShortcut);
     keyForm->addRow(QStringLiteral("显示上一个类型"), previousCategoryShortcut);
     keyForm->addRow(QStringLiteral("显示下一个类型"), nextCategoryShortcut);
@@ -2064,7 +4014,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QPushButton *resetShortcuts = new QPushButton(QStringLiteral("恢复默认快捷键"), keyBox);
     keyForm->addRow(QString(), resetShortcuts);
     QObject::connect(resetShortcuts, &QPushButton::clicked, [&] {
-        showDeckShortcut->setKeySequence(QKeySequence(Qt::Key_F12));
+        showDeckShortcut->setKeySequence(defaultShowDeckShortcut());
         previousCategoryShortcut->setKeySequence(QKeySequence(Qt::CTRL | Qt::Key_Left));
         nextCategoryShortcut->setKeySequence(QKeySequence(Qt::CTRL | Qt::Key_Right));
         quickPasteModifier->setCurrentIndex(quickPasteModifier->findData(
@@ -2076,66 +4026,223 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     keyboardPage.second->addStretch();
     pages->addWidget(keyboardPage.first);
 
-    auto categoryPage = makePage(QStringLiteral("分类"), QStringLiteral("使用 JavaScript 自动整理剪贴板内容"));
-    QGroupBox *categoryBox = new QGroupBox(QStringLiteral("自动分类"), categoryPage.first);
-    QHBoxLayout *categoryLayout = new QHBoxLayout(categoryBox);
-    QListWidget *categoryList = new QListWidget(categoryBox);
+    QWidget *categoryPageWidget = new QWidget(pages);
+    categoryPageWidget->setObjectName(QStringLiteral("page"));
+    QHBoxLayout *categoryLayout = new QHBoxLayout(categoryPageWidget);
+    categoryLayout->setContentsMargins(0, 0, 0, 0);
+    categoryLayout->setSpacing(0);
+    QWidget *categorySidebar = new QWidget(categoryPageWidget);
+    categorySidebar->setObjectName(QStringLiteral("categorySidebar"));
+    categorySidebar->setFixedWidth(220);
+    QVBoxLayout *categorySidebarLayout = new QVBoxLayout(categorySidebar);
+    categorySidebarLayout->setContentsMargins(10, 0, 10, 12);
+    categorySidebarLayout->setSpacing(0);
+    QHBoxLayout *categoryHeader = new QHBoxLayout;
+    QLabel *categoryHeaderTitle = new QLabel(QStringLiteral("分类"), categorySidebar);
+    QFont categoryHeaderFont = categoryHeaderTitle->font();
+    categoryHeaderFont.setPointSize(14);
+    categoryHeaderFont.setBold(true);
+    categoryHeaderTitle->setFont(categoryHeaderFont);
+    categoryHeaderTitle->setMinimumHeight(62);
+    QPushButton *restoreCategories = new CategoryHeaderButton(
+        CategoryHeaderButton::Symbol::Restore, categorySidebar);
+    restoreCategories->setToolTip(QStringLiteral("还原预制分类"));
+    QPushButton *newCategory = new CategoryHeaderButton(
+        CategoryHeaderButton::Symbol::Add, categorySidebar);
+    newCategory->setToolTip(QStringLiteral("新增分类"));
+    categoryHeader->addWidget(categoryHeaderTitle);
+    categoryHeader->addStretch();
+    categoryHeader->addWidget(restoreCategories);
+    categoryHeader->addWidget(newCategory);
+    categoryHeader->setContentsMargins(6, 0, 0, 0);
+    categoryHeader->setSpacing(4);
+    categoryHeader->setAlignment(Qt::AlignVCenter);
+    categorySidebarLayout->addLayout(categoryHeader);
+    categorySidebarLayout->setStretch(0, 0);
+    CategoryListWidget *categoryList = new CategoryListWidget(categorySidebar);
     categoryList->setObjectName(QStringLiteral("categoryList"));
-    categoryList->setMinimumWidth(190);
-    QVBoxLayout *categoryEditor = new QVBoxLayout;
-    QLineEdit *categoryName = new QLineEdit(categoryBox);
+    categoryList->setItemDelegate(new CategoryListDelegate(categoryList));
+    categoryList->setSpacing(3);
+    categoryList->setUniformItemSizes(true);
+    categoryList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    categoryList->setDragDropMode(QAbstractItemView::InternalMove);
+    categoryList->setDefaultDropAction(Qt::MoveAction);
+    categoryList->setDragEnabled(true);
+    categoryList->setAcceptDrops(true);
+    categoryList->setDropIndicatorShown(true);
+    categorySidebarLayout->addWidget(categoryList, 1);
+
+    QFrame *categoryDivider = new QFrame(categoryPageWidget);
+    categoryDivider->setFrameShape(QFrame::VLine);
+    categoryDivider->setObjectName(QStringLiteral("categoryDivider"));
+
+    QScrollArea *categoryScroll = new QScrollArea(categoryPageWidget);
+    categoryScroll->setObjectName(QStringLiteral("categoryEditorScroll"));
+    categoryScroll->setWidgetResizable(true);
+    categoryScroll->setFrameShape(QFrame::NoFrame);
+    categoryScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    QWidget *categoryEditorWidget = new QWidget(categoryScroll);
+    categoryEditorWidget->setObjectName(QStringLiteral("categoryEditor"));
+    QVBoxLayout *categoryEditor = new QVBoxLayout(categoryEditorWidget);
+    categoryEditor->setContentsMargins(38, 26, 38, 26);
+    categoryEditor->setSpacing(10);
+
+    QLabel *editorTitle = new QLabel(QStringLiteral("编辑分类"), categoryEditorWidget);
+    editorTitle->setObjectName(QStringLiteral("categoryEditorTitle"));
+    QLabel *editorSubtitle = new QLabel(
+        QStringLiteral("调整名称、内容预览方式和自动分类规则"), categoryEditorWidget);
+    editorSubtitle->setObjectName(QStringLiteral("subtitle"));
+    categoryEditor->addWidget(editorTitle);
+    categoryEditor->addWidget(editorSubtitle);
+    categoryEditor->addSpacing(14);
+
+    auto addSectionTitle = [&](const QString &text) {
+        QLabel *label = new QLabel(text, categoryEditorWidget);
+        label->setObjectName(QStringLiteral("categorySectionTitle"));
+        categoryEditor->addWidget(label);
+    };
+    auto makeSection = [&]() {
+        QFrame *section = new QFrame(categoryEditorWidget);
+        section->setObjectName(QStringLiteral("categorySection"));
+        return section;
+    };
+
+    addSectionTitle(QStringLiteral("基本信息"));
+    QFrame *basicSection = makeSection();
+    QVBoxLayout *basicLayout = new QVBoxLayout(basicSection);
+    basicLayout->setContentsMargins(16, 0, 16, 0);
+    basicLayout->setSpacing(0);
+    QHBoxLayout *nameRow = new QHBoxLayout;
+    QLabel *nameLabel = new QLabel(QStringLiteral("分类名称"), basicSection);
+    nameLabel->setObjectName(QStringLiteral("categoryRowLabel"));
+    nameLabel->setStyleSheet(QStringLiteral("color:#e6e6e8;"));
+    QLineEdit *categoryName = new QLineEdit(basicSection);
     categoryName->setPlaceholderText(QStringLiteral("分类名称"));
-    QHBoxLayout *categoryMetadata = new QHBoxLayout;
-    QLineEdit *categoryIcon = new QLineEdit(categoryBox);
-    categoryIcon->setPlaceholderText(QStringLiteral("图标，例如 </>"));
-    QComboBox *previewLanguage = new QComboBox(categoryBox);
+    categoryName->setFixedWidth(270);
+    nameRow->addWidget(nameLabel);
+    nameRow->addStretch();
+    nameRow->addWidget(categoryName);
+    nameRow->setContentsMargins(0, 8, 0, 8);
+    basicLayout->addLayout(nameRow);
+    QFrame *basicDivider = new QFrame(basicSection);
+    basicDivider->setFrameShape(QFrame::HLine);
+    basicLayout->addWidget(basicDivider);
+    QHBoxLayout *languageRow = new QHBoxLayout;
+    QLabel *languageLabel = new QLabel(QStringLiteral("预览语言"), basicSection);
+    languageLabel->setObjectName(QStringLiteral("categoryRowLabel"));
+    languageLabel->setStyleSheet(QStringLiteral("color:#e6e6e8;"));
+    QComboBox *previewLanguage = new StyledComboBox(basicSection);
+    previewLanguage->setFixedWidth(170);
     previewLanguage->addItems({QStringLiteral("text"), QStringLiteral("code"),
         QStringLiteral("json"), QStringLiteral("sql"), QStringLiteral("shell"),
         QStringLiteral("markdown"), QStringLiteral("url"), QStringLiteral("color"),
         QStringLiteral("javascript"), QStringLiteral("java"), QStringLiteral("xml"),
         QStringLiteral("yaml")});
-    categoryMetadata->addWidget(categoryIcon);
-    categoryMetadata->addWidget(previewLanguage);
-    QPlainTextEdit *categoryScript = new QPlainTextEdit(categoryBox);
-    categoryScript->setPlaceholderText(QStringLiteral("function classify(item) {\n    return false;\n}"));
-    categoryScript->setTabStopDistance(28);
-    new CardSyntaxHighlighter(categoryScript->document(), QStringLiteral("javascript"));
-    QHBoxLayout *categoryTestLayout = new QHBoxLayout;
-    QLineEdit *categoryTestText = new QLineEdit(categoryBox);
+    languageRow->addWidget(languageLabel);
+    languageRow->addStretch();
+    languageRow->addWidget(previewLanguage);
+    languageRow->setContentsMargins(0, 8, 0, 8);
+    basicLayout->addLayout(languageRow);
+    categoryEditor->addWidget(basicSection);
+    categoryEditor->addSpacing(14);
+
+    QLineEdit *categoryIcon = new QLineEdit(categoryEditorWidget);
+    categoryIcon->hide();
+
+    addSectionTitle(QStringLiteral("JavaScript 分类规则"));
+    QFrame *scriptSection = makeSection();
+    QVBoxLayout *scriptLayout = new QVBoxLayout(scriptSection);
+    scriptLayout->setContentsMargins(0, 0, 0, 0);
+    scriptLayout->setSpacing(0);
+    ScriptEditorWidget *categoryScript = new ScriptEditorWidget(scriptSection);
+    categoryScript->setObjectName(QStringLiteral("categoryScript"));
+    categoryScript->setMinimumHeight(280);
+    QHBoxLayout *categoryScriptHeader = new QHBoxLayout;
+    QLabel *categoryScriptHint = new QLabel(
+        QStringLiteral("函数需返回 true 或 false，首个匹配的分类生效"), scriptSection);
+    categoryScriptHint->setObjectName(QStringLiteral("subtitle"));
+    categoryScriptHint->setStyleSheet(QStringLiteral("color:#b8b8bd;"));
+    QPushButton *formatCategory = new QPushButton(QStringLiteral("格式化"), scriptSection);
+    QPushButton *expandCategoryEditor = new QPushButton(QStringLiteral("展开编辑"), scriptSection);
+    categoryScriptHeader->addWidget(categoryScriptHint);
+    categoryScriptHeader->addStretch();
+    categoryScriptHeader->addWidget(formatCategory);
+    categoryScriptHeader->addWidget(expandCategoryEditor);
+    categoryScriptHeader->setContentsMargins(16, 7, 16, 7);
+    scriptLayout->addLayout(categoryScriptHeader);
+    QFrame *scriptDivider = new QFrame(scriptSection);
+    scriptDivider->setFrameShape(QFrame::HLine);
+    scriptLayout->addWidget(scriptDivider);
+    scriptLayout->addWidget(categoryScript, 1);
+    QHBoxLayout *categoryScriptStatus = new QHBoxLayout;
+    QLabel *categoryScriptShortcuts = new QLabel(
+        QStringLiteral("Ctrl+/ 注释 · Tab / Shift+Tab 缩进"), scriptSection);
+    categoryScriptShortcuts->setObjectName(QStringLiteral("subtitle"));
+    QLabel *categoryScriptMetrics = new QLabel(scriptSection);
+    categoryScriptMetrics->setObjectName(QStringLiteral("subtitle"));
+    categoryScriptStatus->addWidget(categoryScriptShortcuts);
+    categoryScriptStatus->addStretch();
+    categoryScriptStatus->addWidget(categoryScriptMetrics);
+    categoryScriptStatus->setContentsMargins(16, 7, 16, 7);
+    scriptLayout->addLayout(categoryScriptStatus);
+    categoryEditor->addWidget(scriptSection);
+    categoryEditor->addSpacing(14);
+
+    addSectionTitle(QStringLiteral("规则测试"));
+    QFrame *testSection = makeSection();
+    QVBoxLayout *testLayout = new QVBoxLayout(testSection);
+    testLayout->setContentsMargins(0, 0, 0, 0);
+    testLayout->setSpacing(0);
+    QPlainTextEdit *categoryTestText = new QPlainTextEdit(testSection);
+    categoryTestText->setObjectName(QStringLiteral("categoryTestText"));
+    categoryTestText->setStyleSheet(QStringLiteral("color:#eeeeef;"));
     categoryTestText->setPlaceholderText(QStringLiteral("输入示例剪贴板内容测试规则"));
-    QPushButton *testCategory = new QPushButton(QStringLiteral("测试规则"), categoryBox);
-    QLabel *categoryTestResult = new QLabel(categoryBox);
-    categoryTestResult->setMinimumWidth(88);
-    categoryTestLayout->addWidget(categoryTestText, 1);
+    categoryTestText->setFixedHeight(78);
+    testLayout->addWidget(categoryTestText);
+    QFrame *testDivider = new QFrame(testSection);
+    testDivider->setFrameShape(QFrame::HLine);
+    testLayout->addWidget(testDivider);
+    QHBoxLayout *categoryTestLayout = new QHBoxLayout;
+    QPushButton *testCategory = new QPushButton(QStringLiteral("测试脚本"), testSection);
+    QLabel *categoryTestResult = new QLabel(testSection);
     categoryTestLayout->addWidget(testCategory);
     categoryTestLayout->addWidget(categoryTestResult);
+    categoryTestLayout->addStretch();
+    categoryTestLayout->setContentsMargins(16, 7, 16, 7);
+    testLayout->addLayout(categoryTestLayout);
+    categoryEditor->addWidget(testSection);
+    categoryEditor->addSpacing(14);
+
     QHBoxLayout *categoryButtons = new QHBoxLayout;
-    QPushButton *newCategory = new QPushButton(QStringLiteral("新建"), categoryBox);
-    QPushButton *restoreCategories = new QPushButton(QStringLiteral("还原预制分类"), categoryBox);
-    QPushButton *moveCategoryUp = new QPushButton(QStringLiteral("↑"), categoryBox);
-    QPushButton *moveCategoryDown = new QPushButton(QStringLiteral("↓"), categoryBox);
-    QPushButton *saveCategory = new QPushButton(QStringLiteral("保存"), categoryBox);
-    QPushButton *deleteCategory = new QPushButton(QStringLiteral("删除"), categoryBox);
-    categoryButtons->addWidget(newCategory);
-    categoryButtons->addWidget(restoreCategories);
-    categoryButtons->addWidget(moveCategoryUp);
-    categoryButtons->addWidget(moveCategoryDown);
+    QPushButton *saveCategory = new QPushButton(QStringLiteral("保存更改"), categoryEditorWidget);
+    saveCategory->setObjectName(QStringLiteral("categorySave"));
     categoryButtons->addStretch();
-    categoryButtons->addWidget(deleteCategory);
     categoryButtons->addWidget(saveCategory);
-    categoryEditor->addWidget(categoryName);
-    categoryEditor->addLayout(categoryMetadata);
-    categoryEditor->addWidget(categoryScript, 1);
-    categoryEditor->addLayout(categoryTestLayout);
     categoryEditor->addLayout(categoryButtons);
-    categoryLayout->addWidget(categoryList);
-    categoryLayout->addLayout(categoryEditor, 1);
+    categoryEditor->addStretch();
+    categoryEditorWidget->setMinimumWidth(620);
+    categoryScroll->setWidget(categoryEditorWidget);
+    categoryLayout->addWidget(categorySidebar);
+    categoryLayout->addWidget(categoryDivider);
+    categoryLayout->addWidget(categoryScroll, 1);
+    auto updateCategoryScriptMetrics = [categoryScript, categoryScriptMetrics](const QString &text) {
+        categoryScriptMetrics->setText(QStringLiteral("%1 行 · %2 字符")
+            .arg(text.isEmpty() ? 1 : text.count(QLatin1Char('\n')) + 1)
+            .arg(text.size()));
+    };
+    categoryScript->setChangeCallback(updateCategoryScriptMetrics);
+    updateCategoryScriptMetrics(categoryScript->text());
     QVector<ClipboardCategory> editableCategories;
     auto reloadCategories = [&] {
         editableCategories = repository->categories();
         categoryList->clear();
-        for (const ClipboardCategory &category : editableCategories) categoryList->addItem(category.name);
-        deck->refresh();
+        for (const ClipboardCategory &category : editableCategories) {
+            QListWidgetItem *item = new QListWidgetItem(category.name, categoryList);
+            item->setData(Qt::UserRole, category.databaseID);
+            item->setData(Qt::UserRole + 1, category.icon);
+            item->setToolTip(QStringLiteral("拖动调整顺序"));
+        }
+        refreshDeck();
     };
     reloadCategories();
     QObject::connect(categoryList, &QListWidget::currentRowChanged, [&](int row) {
@@ -2144,7 +4251,8 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         categoryIcon->setText(editableCategories[row].icon);
         const int languageIndex = previewLanguage->findText(editableCategories[row].previewLanguage);
         previewLanguage->setCurrentIndex(std::max(0, languageIndex));
-        categoryScript->setPlainText(editableCategories[row].script);
+        categoryScript->setText(editableCategories[row].script);
+        updateCategoryScriptMetrics(categoryScript->text());
     });
     QObject::connect(newCategory, &QPushButton::clicked, [&] {
         categoryList->clearSelection();
@@ -2152,14 +4260,15 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         categoryName->setText(QStringLiteral("新分类"));
         categoryIcon->setText(QStringLiteral("●"));
         previewLanguage->setCurrentText(QStringLiteral("text"));
-        categoryScript->setPlainText(QStringLiteral("function classify(item) {\n    return false;\n}"));
+        categoryScript->setText(QStringLiteral("function classify(item) {\n\n}"));
+        updateCategoryScriptMetrics(categoryScript->text());
         categoryName->setFocus();
         categoryName->selectAll();
     });
     QObject::connect(testCategory, &QPushButton::clicked, [&] {
         QString error;
         const bool matches = repository->categoryScriptMatches(
-            categoryScript->toPlainText(), categoryTestText->text(),
+            categoryScript->text(), categoryTestText->toPlainText(),
             previewLanguage->currentText(), &error);
         categoryTestResult->setText(error.isEmpty()
             ? (matches ? QStringLiteral("匹配：true") : QStringLiteral("匹配：false"))
@@ -2167,41 +4276,200 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         categoryTestResult->setStyleSheet(error.isEmpty()
             ? QStringLiteral("color:#a8d8ad;") : QStringLiteral("color:#ff7373;"));
     });
+    QObject::connect(formatCategory, &QPushButton::clicked, [&] {
+        categoryScript->setText(formatJavaScript(categoryScript->text()));
+        updateCategoryScriptMetrics(categoryScript->text());
+    });
+    categoryScript->setFormatCallback([formatCategory] { formatCategory->click(); });
+    categoryScript->setRunCallback([testCategory] { testCategory->click(); });
+    categoryScript->setSaveCallback([saveCategory] { saveCategory->click(); });
+    QObject::connect(expandCategoryEditor, &QPushButton::clicked, [&] {
+        QDialog expanded(&dialog);
+        expanded.setWindowTitle(QStringLiteral("编辑 JavaScript 分类规则"));
+        expanded.setModal(true);
+        expanded.resize(1040, 680);
+        expanded.setStyleSheet(dialog.styleSheet());
+
+        QVBoxLayout *expandedRoot = new QVBoxLayout(&expanded);
+        expandedRoot->setContentsMargins(0, 0, 0, 0);
+        expandedRoot->setSpacing(0);
+        QWidget *expandedHeaderBar = new QWidget(&expanded);
+        expandedHeaderBar->setObjectName(QStringLiteral("expandedEditorHeader"));
+        expandedHeaderBar->setFixedHeight(68);
+        expandedHeaderBar->setStyleSheet(QStringLiteral(
+            "QWidget#expandedEditorHeader{background:#252527;border-bottom:1px solid #38383c;}"));
+        QHBoxLayout *expandedHeader = new QHBoxLayout(expandedHeaderBar);
+        expandedHeader->setContentsMargins(18, 8, 18, 8);
+        QVBoxLayout *expandedHeading = new QVBoxLayout;
+        expandedHeading->setSpacing(2);
+        QLabel *expandedTitle = new QLabel(
+            QStringLiteral("%1 · JavaScript 分类规则").arg(categoryName->text()), expandedHeaderBar);
+        expandedTitle->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;color:#eeeeef;"));
+        QLabel *expandedSubtitle = new QLabel(
+            QStringLiteral("编辑分类规则并使用右侧样本验证结果"), expandedHeaderBar);
+        expandedSubtitle->setObjectName(QStringLiteral("subtitle"));
+        expandedHeading->addWidget(expandedTitle);
+        expandedHeading->addWidget(expandedSubtitle);
+        expandedHeader->addLayout(expandedHeading);
+        expandedHeader->addStretch();
+        QPushButton *cancelExpanded = new QPushButton(QStringLiteral("取消"), expandedHeaderBar);
+        QPushButton *saveExpanded = new QPushButton(QStringLiteral("保存并完成"), expandedHeaderBar);
+        saveExpanded->setObjectName(QStringLiteral("categorySave"));
+        expandedHeader->addWidget(cancelExpanded);
+        expandedHeader->addWidget(saveExpanded);
+        expandedRoot->addWidget(expandedHeaderBar);
+
+        QSplitter *expandedContent = new QSplitter(Qt::Horizontal, &expanded);
+        expandedContent->setChildrenCollapsible(false);
+        QWidget *editorPane = new QWidget(expandedContent);
+        editorPane->setObjectName(QStringLiteral("expandedEditorPane"));
+        QVBoxLayout *editorPaneLayout = new QVBoxLayout(editorPane);
+        editorPaneLayout->setContentsMargins(12, 8, 12, 8);
+        editorPaneLayout->setSpacing(0);
+        QHBoxLayout *editorToolbar = new QHBoxLayout;
+        QLabel *editorToolbarTitle = new QLabel(QStringLiteral("{ }  分类脚本"), editorPane);
+        editorToolbarTitle->setObjectName(QStringLiteral("categorySectionTitle"));
+        QPushButton *expandedFormat = new QPushButton(QStringLiteral("格式化"), editorPane);
+        editorToolbar->addWidget(editorToolbarTitle);
+        editorToolbar->addStretch();
+        editorToolbar->addWidget(expandedFormat);
+        editorToolbar->setContentsMargins(0, 0, 0, 6);
+        editorPaneLayout->addLayout(editorToolbar);
+        ScriptEditorWidget *expandedScript = new ScriptEditorWidget(editorPane);
+        expandedScript->setText(categoryScript->text());
+        QLabel *expandedMetrics = new QLabel(editorPane);
+        expandedMetrics->setObjectName(QStringLiteral("subtitle"));
+        auto updateExpandedMetrics = [expandedMetrics](const QString &text) {
+            expandedMetrics->setText(QStringLiteral("Ctrl+/ 注释 · Tab / Shift+Tab 缩进    %1 行 · %2 字符")
+                .arg(text.isEmpty() ? 1 : text.count(QLatin1Char('\n')) + 1)
+                .arg(text.size()));
+        };
+        expandedScript->setChangeCallback(updateExpandedMetrics);
+        updateExpandedMetrics(expandedScript->text());
+        editorPaneLayout->addWidget(expandedScript, 1);
+        expandedMetrics->setFixedHeight(32);
+        expandedMetrics->setContentsMargins(6, 5, 6, 0);
+        editorPaneLayout->addWidget(expandedMetrics);
+
+        QFrame *testPane = new QFrame(expandedContent);
+        testPane->setObjectName(QStringLiteral("expandedTestPane"));
+        testPane->setStyleSheet(QStringLiteral(
+            "QFrame#expandedTestPane{background:#202022;border-left:1px solid #38383c;}"));
+        QVBoxLayout *testPaneLayout = new QVBoxLayout(testPane);
+        testPaneLayout->setContentsMargins(14, 14, 14, 14);
+        QHBoxLayout *testToolbar = new QHBoxLayout;
+        QLabel *testTitle = new QLabel(QStringLiteral("规则测试"), testPane);
+        testTitle->setObjectName(QStringLiteral("categorySectionTitle"));
+        QPushButton *expandedTestButton = new QPushButton(QStringLiteral("运行测试"), testPane);
+        testToolbar->addWidget(testTitle);
+        testToolbar->addStretch();
+        testToolbar->addWidget(expandedTestButton);
+        QPlainTextEdit *expandedTestText = new QPlainTextEdit(testPane);
+        expandedTestText->setPlaceholderText(QStringLiteral("输入示例剪贴板内容"));
+        expandedTestText->setPlainText(categoryTestText->toPlainText());
+        expandedTestText->setFixedHeight(132);
+        QLabel *expandedTestResult = new QLabel(testPane);
+        expandedTestResult->setWordWrap(true);
+        QLabel *consoleTitle = new QLabel(QStringLiteral("控制台输出"), testPane);
+        consoleTitle->setObjectName(QStringLiteral("categorySectionTitle"));
+        QPlainTextEdit *expandedConsole = new QPlainTextEdit(testPane);
+        expandedConsole->setReadOnly(true);
+        expandedConsole->setPlaceholderText(QStringLiteral("console.log / info / warn / error / debug 输出会显示在这里"));
+        expandedConsole->setFixedHeight(104);
+        QLabel *fieldsTitle = new QLabel(QStringLiteral("item 可用字段"), testPane);
+        fieldsTitle->setObjectName(QStringLiteral("categorySectionTitle"));
+        QPlainTextEdit *itemFields = new QPlainTextEdit(testPane);
+        itemFields->setReadOnly(true);
+        itemFields->setPlainText(QStringLiteral(
+            "text\n  复制的文本内容\n\n"
+            "textLength\n  文本字符数\n\n"
+            "sourceApplication.bundleId\n  来源应用标识\n\n"
+            "sourceApplication.name\n  来源应用名称\n\n"
+            "copiedAt\n  毫秒时间戳\n\n"
+            "detectedLanguage / codeScore / codeEngineMatched\n  代码分类时提供的识别结果"));
+        testPaneLayout->addLayout(testToolbar);
+        testPaneLayout->addWidget(expandedTestText);
+        testPaneLayout->addWidget(expandedTestResult);
+        testPaneLayout->addWidget(consoleTitle);
+        testPaneLayout->addWidget(expandedConsole);
+        testPaneLayout->addWidget(fieldsTitle);
+        testPaneLayout->addWidget(itemFields, 1);
+        expandedContent->addWidget(editorPane);
+        expandedContent->addWidget(testPane);
+        expandedContent->setStretchFactor(0, 3);
+        expandedContent->setStretchFactor(1, 1);
+        expandedContent->setSizes({720, 320});
+        expandedRoot->addWidget(expandedContent, 1);
+
+        auto runExpandedTest = [&] {
+            QString error;
+            QStringList consoleOutput;
+            const bool matches = repository->categoryScriptMatches(
+                expandedScript->text(), expandedTestText->toPlainText(),
+                previewLanguage->currentText(), &error, &consoleOutput);
+            expandedConsole->setPlainText(consoleOutput.join(QLatin1Char('\n')));
+            expandedTestResult->setText(error.isEmpty()
+                ? (matches ? QStringLiteral("匹配：true") : QStringLiteral("匹配：false"))
+                : QStringLiteral("错误：%1").arg(error));
+            expandedTestResult->setStyleSheet(error.isEmpty()
+                ? QStringLiteral("color:#a8d8ad;") : QStringLiteral("color:#ff7373;"));
+        };
+        QObject::connect(expandedTestButton, &QPushButton::clicked, &expanded, runExpandedTest);
+        QObject::connect(cancelExpanded, &QPushButton::clicked, &expanded, &QDialog::reject);
+        QObject::connect(saveExpanded, &QPushButton::clicked, &expanded, &QDialog::accept);
+        expandedScript->setRunCallback(runExpandedTest);
+        expandedScript->setFormatCallback([&] {
+            expandedScript->setText(formatJavaScript(expandedScript->text()));
+            updateExpandedMetrics(expandedScript->text());
+        });
+        QObject::connect(expandedFormat, &QPushButton::clicked, &expanded, [&] {
+            expandedScript->setText(formatJavaScript(expandedScript->text()));
+            updateExpandedMetrics(expandedScript->text());
+        });
+        expandedScript->setSaveCallback([saveExpanded] { saveExpanded->click(); });
+        QTimer::singleShot(0, expandedScript, [expandedScript] { expandedScript->focusEditor(); });
+        if (expanded.exec() != QDialog::Accepted) return;
+        categoryScript->setText(expandedScript->text());
+        updateCategoryScriptMetrics(categoryScript->text());
+        categoryTestText->setPlainText(expandedTestText->toPlainText());
+        saveCategory->click();
+    });
     QObject::connect(restoreCategories, &QPushButton::clicked, [&] {
-        if (QMessageBox::question(&dialog, QStringLiteral("还原预制分类"),
-            QStringLiteral("同名预制分类会恢复默认规则；自建分类会保留。"),
-            QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel) != QMessageBox::Ok) return;
+        if (!showClipDeckAlert(&dialog, QStringLiteral("还原预制分类"),
+                QStringLiteral("同名预制分类会恢复默认规则；自建分类会保留。"),
+                QStringLiteral("还原"), QStringLiteral("取消"), AlertTone::Warning)) return;
         if (!repository->restoreDefaultCategories()) {
-            QMessageBox::warning(&dialog, QStringLiteral("还原失败"), repository->lastError());
+            showClipDeckAlert(&dialog, QStringLiteral("还原失败"), repository->lastError(),
+                              QStringLiteral("知道了"), QString(), AlertTone::Warning);
             return;
         }
         reloadCategories();
     });
-    auto moveCategoryRow = [&](int direction) {
-        const int row = categoryList->currentRow();
-        const int target = row + direction;
-        if (row < 0 || target < 0 || target >= editableCategories.size()) return;
-        std::swap(editableCategories[row], editableCategories[target]);
+    QObject::connect(categoryList->model(), &QAbstractItemModel::rowsMoved,
+                     categoryList, [&, categoryList] {
         QVector<qint64> ids;
-        ids.reserve(editableCategories.size());
-        for (const ClipboardCategory &category : editableCategories) ids.append(category.databaseID);
-        if (!repository->reorderCategories(ids)) return;
-        reloadCategories();
-        categoryList->setCurrentRow(target);
-    };
-    QObject::connect(moveCategoryUp, &QPushButton::clicked, [&] { moveCategoryRow(-1); });
-    QObject::connect(moveCategoryDown, &QPushButton::clicked, [&] { moveCategoryRow(1); });
+        ids.reserve(categoryList->count());
+        for (int row = 0; row < categoryList->count(); ++row) {
+            ids.append(categoryList->item(row)->data(Qt::UserRole).toLongLong());
+        }
+        if (repository->reorderCategories(ids)) {
+            editableCategories = repository->categories();
+            refreshDeck();
+        }
+    });
     QObject::connect(saveCategory, &QPushButton::clicked, [&] {
         const QString name = categoryName->text().trimmed();
-        const QString script = categoryScript->toPlainText();
+        const QString script = categoryScript->text();
         if (name.isEmpty() || !script.contains(QStringLiteral("classify"))) {
-            QMessageBox::warning(&dialog, QStringLiteral("无法保存"),
-                                 QStringLiteral("请输入分类名称，并定义 classify(item) 函数。"));
+            showClipDeckAlert(&dialog, QStringLiteral("无法保存"),
+                              QStringLiteral("请输入分类名称，并定义 classify(item) 函数。"),
+                              QStringLiteral("知道了"), QString(), AlertTone::Warning);
             return;
         }
         const QString scriptError = repository->categoryScriptError(script);
         if (!scriptError.isEmpty()) {
-            QMessageBox::warning(&dialog, QStringLiteral("脚本错误"), scriptError);
+            showClipDeckAlert(&dialog, QStringLiteral("脚本错误"), scriptError,
+                              QStringLiteral("知道了"), QString(), AlertTone::Warning);
             return;
         }
         const int row = categoryList->currentRow();
@@ -2211,19 +4479,23 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
             : repository->createCategory(name, categoryIcon->text(), script,
                                          previewLanguage->currentText());
         if (!ok) {
-            QMessageBox::warning(&dialog, QStringLiteral("无法保存"), repository->lastError());
+            showClipDeckAlert(&dialog, QStringLiteral("无法保存"), repository->lastError(),
+                              QStringLiteral("知道了"), QString(), AlertTone::Warning);
             return;
         }
         reloadCategories();
-        const auto matches = categoryList->findItems(name, Qt::MatchExactly);
-        if (!matches.isEmpty()) categoryList->setCurrentItem(matches.first());
+        for (int index = 0; index < editableCategories.size(); ++index) {
+            if (editableCategories[index].name == name) {
+                categoryList->setCurrentRow(index);
+                break;
+            }
+        }
     });
-    QObject::connect(deleteCategory, &QPushButton::clicked, [&] {
-        const int row = categoryList->currentRow();
+    categoryList->setDeleteCallback([&](int row) {
         if (row < 0 || row >= editableCategories.size()) return;
-        if (QMessageBox::warning(&dialog, QStringLiteral("删除分类"),
-            QStringLiteral("确定删除“%1”？").arg(editableCategories[row].name),
-            QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel) != QMessageBox::Ok) return;
+        if (!showClipDeckAlert(&dialog, QStringLiteral("删除分类"),
+                QStringLiteral("确定删除“%1”？").arg(editableCategories[row].name),
+                QStringLiteral("删除"), QStringLiteral("取消"), AlertTone::Destructive)) return;
         repository->removeCategory(editableCategories[row].databaseID);
         reloadCategories();
         categoryName->clear();
@@ -2231,9 +4503,10 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         categoryScript->clear();
     });
     if (!editableCategories.isEmpty()) categoryList->setCurrentRow(0);
-    categoryPage.second->addWidget(categoryBox);
-    categoryPage.second->addStretch();
-    pages->addWidget(categoryPage.first);
+    if (beginNewCategory) {
+        QTimer::singleShot(0, newCategory, &QPushButton::click);
+    }
+    pages->addWidget(categoryPageWidget);
 
     auto dataPage = makePage(QStringLiteral("数据"), QStringLiteral("管理 ClipDeck 历史数据"));
     QGroupBox *dataBox = new QGroupBox(QStringLiteral("存储"), dataPage.first);
@@ -2251,17 +4524,17 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     sidebar->setCurrentRow(std::max(0, std::min(4, initialPage)));
     QObject::connect(clearExpired, &QPushButton::clicked, [&] {
         const int removed = repository->clearExpiredAndReclaim(selectedRetentionDays());
-        deck->refresh();
+        refreshDeck();
         size->setText(QStringLiteral("%1 MB").arg(repository->databaseByteCount() / 1048576.0, 0, 'f', 2));
-        QMessageBox::information(&dialog, QStringLiteral("清理完成"),
-                                 QStringLiteral("已删除 %1 条过期历史并回收数据库空间。").arg(removed));
+        showClipDeckAlert(&dialog, QStringLiteral("清理完成"),
+                          QStringLiteral("已删除 %1 条过期历史并回收数据库空间。").arg(removed));
     });
     QObject::connect(clearAll, &QPushButton::clicked, [&] {
-        if (QMessageBox::warning(&dialog, QStringLiteral("删除历史"),
-            QStringLiteral("所有剪贴板历史将被永久删除。"),
-            QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel) == QMessageBox::Ok) {
+        if (showClipDeckAlert(&dialog, QStringLiteral("删除历史"),
+                QStringLiteral("所有剪贴板历史将被永久删除。"),
+                QStringLiteral("全部删除"), QStringLiteral("取消"), AlertTone::Destructive)) {
             repository->clearAll();
-            deck->refresh();
+            refreshDeck();
             size->setText(QStringLiteral("0.00 MB"));
         }
     });
@@ -2269,7 +4542,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         settings.setValue(QStringLiteral("paste/preserveFormatting"), pasteFormat->currentIndex() == 1);
         settings.setValue(QStringLiteral("history/retentionDays"), selectedRetentionDays());
         settings.setValue(QStringLiteral("clipboard/recordsImages"), recordImages->isChecked());
-        settings.setValue(QStringLiteral("clipboard/maximumImageMegabytes"), maximumImage->value());
+        settings.setValue(QStringLiteral("clipboard/maximumImageMegabytes"), maximumImage->currentData().toInt());
         settings.setValue(QStringLiteral("shortcuts/showDeck"),
                           showDeckShortcut->keySequence().toString(QKeySequence::PortableText));
         settings.setValue(QStringLiteral("shortcuts/previousCategory"),
@@ -2280,9 +4553,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
                           quickPasteModifier->currentData().toInt());
         settings.setValue(QStringLiteral("shortcuts/plainTextModifier"),
                           plainTextModifier->currentData().toInt());
-        setLaunchAtLogin(launchAtLogin->isChecked());
-        repository->clearExpired(selectedRetentionDays());
-        deck->refresh();
+        refreshDeck();
         if (shortcutChanged) shortcutChanged();
     });
     if (!renderPath.isEmpty()) {
@@ -2292,105 +4563,70 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
             dialog.reject();
         });
     }
+    std::unique_ptr<QFile> settingsCommandInput;
+    std::unique_ptr<QSocketNotifier> settingsCommandNotifier;
+    if (enableCommandInput) {
+        settingsCommandInput = std::make_unique<QFile>();
+        if (settingsCommandInput->open(stdin, QIODevice::ReadOnly)) {
+            settingsCommandNotifier = std::make_unique<QSocketNotifier>(
+                settingsCommandInput->handle(), QSocketNotifier::Read, &dialog);
+            QObject::connect(settingsCommandNotifier.get(), &QSocketNotifier::activated,
+                             &dialog, [&, input = settingsCommandInput.get()](int) {
+                const QByteArray command = input->readLine().trimmed();
+                if (!command.startsWith(QByteArray(kSettingsActivatePrefix))) return;
+                const QList<QByteArray> parts = command.mid(
+                    static_cast<int>(sizeof(kSettingsActivatePrefix) - 1)).split(':');
+                bool pageOK = false;
+                const int requestedPage = parts.value(0).toInt(&pageOK);
+                const bool createCategory = parts.value(1) == QByteArrayLiteral("1");
+                if (pageOK && requestedPage >= 0) {
+                    sidebar->setCurrentRow(std::max(0, std::min(4, requestedPage)));
+                }
+                if (createCategory) newCategory->click();
+                if (dialog.isMinimized()) dialog.showNormal();
+                else dialog.show();
+                dialog.raise();
+                dialog.activateWindow();
+                if (QGuiApplication::platformName() == QStringLiteral("xcb")) {
+                    Display *settingsDisplay = QX11Info::display();
+                    const Window settingsWindow = static_cast<Window>(dialog.winId());
+                    const Atom activeWindow = XInternAtom(
+                        settingsDisplay, "_NET_ACTIVE_WINDOW", False);
+                    XEvent event{};
+                    event.xclient.type = ClientMessage;
+                    event.xclient.window = settingsWindow;
+                    event.xclient.message_type = activeWindow;
+                    event.xclient.format = 32;
+                    event.xclient.data.l[0] = 2;
+                    event.xclient.data.l[1] = CurrentTime;
+                    XSendEvent(settingsDisplay, DefaultRootWindow(settingsDisplay), False,
+                               SubstructureRedirectMask | SubstructureNotifyMask, &event);
+                    XRaiseWindow(settingsDisplay, settingsWindow);
+                    XSetInputFocus(settingsDisplay, settingsWindow,
+                                   RevertToPointerRoot, CurrentTime);
+                    XFlush(settingsDisplay);
+                }
+            });
+        }
+    }
     dialog.exec();
 }
-
-class GlobalShortcutFilter final : public QAbstractNativeEventFilter {
-public:
-    explicit GlobalShortcutFilter(std::function<void()> callback)
-        : callback_(std::move(callback)), display_(QX11Info::display()) {
-        if (QGuiApplication::platformName() != QStringLiteral("xcb") || !display_) {
-            display_ = nullptr;
-            return;
-        }
-        for (int index = 0; index < ScreenCount(display_); ++index) {
-            roots_.push_back(RootWindow(display_, index));
-        }
-        configure();
-    }
-
-    ~GlobalShortcutFilter() override {
-        unregisterShortcut();
-    }
-
-    void configure() {
-        if (!display_) return;
-        unregisterShortcut();
-        const QKeySequence sequence = configuredShortcut(
-            QStringLiteral("shortcuts/showDeck"), QKeySequence(Qt::Key_F12));
-        if (sequence.isEmpty()) return;
-        const int value = sequence[0];
-        modifiers_ = 0;
-        if (value & Qt::SHIFT) modifiers_ |= ShiftMask;
-        if (value & Qt::CTRL) modifiers_ |= ControlMask;
-        if (value & Qt::ALT) modifiers_ |= Mod1Mask;
-        if (value & Qt::META) modifiers_ |= Mod4Mask;
-        const int key = value & ~Qt::KeyboardModifierMask;
-        KeySym symbol = NoSymbol;
-        if (key >= Qt::Key_F1 && key <= Qt::Key_F35) symbol = XK_F1 + (key - Qt::Key_F1);
-        else if (key >= Qt::Key_A && key <= Qt::Key_Z) symbol = XK_A + (key - Qt::Key_A);
-        else if (key >= Qt::Key_0 && key <= Qt::Key_9) symbol = XK_0 + (key - Qt::Key_0);
-        else if (key == Qt::Key_Left) symbol = XK_Left;
-        else if (key == Qt::Key_Right) symbol = XK_Right;
-        else if (key == Qt::Key_Up) symbol = XK_Up;
-        else if (key == Qt::Key_Down) symbol = XK_Down;
-        keycode_ = symbol == NoSymbol ? 0 : XKeysymToKeycode(display_, symbol);
-        if (keycode_ == 0) return;
-        const unsigned int lockVariants[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
-        for (const Window root : roots_) {
-            for (const unsigned int locks : lockVariants) {
-                XGrabKey(display_, keycode_, modifiers_ | locks, root, True,
-                         GrabModeAsync, GrabModeAsync);
-            }
-        }
-        XSync(display_, False);
-    }
-
-    bool nativeEventFilter(const QByteArray &eventType, void *message, long *) override {
-        if (eventType != QByteArrayLiteral("xcb_generic_event_t")) {
-            return false;
-        }
-        const auto *event = static_cast<xcb_generic_event_t *>(message);
-        if ((event->response_type & 0x7f) != XCB_KEY_PRESS) {
-            return false;
-        }
-        const auto *keyEvent = reinterpret_cast<const xcb_key_press_event_t *>(event);
-        const unsigned int relevantState = keyEvent->state & (ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
-        if (keyEvent->detail != keycode_ || relevantState != modifiers_) {
-            return false;
-        }
-        callback_();
-        return true;
-    }
-
-private:
-    void unregisterShortcut() {
-        if (!display_ || keycode_ == 0) return;
-        const unsigned int lockVariants[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
-        for (const Window root : roots_) {
-            for (const unsigned int locks : lockVariants) {
-                XUngrabKey(display_, keycode_, modifiers_ | locks, root);
-            }
-        }
-        XSync(display_, False);
-        keycode_ = 0;
-    }
-
-    std::function<void()> callback_;
-    Display *display_ = nullptr;
-    int keycode_ = 0;
-    unsigned int modifiers_ = 0;
-    std::vector<Window> roots_;
-};
 
 } // namespace
 
 int main(int argc, char *argv[]) {
+    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     QApplication app(argc, argv);
+    QtWebEngine::initialize();
+    DisplayScale::initialize(QGuiApplication::primaryScreen());
+    app.setStyle(new ClipDeckStyle);
     QApplication::setApplicationName(QStringLiteral("ClipDeck"));
     QApplication::setOrganizationName(QStringLiteral("ClipDeck"));
     QApplication::setQuitOnLastWindowClosed(false);
+    if (!app.arguments().contains(QStringLiteral("--self-test"))) {
+        ScriptEditorWidget::prewarm();
+    }
     app.setStyleSheet(QStringLiteral(
         "QMenu{background:#29292c;color:#eee;border:1px solid #444;padding:5px;}"
         "QMenu::item{padding:7px 24px 7px 12px;border-radius:6px;}"
@@ -2398,10 +4634,15 @@ int main(int argc, char *argv[]) {
         "QMenu::separator{height:1px;background:#444;margin:5px 8px;}"
         "QDialog{background:#1d1d1f;color:#eee;}"
         "QDialog QLabel{color:#ddd;}"
-        "QDialog QPlainTextEdit,QDialog QLineEdit{background:#151517;color:#eee;"
-        "border:1px solid #3b3b3e;border-radius:8px;padding:7px;selection-background-color:#176fd1;}"
-        "QDialog QPushButton{background:#363639;color:#eee;border:0;border-radius:8px;padding:8px 14px;}"
-        "QDialog QPushButton:hover{background:#48484c;}"));
+        "QDialog QPlainTextEdit,QDialog QLineEdit{background:#151517;color:#eee;outline:0;"
+        "border:1px solid #3b3b3e;border-radius:8px;padding:7px;selection-background-color:#48484d;}"
+        "QDialog QPlainTextEdit:!focus,QDialog QLineEdit:!focus{background:#151517;border-color:#3b3b3e;}"
+        "QDialog QPlainTextEdit:focus,QDialog QLineEdit:focus{background:#19191c;border-color:#1683ff;"
+        "selection-background-color:#1683ff;}"
+        "QDialog QPushButton{background:#363639;color:#eee;border:1px solid transparent;"
+        "border-radius:8px;padding:8px 14px;outline:0;}"
+        "QDialog QPushButton:hover{background:#48484c;}"
+        "QDialog QPushButton:focus{border-color:#1683ff;}"));
 
     Display *display = QGuiApplication::platformName() == QStringLiteral("xcb")
         ? QX11Info::display()
@@ -2409,6 +4650,9 @@ int main(int argc, char *argv[]) {
     const bool selfTestRequested = app.arguments().contains(QStringLiteral("--self-test"));
     QString renderCheckPath;
     QString settingsRenderPath;
+    int settingsPage = -1;
+    bool beginNewCategory = false;
+    bool settingsIPCEnabled = false;
     for (const QString &argument : app.arguments()) {
         if (argument.startsWith(QStringLiteral("--render-check="))) {
             renderCheckPath = argument.mid(QStringLiteral("--render-check=").size());
@@ -2416,6 +4660,13 @@ int main(int argc, char *argv[]) {
         if (argument.startsWith(QStringLiteral("--settings-render="))) {
             settingsRenderPath = argument.mid(QStringLiteral("--settings-render=").size());
         }
+        if (argument.startsWith(QStringLiteral("--settings-page="))) {
+            bool ok = false;
+            const int requested = argument.mid(QStringLiteral("--settings-page=").size()).toInt(&ok);
+            if (ok) settingsPage = std::max(0, std::min(4, requested));
+        }
+        if (argument == QStringLiteral("--new-category")) beginNewCategory = true;
+        if (argument == QStringLiteral("--settings-ipc")) settingsIPCEnabled = true;
     }
     const bool usesTemporaryRepository = selfTestRequested || !renderCheckPath.isEmpty()
         || !settingsRenderPath.isEmpty();
@@ -2425,15 +4676,51 @@ int main(int argc, char *argv[]) {
     QSettings settings;
     if (selfTestRequested) {
         const QDateTime now = QDateTime::currentDateTime();
+        auto solidPng = [](int side, const QColor &color) {
+            QImage image(side, side, QImage::Format_ARGB32_Premultiplied);
+            image.fill(color);
+            QByteArray data;
+            QBuffer buffer(&data);
+            buffer.open(QIODevice::WriteOnly);
+            image.save(&buffer, "PNG");
+            return data;
+        };
+        LinuxApplicationIconSet rasterIconSet;
+        rasterIconSet.pngVariants = {
+            {32, 32, solidPng(32, QColor(220, 40, 40))},
+            {64, 64, solidPng(64, QColor(40, 200, 80))},
+            {128, 128, solidPng(128, QColor(40, 90, 220))}
+        };
+        const QByteArray serializedRasterIcons = rasterIconSet.serialize();
+        const LinuxApplicationIconSet restoredRasterIcons =
+            LinuxApplicationIconSet::deserialize(serializedRasterIcons);
+        const QImage raster50 = restoredRasterIcons.rasterize(QSize(50, 50), 1.0);
+        const QImage raster100 = restoredRasterIcons.rasterize(QSize(100, 100), 1.0);
+        const QImage raster180 = restoredRasterIcons.rasterize(QSize(180, 180), 1.0);
+        LinuxApplicationIconSet svgIconSet = rasterIconSet;
+        svgIconSet.svgData = QByteArrayLiteral(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'>"
+            "<rect width='32' height='32' fill='#d02020'/></svg>");
+        const QImage svg63 = svgIconSet.rasterize(QSize(63, 63), 1.25);
         ClipboardItem first;
         first.title = QStringLiteral("文本");
         first.text = QStringLiteral("duplicate-window-test");
+        first.sourceID = QStringLiteral("self.test.application");
         first.sourceName = QStringLiteral("Self Test");
+        first.sourceIconVariantsData = serializedRasterIcons;
         first.copiedAt = now;
         const ClipboardItem savedFirst = repository.save(first);
         first.copiedAt = now.addSecs(5);
         const ClipboardItem savedDuplicate = repository.save(first);
+        ClipboardItem nonDuplicateBetweenCopies;
+        nonDuplicateBetweenCopies.title = QStringLiteral("文本");
+        nonDuplicateBetweenCopies.text = QStringLiteral("content-between-duplicate-copies");
+        nonDuplicateBetweenCopies.sourceName = QStringLiteral("Self Test");
+        nonDuplicateBetweenCopies.copiedAt = now.addSecs(10);
+        repository.save(nonDuplicateBetweenCopies);
         first.copiedAt = now.addSecs(16);
+        first.sourceID = QStringLiteral("dde-grand-search");
+        first.sourceName = QStringLiteral("dde-grand-search");
         const ClipboardItem savedLater = repository.save(first);
 
         ClipboardItem urlItem;
@@ -2447,14 +4734,40 @@ int main(int argc, char *argv[]) {
         const ClipboardItem savedURLAgain = repository.save(urlItem);
         repository.updateLinkMetadata(savedURL.databaseID, QStringLiteral("Example title"),
                                       QByteArrayLiteral("icon"), QByteArrayLiteral("preview"));
+
+        QImage angleSource(3, 2, QImage::Format_ARGB32_Premultiplied);
+        angleSource.fill(QColor(12, 34, 56));
+        QByteArray angleSourceData;
+        QBuffer angleBuffer(&angleSourceData);
+        angleBuffer.open(QIODevice::WriteOnly);
+        angleSource.save(&angleBuffer, "PNG");
+        ClipboardItem angleItem;
+        angleItem.title = QStringLiteral("旋转测试");
+        angleItem.type = ClipboardPayloadType::Image;
+        angleItem.image = angleSource;
+        angleItem.imageData = angleSourceData;
+        angleItem.sourceName = QStringLiteral("Self Test");
+        angleItem.copiedAt = now.addSecs(30);
+        const ClipboardItem savedAngleItem = repository.save(angleItem);
+        const bool angleUpdated = repository.updateImageAngle(savedAngleItem.databaseID, -90);
         const QVector<ClipboardItem> stored = repository.fetch(QString(), QString(), 100);
+        const QVector<ClipboardItem> paged = repository.fetch(QString(), QString(), 2, 1);
         const auto linked = std::find_if(stored.cbegin(), stored.cend(), [savedURL](const ClipboardItem &item) {
             return item.databaseID == savedURL.databaseID;
         });
+        const auto storedIconSet = std::find_if(stored.cbegin(), stored.cend(), [savedFirst](const ClipboardItem &item) {
+            return item.databaseID == savedFirst.databaseID;
+        });
+        const auto storedAngleItem = std::find_if(stored.cbegin(), stored.cend(),
+            [savedAngleItem](const ClipboardItem &item) {
+                return item.databaseID == savedAngleItem.databaseID;
+            });
         QString categoryTestError;
+        QStringList categoryTestConsole;
         const bool categoryInputMatches = repository.categoryScriptMatches(
-            QStringLiteral("function classify(item){return item.textLength===4&&item.sourceApplication.name==='脚本测试'&&item.copiedAt>0;}"),
-            QStringLiteral("test"), QStringLiteral("text"), &categoryTestError);
+            QStringLiteral("function classify(item){console.log('length',item.textLength);return item.textLength===4&&item.sourceApplication.name==='脚本测试'&&item.copiedAt>0;}"),
+            QStringLiteral("test"), QStringLiteral("text"), &categoryTestError,
+            &categoryTestConsole);
 
         const QString legacyPath = selfTestDirectory.filePath(QStringLiteral("preview6.sqlite"));
         const QString legacyConnection = QStringLiteral("clipdeck-preview6-self-test");
@@ -2483,7 +4796,9 @@ int main(int argc, char *argv[]) {
                     query.prepare(QStringLiteral(
                         "INSERT INTO category(name,script,sort_order) VALUES(?,?,?)"));
                     query.addBindValue(legacyCategories[index]);
-                    query.addBindValue(QStringLiteral("function classify(item){return false;}"));
+                    query.addBindValue(index == 0
+                        ? QStringLiteral("function classify(item){const t=item.text.trim();if(!((t.startsWith('{')&&t.endsWith('}'))||(t.startsWith('[')&&t.endsWith(']'))))return false;try{const v=JSON.parse(t);return v!==null&&typeof v==='object';}catch(e){return false;}}")
+                        : QStringLiteral("function classify(item){return false;}"));
                     query.addBindValue(index);
                     legacySetupOK = query.exec();
                 }
@@ -2498,29 +4813,195 @@ int main(int argc, char *argv[]) {
         migratedFirst.sourceName = QStringLiteral("Self Test");
         migratedFirst.copiedAt = now;
         const ClipboardItem migratedSavedFirst = migratedLegacyRepository.save(migratedFirst);
-        migratedFirst.copiedAt = now.addSecs(20);
+        ClipboardItem migratedIntervening;
+        migratedIntervening.title = QStringLiteral("文本");
+        migratedIntervening.text = QStringLiteral("intervening-content");
+        migratedIntervening.sourceName = QStringLiteral("Self Test");
+        migratedIntervening.copiedAt = now.addSecs(10);
+        migratedLegacyRepository.save(migratedIntervening);
+        migratedFirst.copiedAt = now.addSecs(25 * 60 * 60);
         const ClipboardItem migratedSavedLater = migratedLegacyRepository.save(migratedFirst);
+
+        const QString duplicatePath = selfTestDirectory.filePath(
+            QStringLiteral("consecutive-duplicates.sqlite"));
+        const QString duplicateConnection = QStringLiteral("clipdeck-duplicate-cleanup-self-test");
+        bool duplicateSetupOK = false;
+        {
+            QSqlDatabase duplicateDatabase = QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"), duplicateConnection);
+            duplicateDatabase.setDatabaseName(duplicatePath);
+            if (duplicateDatabase.open()) {
+                QSqlQuery query(duplicateDatabase);
+                duplicateSetupOK = query.exec(QStringLiteral(
+                    "CREATE TABLE content (id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,"
+                    "content_type TEXT NOT NULL,plain_text TEXT,image_data BLOB,image_width INTEGER,"
+                    "image_height INTEGER,content_hash BLOB NOT NULL,source_id TEXT,source_name TEXT NOT NULL,"
+                    "category TEXT,copied_at INTEGER NOT NULL,last_copied_at INTEGER NOT NULL,"
+                    "copy_count INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL)"))
+                    && query.exec(QStringLiteral(
+                        "CREATE TABLE category (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,"
+                        "script TEXT NOT NULL,sort_order INTEGER NOT NULL DEFAULT 0)"));
+                auto insertDuplicate = [&query](const QString &sourceID, const QString &sourceName,
+                                                qint64 copiedAt) {
+                    query.prepare(QStringLiteral(
+                        "INSERT INTO content(title,content_type,plain_text,content_hash,source_id,source_name,"
+                        "copied_at,last_copied_at,copy_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)"));
+                    query.addBindValue(QStringLiteral("文本"));
+                    query.addBindValue(QStringLiteral("text"));
+                    query.addBindValue(QStringLiteral("same-content"));
+                    query.addBindValue(QByteArrayLiteral("same-hash"));
+                    query.addBindValue(sourceID);
+                    query.addBindValue(sourceName);
+                    query.addBindValue(copiedAt);
+                    query.addBindValue(copiedAt);
+                    query.addBindValue(1);
+                    query.addBindValue(copiedAt);
+                    return query.exec();
+                };
+                duplicateSetupOK = duplicateSetupOK
+                    && insertDuplicate(QStringLiteral("com.intellij.idea"),
+                                       QStringLiteral("IntelliJ IDEA"), 1000)
+                    && insertDuplicate(QStringLiteral("dde-grand-search"),
+                                       QStringLiteral("dde-grand-search"), 2000);
+            }
+            duplicateDatabase.close();
+        }
+        QSqlDatabase::removeDatabase(duplicateConnection);
+        HistoryRepository duplicateCleanupRepository(duplicatePath);
+        const QVector<ClipboardItem> cleanedDuplicates =
+            duplicateCleanupRepository.fetch(QString(), QString(), 10);
+        bool migratedDefaultScriptFormatted = false;
+        bool migratedCustomScriptPreserved = false;
+        for (const ClipboardCategory &category : migratedLegacyRepository.categories()) {
+            if (category.name == QStringLiteral("JSON")) {
+                migratedDefaultScriptFormatted = category.script.contains(QLatin1Char('\n'));
+            }
+            if (category.name == QStringLiteral("SQL")) {
+                migratedCustomScriptPreserved =
+                    category.script == QStringLiteral("function classify(item){return false;}");
+            }
+        }
 
         QMimeData httpURLMime;
         httpURLMime.setUrls({QUrl(QStringLiteral("https://example.com"))});
         httpURLMime.setText(QStringLiteral("https://example.com"));
         QMimeData localFileMime;
         localFileMime.setUrls({QUrl::fromLocalFile(QStringLiteral("/tmp/example.txt"))});
+
+        X11ApplicationIdentity sourceIdentity;
+        sourceIdentity.wmInstance = QStringLiteral("code");
+        sourceIdentity.wmClass = QStringLiteral("Code");
+        sourceIdentity.executablePath = QStringLiteral("/usr/bin/code");
+        DesktopApplicationEntry startupMatch;
+        startupMatch.startupWMClass = QStringLiteral("Code");
+        startupMatch.exec = QStringLiteral("/unrelated/application %F");
+        startupMatch.execPath = desktopExecCommand(startupMatch.exec);
+        startupMatch.execBaseName = QFileInfo(startupMatch.execPath).fileName();
+        DesktopApplicationEntry executableMatch;
+        executableMatch.path = QStringLiteral("/usr/share/applications/code.desktop");
+        executableMatch.exec = QStringLiteral("env GTK_THEME=dark /usr/bin/code --unity-launch %F");
+        executableMatch.execPath = desktopExecCommand(executableMatch.exec);
+        executableMatch.execBaseName = QFileInfo(executableMatch.execPath).fileName();
+        DesktopApplicationEntry fallbackMatch;
+        fallbackMatch.path = QStringLiteral("/usr/share/applications/code.desktop");
+        fallbackMatch.exec = QStringLiteral("code %F");
+        fallbackMatch.execPath = desktopExecCommand(fallbackMatch.exec);
+        fallbackMatch.execBaseName = QFileInfo(fallbackMatch.execPath).fileName();
+        QString defaultColorError;
+        bool defaultColorScriptMatches = false;
+        bool defaultScriptsFormatted = true;
+        for (const ClipboardCategory &category : repository.categories()) {
+            defaultScriptsFormatted = defaultScriptsFormatted
+                && category.script.contains(QLatin1Char('\n'));
+            if (category.name == QStringLiteral("色彩")) {
+                defaultColorScriptMatches = repository.categoryScriptMatches(
+                    category.script, QStringLiteral("#12abef"), category.previewLanguage,
+                    &defaultColorError);
+            }
+        }
+        if (!defaultColorError.isEmpty()) {
+            qWarning().noquote() << "default color script:" << defaultColorError;
+        }
+        const QString formattedJavaScript = formatJavaScript(QStringLiteral(
+            "function classify(item){const value=1;if(value){return /a+/.test(item.text);}return false;}"));
+        const QKeyEvent settingsShortcutEvent(
+            QEvent::KeyPress, Qt::Key_Comma, Qt::ControlModifier, QStringLiteral(","));
         QStringList failures;
         auto require = [&failures](bool condition, const QString &name) {
             if (!condition) failures.append(name);
         };
         require(repository.isOpen(), QStringLiteral("database-open"));
+        require(stored.size() >= 3 && paged.size() == 2
+                    && paged[0].databaseID == stored[1].databaseID
+                    && paged[1].databaseID == stored[2].databaseID,
+                QStringLiteral("history-fetch-offset-pagination"));
+        require(!serializedRasterIcons.isEmpty()
+                    && restoredRasterIcons.pngVariants.size() == 3,
+                QStringLiteral("application-icon-set-serialization"));
+        require(raster50.size() == QSize(50, 50)
+                    && raster50.pixelColor(25, 25) == QColor(40, 200, 80),
+                QStringLiteral("application-icon-smallest-png-above-target"));
+        require(raster100.size() == QSize(100, 100)
+                    && raster100.pixelColor(50, 50) == QColor(40, 90, 220)
+                    && raster180.pixelColor(90, 90) == QColor(40, 90, 220),
+                QStringLiteral("application-icon-largest-png-fallback"));
+        require(svg63.size() == QSize(63, 63)
+                    && svg63.pixelColor(31, 31).red() > 180,
+                QStringLiteral("application-icon-svg-priority"));
+        require(storedIconSet != stored.cend()
+                    && storedIconSet->sourceIconVariantsData == serializedRasterIcons,
+                QStringLiteral("application-icon-set-persistence"));
+        require(angleUpdated && storedAngleItem != stored.cend()
+                    && storedAngleItem->imageAngle == 270
+                    && storedAngleItem->imageData == angleSourceData
+                    && imageAtAngle(storedAngleItem->image, storedAngleItem->imageAngle).size()
+                        == QSize(2, 3),
+                QStringLiteral("image-angle-metadata-persistence"));
         require(repository.categories().size() == 6, QStringLiteral("default-categories"));
+        require(defaultScriptsFormatted, QStringLiteral("default-categories-formatted"));
+        require(defaultColorScriptMatches && defaultColorError.isEmpty(),
+                QStringLiteral("default-color-script"));
+        require(formattedJavaScript.contains(QLatin1Char('\n'))
+                    && repository.categoryScriptError(formattedJavaScript).isEmpty(),
+                QStringLiteral("javascript-formatter"));
+        require(isShorterRetention(30, 7) && isShorterRetention(0, 30)
+                    && !isShorterRetention(30, 365) && !isShorterRetention(30, 0),
+                QStringLiteral("retention-shortening-detection"));
+        require(keySymForQtKey(Qt::Key_Space) == XK_space
+                    && keySymForQtKey(Qt::Key_Delete) == XK_Delete
+                    && keySymForQtKey(Qt::Key_F12) == XK_F12,
+                QStringLiteral("global-shortcut-key-mapping"));
+        require(defaultShowDeckShortcut().toString(QKeySequence::PortableText)
+                    == QStringLiteral("Alt+Shift+V"),
+                QStringLiteral("default-deck-shortcut"));
+        require(isSettingsShortcut(&settingsShortcutEvent),
+                QStringLiteral("deck-settings-shortcut"));
         require(legacySetupOK && migratedLegacyRepository.isOpen(),
                 QStringLiteral("preview6-migration-open"));
         require(migratedLegacyRepository.categories().size() == 6,
                 QStringLiteral("preview6-migration-categories"));
+        require(migratedDefaultScriptFormatted && migratedCustomScriptPreserved,
+                QStringLiteral("default-script-format-migration"));
         require(migratedSavedFirst.databaseID >= 0
                     && migratedSavedLater.databaseID != migratedSavedFirst.databaseID,
                 QStringLiteral("preview6-migration-removes-global-unique"));
+        require(duplicateSetupOK && duplicateCleanupRepository.isOpen()
+                    && cleanedDuplicates.size() == 1
+                    && cleanedDuplicates.first().sourceID == QStringLiteral("com.intellij.idea")
+                    && cleanedDuplicates.first().copyCount == 2,
+                QStringLiteral("collapse-existing-dde-grand-search-duplicate"));
         require(!containsLocalFileURL(&httpURLMime) && containsLocalFileURL(&localFileMime),
                 QStringLiteral("clipboard-url-filter"));
+        require(desktopExecCommand(QStringLiteral("env FOO=bar '/opt/My App/bin/example' %U"))
+                    == QStringLiteral("/opt/My App/bin/example"),
+                QStringLiteral("desktop-exec-parse"));
+        require(desktopMatchScore(startupMatch, sourceIdentity) == 300,
+                QStringLiteral("desktop-match-startup-wm-class"));
+        require(desktopMatchScore(executableMatch, sourceIdentity) == 200,
+                QStringLiteral("desktop-match-executable"));
+        sourceIdentity.executablePath = QStringLiteral("/not/installed/code");
+        require(desktopMatchScore(fallbackMatch, sourceIdentity) == 120,
+                QStringLiteral("desktop-match-fallback"));
         require(repository.classifyText(QStringLiteral("https://example.com")) == QStringLiteral("URL"),
                 QStringLiteral("classify-url"));
         require(repository.classifyText(QStringLiteral("{\"ok\":true}")) == QStringLiteral("JSON"),
@@ -2536,11 +5017,20 @@ int main(int argc, char *argv[]) {
                 QStringLiteral("detect-code-language"));
         require(categoryInputMatches && categoryTestError.isEmpty(),
                 QStringLiteral("category-script-input"));
+        require(categoryTestConsole == QStringList{QStringLiteral("LOG  length 4")},
+                QStringLiteral("category-script-console"));
         require(savedFirst.databaseID >= 0, QStringLiteral("save-first"));
-        require(savedDuplicate.databaseID == savedFirst.databaseID, QStringLiteral("dedupe-10s"));
+        require(savedDuplicate.databaseID == savedFirst.databaseID,
+                QStringLiteral("dedupe-within-24-hours"));
         require(savedDuplicate.copyCount == 2, QStringLiteral("dedupe-count"));
-        require(savedLater.databaseID != savedFirst.databaseID, QStringLiteral("allow-after-10s"));
-        require(savedURLAgain.databaseID == savedURL.databaseID, QStringLiteral("dedupe-url-day"));
+        require(savedLater.databaseID == savedFirst.databaseID,
+                QStringLiteral("dedupe-nonconsecutive-within-24-hours"));
+        require(storedIconSet != stored.cend()
+                    && storedIconSet->sourceID == QStringLiteral("self.test.application")
+                    && storedIconSet->sourceName == QStringLiteral("Self Test"),
+                QStringLiteral("preserve-source-over-dde-grand-search"));
+        require(savedURLAgain.databaseID == savedURL.databaseID,
+                QStringLiteral("dedupe-url-within-24-hours"));
         require(linked != stored.cend(), QStringLiteral("fetch-link"));
         require(linked != stored.cend() && linked->title == QStringLiteral("Example title"),
                 QStringLiteral("link-title"));
@@ -2554,17 +5044,36 @@ int main(int argc, char *argv[]) {
                                           + QLatin1Char('\n'));
         return passed ? 0 : 1;
     }
+    if (settingsPage >= 0) {
+        QApplication::setQuitOnLastWindowClosed(true);
+        const auto notifyShortcutRecording = [](bool recording) {
+            QTextStream stream(stdout);
+            stream << (recording ? QLatin1String(kShortcutRecordingStarted)
+                                 : QLatin1String(kShortcutRecordingStopped))
+                   << QLatin1Char('\n');
+            stream.flush();
+        };
+        showSettings(&repository, nullptr, settingsPage, {}, QString(), beginNewCategory,
+                     notifyShortcutRecording, settingsIPCEnabled);
+        return 0;
+    }
     repository.clearExpired(settings.value(QStringLiteral("history/retentionDays"), 30).toInt());
     DeckWindow deck(display, &repository);
 
     if (!settingsRenderPath.isEmpty()) {
         const QFileInfo output(settingsRenderPath);
+        const QString imagePath = output.absolutePath() + QLatin1Char('/')
+            + output.completeBaseName() + QStringLiteral("-images.png");
+        const QString keyboardPath = output.absolutePath() + QLatin1Char('/')
+            + output.completeBaseName() + QStringLiteral("-keyboard.png");
         const QString categoryPath = output.absolutePath() + QLatin1Char('/')
             + output.completeBaseName() + QStringLiteral("-categories.png");
         showSettings(&repository, &deck, 0, {}, settingsRenderPath);
+        showSettings(&repository, &deck, 1, {}, imagePath);
+        showSettings(&repository, &deck, 2, {}, keyboardPath);
         showSettings(&repository, &deck, 3, {}, categoryPath);
-        QTextStream(stdout) << QStringLiteral("settings-render: ok: %1, %2\n")
-            .arg(settingsRenderPath, categoryPath);
+        QTextStream(stdout) << QStringLiteral("settings-render: ok: %1, %2, %3, %4\n")
+            .arg(settingsRenderPath, imagePath, keyboardPath, categoryPath);
         return 0;
     }
 
@@ -2587,7 +5096,7 @@ int main(int argc, char *argv[]) {
                  QStringLiteral("select title, category from content where copy_count > 1 order by last_copied_at desc;"),
                  QStringLiteral("SQL"), 75);
         saveText(QStringLiteral("文本"),
-                 QStringLiteral("{\n  \"platform\": \"UOS\",\n  \"parity\": true,\n  \"shortcut\": \"F12\"\n}"),
+                 QStringLiteral("{\n  \"platform\": \"UOS\",\n  \"parity\": true,\n  \"shortcut\": \"Alt+Shift+V\"\n}"),
                  QStringLiteral("JSON"), 160);
         saveText(QStringLiteral("色彩"), QStringLiteral("#21C46B"), QStringLiteral("色彩"), 240);
 
@@ -2651,18 +5160,23 @@ int main(int argc, char *argv[]) {
             + output.completeBaseName() + QStringLiteral("-compact.png");
         const QString searchPath = output.absolutePath() + QLatin1Char('/')
             + output.completeBaseName() + QStringLiteral("-search.png");
+        const QString categoryPath = output.absolutePath() + QLatin1Char('/')
+            + output.completeBaseName() + QStringLiteral("-categories.png");
         const bool expandedSaved = render(renderCheckPath, 292);
         const bool compactSaved = render(compactPath, 250);
+        deck.showNextCategoryPageForRenderCheck();
+        const bool categorySaved = render(categoryPath, 292);
         deck.setGeometry(8, 8, 2032, 292);
         deck.show();
         deck.beginSearchForRenderCheck();
         app.processEvents();
         const bool searchSaved = deck.grab().save(searchPath, "PNG");
         deck.hide();
-        QTextStream(stdout) << (expandedSaved && compactSaved && searchSaved
-            ? QStringLiteral("render-check: ok: %1, %2, %3\n").arg(renderCheckPath, compactPath, searchPath)
+        QTextStream(stdout) << (expandedSaved && compactSaved && categorySaved && searchSaved
+            ? QStringLiteral("render-check: ok: %1, %2, %3, %4\n")
+                .arg(renderCheckPath, compactPath, categoryPath, searchPath)
             : QStringLiteral("render-check: failed\n"));
-        return expandedSaved && compactSaved && searchSaved ? 0 : 1;
+        return expandedSaved && compactSaved && categorySaved && searchSaved ? 0 : 1;
     }
 
     QClipboard *clipboard = QApplication::clipboard();
@@ -2709,39 +5223,111 @@ int main(int argc, char *argv[]) {
         return app.exec();
     }
 
-    QSystemTrayIcon tray(transparentTrayIcon());
+    const QString packagedTrayIconPath = QDir(QCoreApplication::applicationDirPath())
+        .absoluteFilePath(QStringLiteral("../share/tray/clipdeck.svg"));
+    const QIcon packagedTrayIcon(packagedTrayIconPath);
+    QSystemTrayIcon tray(packagedTrayIcon.isNull()
+        ? transparentTrayIcon(DisplayScale::factor()) : packagedTrayIcon);
     QMenu trayMenu;
     QAction *showAction = trayMenu.addAction(QStringLiteral("显示 Deck"));
-    QAction *settingsAction = trayMenu.addAction(QStringLiteral("设置…\tCtrl+,"));
+    QAction *settingsAction = trayMenu.addAction(QStringLiteral("设置…"));
+    settingsAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Comma));
+    settingsAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    settingsAction->setShortcutVisibleInContextMenu(true);
     trayMenu.addSeparator();
-    QAction *quitAction = trayMenu.addAction(QStringLiteral("退出 ClipDeck\tCtrl+Q"));
+    QAction *quitAction = trayMenu.addAction(QStringLiteral("退出 ClipDeck"));
+    quitAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Q));
+    quitAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    quitAction->setShortcutVisibleInContextMenu(true);
     tray.setContextMenu(&trayMenu);
-    GlobalShortcutFilter shortcut([&deck] { deck.toggleNearPointer(); });
+    GlobalShortcutFilter shortcut(
+        [&deck] { deck.toggleNearPointer(); },
+        [&deck](const xcb_key_press_event_t *event) {
+            return deck.handleNativeQuickPaste(event->detail, event->state);
+        },
+        [] {
+            return configuredShortcut(QStringLiteral("shortcuts/showDeck"),
+                                      defaultShowDeckShortcut());
+        });
     app.installNativeEventFilter(&shortcut);
     auto updateShortcutPresentation = [&] {
-        const QString label = configuredShortcut(
-            QStringLiteral("shortcuts/showDeck"), QKeySequence(Qt::Key_F12)).toString(QKeySequence::NativeText);
-        showAction->setText(QStringLiteral("显示 Deck\t%1").arg(label));
+        const QKeySequence sequence = configuredShortcut(
+            QStringLiteral("shortcuts/showDeck"), defaultShowDeckShortcut());
+        const QString label = sequence.toString(QKeySequence::NativeText);
+        showAction->setText(QStringLiteral("显示 Deck"));
+        showAction->setShortcut(sequence);
+        showAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        showAction->setShortcutVisibleInContextMenu(true);
         tray.setToolTip(QStringLiteral("ClipDeck · %1 呼出").arg(label));
     };
     updateShortcutPresentation();
 
+    QProcess *settingsProcess = nullptr;
+    QByteArray settingsProcessOutput;
+    auto openSettingsProcess = [&](int page) {
+        if (settingsProcess && settingsProcess->state() != QProcess::NotRunning) {
+            deck.hide();
+            const bool categoryEntry = page == 3 || page == 5;
+            const int requestedPage = categoryEntry ? 3 : -1;
+            const QByteArray command = QByteArray(kSettingsActivatePrefix)
+                + QByteArray::number(requestedPage) + ':' + (page == 5 ? "1\n" : "0\n");
+            settingsProcess->write(command);
+            qInfo() << "[ClipDeck][Settings] activating existing window page="
+                    << requestedPage << "createCategory=" << (page == 5);
+            return;
+        }
+        deck.hide();
+        QProcess *process = new QProcess(&app);
+        settingsProcess = process;
+        settingsProcessOutput.clear();
+        process->setProgram(QCoreApplication::applicationFilePath());
+        const bool createCategory = page == 5;
+        QStringList arguments{QStringLiteral("--settings-page=%1").arg(createCategory ? 3 : page)};
+        arguments.append(QStringLiteral("--settings-ipc"));
+        if (createCategory) arguments.append(QStringLiteral("--new-category"));
+        process->setArguments(arguments);
+        qInfo() << "[ClipDeck][Settings] starting" << arguments;
+        QObject::connect(process, &QProcess::readyReadStandardOutput,
+                         [&, process] {
+            settingsProcessOutput.append(process->readAllStandardOutput());
+            int newline = -1;
+            while ((newline = settingsProcessOutput.indexOf('\n')) >= 0) {
+                const QByteArray message = settingsProcessOutput.left(newline).trimmed();
+                settingsProcessOutput.remove(0, newline + 1);
+                if (message == QByteArray(kShortcutRecordingStarted)) {
+                    shortcut.suspend();
+                    qInfo() << "[ClipDeck][Shortcut] suspended for settings capture";
+                } else if (message == QByteArray(kShortcutRecordingStopped)) {
+                    settings.sync();
+                    shortcut.configure();
+                    updateShortcutPresentation();
+                    qInfo() << "[ClipDeck][Shortcut] restored after settings capture";
+                }
+            }
+        });
+        QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                         [&, process](int, QProcess::ExitStatus) {
+            settings.sync();
+            shortcut.configure();
+            updateShortcutPresentation();
+            deck.refresh();
+            settingsProcess = nullptr;
+            process->deleteLater();
+        });
+        QObject::connect(process, &QProcess::errorOccurred, [&, process](QProcess::ProcessError error) {
+            qWarning() << "[ClipDeck][Settings] process error" << error << process->errorString();
+            if (error == QProcess::FailedToStart) {
+                shortcut.configure();
+                settingsProcess = nullptr;
+                process->deleteLater();
+            }
+        });
+        process->start();
+    };
+
     QObject::connect(showAction, &QAction::triggered, [&deck] { deck.toggleNearPointer(); });
-    QObject::connect(settingsAction, &QAction::triggered,
-                     [&repository, &deck, &shortcut, &updateShortcutPresentation] {
-        deck.hide();
-        showSettings(&repository, &deck, 0, [&] {
-            shortcut.configure();
-            updateShortcutPresentation();
-        });
-    });
-    deck.setSettingsCallback([&repository, &deck, &shortcut, &updateShortcutPresentation](int page) {
-        deck.hide();
-        showSettings(&repository, &deck, page, [&] {
-            shortcut.configure();
-            updateShortcutPresentation();
-        });
-    });
+    QObject::connect(settingsAction, &QAction::triggered, [&] { openSettingsProcess(0); });
+    deck.setSettingsCallback([&](int page) { openSettingsProcess(page); });
     QObject::connect(quitAction, &QAction::triggered, &app, &QApplication::quit);
     QObject::connect(&tray, &QSystemTrayIcon::activated,
                      [&deck](QSystemTrayIcon::ActivationReason reason) {

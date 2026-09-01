@@ -1,8 +1,10 @@
 #include "history_repository.h"
 
 #include <QCryptographicHash>
+#include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QJSEngine>
 #include <QJSValue>
 #include <QRegularExpression>
@@ -10,9 +12,10 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStandardPaths>
-#include <QTime>
-#include <QUrl>
 #include <QUuid>
+
+#include <algorithm>
+#include <utility>
 
 namespace {
 
@@ -27,6 +30,12 @@ QString escapedLike(QString value) {
     return value;
 }
 
+bool isDDEGrandSearchSource(const QString &sourceID, const QString &sourceName) {
+    const QString identity = (sourceID + QLatin1Char(' ') + sourceName).toLower();
+    return identity.contains(QStringLiteral("dde-grand-search"))
+        || identity.contains(QStringLiteral("dde grand search"));
+}
+
 struct CategoryPreset {
     QString name;
     QString icon;
@@ -36,14 +45,82 @@ struct CategoryPreset {
 
 const QVector<CategoryPreset> &defaultCategoryPresets() {
     static const QVector<CategoryPreset> presets = {
-        {QStringLiteral("JSON"), QStringLiteral("{}"), QStringLiteral("json"), QStringLiteral("function classify(item){const t=item.text.trim();if(!((t.startsWith('{')&&t.endsWith('}'))||(t.startsWith('[')&&t.endsWith(']'))))return false;try{const v=JSON.parse(t);return v!==null&&typeof v==='object';}catch(e){return false;}}")},
-        {QStringLiteral("URL"), QStringLiteral("↗"), QStringLiteral("url"), QStringLiteral("function classify(item){return /^https?:\\/\\/\\S+$/i.test(item.text.trim());}")},
-        {QStringLiteral("SQL"), QStringLiteral("◫"), QStringLiteral("sql"), QStringLiteral("function classify(item){return /^(select|insert|update|delete|create|alter|drop)\\b/i.test(item.text.trim());}")},
-        {QStringLiteral("Markdown"), QStringLiteral("M↓"), QStringLiteral("markdown"), QStringLiteral("function classify(item){return /(^|\\n)(#{1,6} |[-*] |```)/.test(item.text);}")},
-        {QStringLiteral("代码"), QStringLiteral("</>"), QStringLiteral("code"), QStringLiteral("function classify(item){return item.codeEngineMatched===true;}")},
-        {QStringLiteral("色彩"), QStringLiteral("◉"), QStringLiteral("color"), QStringLiteral("function classify(item){var t=item.text.trim();var hash=/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;var bare=/^(?=[0-9a-f]*[a-f])(?:[0-9a-f]{6}|[0-9a-f]{8})$/i;if(hash.test(t)||bare.test(t))return true;var m=/^rgba?\\((.*)\\)$/i.exec(t);if(!m)return false;var c=m[1].split(',').map(function(v){return v.trim();});if(c.length!==3&&c.length!==4)return false;var n=/^\\d+(?:\\.\\d+)?%?$/;function channel(v,max){if(!n.test(v))return false;var percent=v.charAt(v.length-1)==='%';var number=Number(percent?v.slice(0,-1):v);return number>=0&&number<=(percent?100:max);}for(var i=0;i<3;i++){if(!channel(c[i],255))return false;}return c.length===3||channel(c[3],1);}")}
+        {QStringLiteral("JSON"), QStringLiteral("{}"), QStringLiteral("json"), QString::fromUtf8(R"JS(function classify(item) {
+    const text = item.text.trim();
+    const isContainer =
+        (text.startsWith("{") && text.endsWith("}")) ||
+        (text.startsWith("[") && text.endsWith("]"));
+    if (!isContainer) return false;
+    try {
+        const value = JSON.parse(text);
+        return value !== null && typeof value === "object";
+    } catch (_) {
+        return false;
+    }
+})JS")},
+        {QStringLiteral("URL"), QStringLiteral("↗"), QStringLiteral("url"), QString::fromUtf8(R"JS(function classify(item) {
+    return /^https?:\/\/\S+$/i.test(item.text.trim());
+})JS")},
+        {QStringLiteral("SQL"), QStringLiteral("◫"), QStringLiteral("sql"), QString::fromUtf8(R"JS(function classify(item) {
+    return /^(select|insert|update|delete|create|alter|drop)\b/i.test(
+        item.text.trim()
+    );
+})JS")},
+        {QStringLiteral("Markdown"), QStringLiteral("M↓"), QStringLiteral("markdown"), QString::fromUtf8(R"JS(function classify(item) {
+    return /(^|\n)(#{1,6} |[-*] |```)/.test(item.text);
+})JS")},
+        {QStringLiteral("代码"), QStringLiteral("</>"), QStringLiteral("code"), QString::fromUtf8(R"JS(function classify(item) {
+    return item.codeEngineMatched === true;
+})JS")},
+        {QStringLiteral("色彩"), QStringLiteral("◉"), QStringLiteral("color"), QString::fromUtf8(R"JS(function classify(item) {
+    const text = item.text.trim();
+    const hashHex = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+    const bareHex = /^(?=[0-9a-f]*[a-f])(?:[0-9a-f]{6}|[0-9a-f]{8})$/i;
+    if (hashHex.test(text) || bareHex.test(text)) {
+        return true;
+    }
+
+    const match = /^rgba?\((.*)\)$/i.exec(text);
+    if (!match) {
+        return false;
+    }
+
+    const channels = match[1].split(",").map(function(value) {
+        return value.trim();
+    });
+    if (channels.length !== 3 && channels.length !== 4) {
+        return false;
+    }
+
+    const numericChannel = /^\d+(?:\.\d+)?%?$/;
+    function validColorChannel(value) {
+        return numericChannel.test(value) && (value.endsWith("%")
+            ? Number(value.slice(0, -1)) >= 0 && Number(value.slice(0, -1)) <= 100
+            : Number(value) >= 0 && Number(value) <= 255);
+    }
+    function validAlphaChannel(value) {
+        return numericChannel.test(value) && (value.endsWith("%")
+            ? Number(value.slice(0, -1)) >= 0 && Number(value.slice(0, -1)) <= 100
+            : Number(value) >= 0 && Number(value) <= 1);
+    }
+
+    return channels.slice(0, 3).every(validColorChannel)
+        && (channels.length === 3 || validAlphaChannel(channels[3]));
+})JS")}
     };
     return presets;
+}
+
+QString legacyLinuxDefaultScript(const QString &name) {
+    static const QMap<QString, QString> scripts = {
+        {QStringLiteral("JSON"), QStringLiteral("function classify(item){const t=item.text.trim();if(!((t.startsWith('{')&&t.endsWith('}'))||(t.startsWith('[')&&t.endsWith(']'))))return false;try{const v=JSON.parse(t);return v!==null&&typeof v==='object';}catch(e){return false;}}")},
+        {QStringLiteral("URL"), QStringLiteral("function classify(item){return /^https?:\\/\\/\\S+$/i.test(item.text.trim());}")},
+        {QStringLiteral("SQL"), QStringLiteral("function classify(item){return /^(select|insert|update|delete|create|alter|drop)\\b/i.test(item.text.trim());}")},
+        {QStringLiteral("Markdown"), QStringLiteral("function classify(item){return /(^|\\n)(#{1,6} |[-*] |```)/.test(item.text);}")},
+        {QStringLiteral("代码"), QStringLiteral("function classify(item){return item.codeEngineMatched===true;}")},
+        {QStringLiteral("色彩"), QStringLiteral("function classify(item){var t=item.text.trim();var hash=/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;var bare=/^(?=[0-9a-f]*[a-f])(?:[0-9a-f]{6}|[0-9a-f]{8})$/i;if(hash.test(t)||bare.test(t))return true;var m=/^rgba?\\((.*)\\)$/i.exec(t);if(!m)return false;var c=m[1].split(',').map(function(v){return v.trim();});if(c.length!==3&&c.length!==4)return false;var n=/^\\d+(?:\\.\\d+)?%?$/;function channel(v,max){if(!n.test(v))return false;var percent=v.charAt(v.length-1)==='%';var number=Number(percent?v.slice(0,-1):v);return number>=0&&number<=(percent?100:max);}for(var i=0;i<3;i++){if(!channel(c[i],255))return false;}return c.length===3||channel(c[3],1);}")}
+    };
+    return scripts.value(name);
 }
 
 } // namespace
@@ -107,15 +184,24 @@ bool HistoryRepository::initialize() {
         "image_data BLOB,"
         "image_width INTEGER,"
         "image_height INTEGER,"
+        "image_angle INTEGER NOT NULL DEFAULT 0,"
         "content_hash BLOB NOT NULL,"
         "source_id TEXT,"
         "source_name TEXT NOT NULL,"
         "source_icon BLOB,"
+        "source_icon_variants BLOB,"
         "category TEXT,"
         "copied_at INTEGER NOT NULL,"
         "last_copied_at INTEGER NOT NULL,"
         "copy_count INTEGER NOT NULL DEFAULT 1,"
         "updated_at INTEGER NOT NULL)"))
+        && execute(QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS application_icon ("
+            "source_id TEXT PRIMARY KEY,"
+            "source_name TEXT NOT NULL,"
+            "source_icon BLOB,"
+            "source_icon_variants BLOB,"
+            "updated_at INTEGER NOT NULL)"))
         && execute(QStringLiteral(
             "CREATE INDEX IF NOT EXISTS idx_content_last_copied "
             "ON content(last_copied_at DESC)"))
@@ -147,6 +233,11 @@ bool HistoryRepository::initialize() {
                 && !execute(QStringLiteral("ALTER TABLE content ADD COLUMN source_icon BLOB"))) {
                 return false;
             }
+            if (!names.contains(QStringLiteral("source_icon_variants"))
+                && !execute(QStringLiteral(
+                    "ALTER TABLE content ADD COLUMN source_icon_variants BLOB"))) {
+                return false;
+            }
             if (!names.contains(QStringLiteral("link_icon_data"))
                 && !execute(QStringLiteral("ALTER TABLE content ADD COLUMN link_icon_data BLOB"))) {
                 return false;
@@ -158,6 +249,11 @@ bool HistoryRepository::initialize() {
             if (!names.contains(QStringLiteral("link_preview_fetched"))
                 && !execute(QStringLiteral(
                     "ALTER TABLE content ADD COLUMN link_preview_fetched INTEGER NOT NULL DEFAULT 0"))) {
+                return false;
+            }
+            if (!names.contains(QStringLiteral("image_angle"))
+                && !execute(QStringLiteral(
+                    "ALTER TABLE content ADD COLUMN image_angle INTEGER NOT NULL DEFAULT 0"))) {
                 return false;
             }
             QSqlQuery tableDefinition(database_);
@@ -176,16 +272,20 @@ bool HistoryRepository::initialize() {
                         "id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,content_type TEXT NOT NULL,"
                         "plain_text TEXT,rich_text_html TEXT,link_icon_data BLOB,link_preview_data BLOB,"
                         "link_preview_fetched INTEGER NOT NULL DEFAULT 0,image_data BLOB,image_width INTEGER,image_height INTEGER,"
-                        "content_hash BLOB NOT NULL,source_id TEXT,source_name TEXT NOT NULL,source_icon BLOB,category TEXT,"
+                        "image_angle INTEGER NOT NULL DEFAULT 0,"
+                        "content_hash BLOB NOT NULL,source_id TEXT,source_name TEXT NOT NULL,source_icon BLOB,"
+                        "source_icon_variants BLOB,category TEXT,"
                         "copied_at INTEGER NOT NULL,last_copied_at INTEGER NOT NULL,copy_count INTEGER NOT NULL DEFAULT 1,"
                         "updated_at INTEGER NOT NULL)"),
                     QStringLiteral(
                         "INSERT INTO content_v2(id,title,content_type,plain_text,rich_text_html,link_icon_data,link_preview_data,"
-                        "link_preview_fetched,image_data,image_width,image_height,"
-                        "content_hash,source_id,source_name,source_icon,category,copied_at,last_copied_at,copy_count,updated_at) "
+                        "link_preview_fetched,image_data,image_width,image_height,image_angle,"
+                        "content_hash,source_id,source_name,source_icon,source_icon_variants,category,"
+                        "copied_at,last_copied_at,copy_count,updated_at) "
                         "SELECT id,title,content_type,plain_text,rich_text_html,link_icon_data,link_preview_data,"
-                        "link_preview_fetched,image_data,image_width,image_height,"
-                        "content_hash,source_id,source_name,source_icon,category,copied_at,last_copied_at,copy_count,updated_at FROM content"),
+                        "link_preview_fetched,image_data,image_width,image_height,image_angle,"
+                        "content_hash,source_id,source_name,source_icon,source_icon_variants,category,"
+                        "copied_at,last_copied_at,copy_count,updated_at FROM content"),
                     QStringLiteral("DROP TABLE content"),
                     QStringLiteral("ALTER TABLE content_v2 RENAME TO content")
                 };
@@ -222,9 +322,12 @@ bool HistoryRepository::initialize() {
                 QSqlQuery query(database_);
                 if (hasCategories) {
                     query.prepare(QStringLiteral(
-                        "UPDATE category SET icon=COALESCE(icon,?),preview_language=COALESCE(preview_language,?) WHERE name=?"));
+                        "UPDATE category SET icon=COALESCE(icon,?),preview_language=COALESCE(preview_language,?),"
+                        "script=CASE WHEN script=? THEN ? ELSE script END WHERE name=?"));
                     query.addBindValue(presets[index].icon);
                     query.addBindValue(presets[index].language);
+                    query.addBindValue(legacyLinuxDefaultScript(presets[index].name));
+                    query.addBindValue(presets[index].script);
                     query.addBindValue(presets[index].name);
                 } else {
                     query.prepare(QStringLiteral("INSERT INTO category(name,icon,script,preview_language,sort_order) VALUES(?,?,?,?,?)"));
@@ -236,8 +339,107 @@ bool HistoryRepository::initialize() {
                 }
                 if (!query.exec()) return false;
             }
-            return true;
+            return collapseRecentDuplicates();
         }();
+}
+
+bool HistoryRepository::collapseRecentDuplicates() {
+    constexpr qint64 kDuplicateWindowMs = 24LL * 60 * 60 * 1000;
+    struct Row {
+        qint64 id = -1;
+        QByteArray hash;
+        qint64 lastCopiedAt = 0;
+        int copyCount = 1;
+        QString sourceID;
+        QString sourceName;
+        QByteArray sourceIcon;
+        QByteArray sourceIconVariants;
+    };
+
+    QVector<Row> rows;
+    QSqlQuery select(database_);
+    if (!select.exec(QStringLiteral(
+            "SELECT id,content_hash,last_copied_at,copy_count,source_id,source_name,source_icon,source_icon_variants "
+            "FROM content ORDER BY last_copied_at DESC,id DESC"))) {
+        lastError_ = select.lastError().text();
+        return false;
+    }
+    while (select.next()) {
+        Row row;
+        row.id = select.value(0).toLongLong();
+        row.hash = select.value(1).toByteArray();
+        row.lastCopiedAt = select.value(2).toLongLong();
+        row.copyCount = std::max(1, select.value(3).toInt());
+        row.sourceID = select.value(4).toString();
+        row.sourceName = select.value(5).toString();
+        row.sourceIcon = select.value(6).toByteArray();
+        row.sourceIconVariants = select.value(7).toByteArray();
+        rows.append(std::move(row));
+    }
+    if (rows.size() < 2) return true;
+
+    QHash<QByteArray, int> latestGroupByHash;
+    QHash<int, QVector<qint64>> duplicateIDsByKeptIndex;
+    for (int index = 0; index < rows.size(); ++index) {
+        const int keptIndex = latestGroupByHash.value(rows[index].hash, -1);
+        if (keptIndex >= 0
+            && rows[keptIndex].lastCopiedAt - rows[index].lastCopiedAt <= kDuplicateWindowMs) {
+            Row &kept = rows[keptIndex];
+            const Row &duplicate = rows[index];
+            kept.copyCount += duplicate.copyCount;
+            if (isDDEGrandSearchSource(kept.sourceID, kept.sourceName)
+                && !isDDEGrandSearchSource(duplicate.sourceID, duplicate.sourceName)
+                && !duplicate.sourceID.isEmpty()) {
+                kept.sourceID = duplicate.sourceID;
+                kept.sourceName = duplicate.sourceName;
+                kept.sourceIcon = duplicate.sourceIcon;
+                kept.sourceIconVariants = duplicate.sourceIconVariants;
+            }
+            duplicateIDsByKeptIndex[keptIndex].append(duplicate.id);
+        } else {
+            latestGroupByHash.insert(rows[index].hash, index);
+        }
+    }
+    if (duplicateIDsByKeptIndex.isEmpty()) return true;
+
+    if (!database_.transaction()) return false;
+    for (auto group = duplicateIDsByKeptIndex.cbegin();
+         group != duplicateIDsByKeptIndex.cend(); ++group) {
+            const Row &kept = rows[group.key()];
+            QSqlQuery update(database_);
+            update.prepare(QStringLiteral(
+                "UPDATE content SET copy_count=?,source_id=?,source_name=?,source_icon=?,"
+                "source_icon_variants=?,updated_at=? WHERE id=?"));
+            update.addBindValue(kept.copyCount);
+            update.addBindValue(kept.sourceID);
+            update.addBindValue(kept.sourceName);
+            update.addBindValue(kept.sourceIcon);
+            update.addBindValue(kept.sourceIconVariants);
+            update.addBindValue(QDateTime::currentMSecsSinceEpoch());
+            update.addBindValue(kept.id);
+            if (!update.exec()) {
+                lastError_ = update.lastError().text();
+                database_.rollback();
+                return false;
+            }
+            QSqlQuery remove(database_);
+            remove.prepare(QStringLiteral("DELETE FROM content WHERE id=?"));
+            for (const qint64 duplicateID : group.value()) {
+                remove.bindValue(0, duplicateID);
+                if (!remove.exec()) {
+                    lastError_ = remove.lastError().text();
+                    database_.rollback();
+                    return false;
+                }
+            }
+            qInfo() << "[ClipDeck][History] collapsed" << group.value().size()
+                    << "duplicate(s) from the 24-hour window into" << kept.id;
+    }
+    if (!database_.commit()) {
+        lastError_ = database_.lastError().text();
+        return false;
+    }
+    return true;
 }
 
 ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
@@ -248,19 +450,33 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
     const QByteArray hash = contentHash(item);
     const qint64 now = milliseconds(item.copiedAt.isValid() ? item.copiedAt : QDateTime::currentDateTime());
 
-    const QUrl candidate(item.isText() ? item.text.trimmed() : QString());
-    const bool isWebURL = candidate.isValid()
-        && (candidate.scheme() == QStringLiteral("http") || candidate.scheme() == QStringLiteral("https"))
-        && !candidate.host().isEmpty() && !item.text.contains(QRegularExpression(QStringLiteral("\\s")));
-    const QDateTime copiedAt = QDateTime::fromMSecsSinceEpoch(now);
-    const qint64 duplicateCutoff = isWebURL
-        ? QDateTime(copiedAt.date(), QTime(0, 0)).toMSecsSinceEpoch()
-        : now - 10'000;
+    if (!item.sourceID.isEmpty()
+        && (!item.sourceIconData.isEmpty() || !item.sourceIconVariantsData.isEmpty())) {
+        QSqlQuery applicationIcon(database_);
+        applicationIcon.prepare(QStringLiteral(
+            "INSERT INTO application_icon(source_id,source_name,source_icon,source_icon_variants,updated_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET "
+            "source_name=excluded.source_name,"
+            "source_icon=CASE WHEN length(excluded.source_icon)>0 THEN excluded.source_icon ELSE source_icon END,"
+            "source_icon_variants=CASE WHEN length(excluded.source_icon_variants)>0 "
+            "THEN excluded.source_icon_variants ELSE source_icon_variants END,"
+            "updated_at=excluded.updated_at"));
+        applicationIcon.addBindValue(item.sourceID);
+        applicationIcon.addBindValue(item.sourceName.isEmpty() ? QStringLiteral("Unknown") : item.sourceName);
+        applicationIcon.addBindValue(item.sourceIconData);
+        applicationIcon.addBindValue(item.sourceIconVariantsData);
+        applicationIcon.addBindValue(now);
+        if (!applicationIcon.exec()) lastError_ = applicationIcon.lastError().text();
+    }
+
+    constexpr qint64 kDuplicateWindowMs = 24LL * 60 * 60 * 1000;
+    const qint64 duplicateCutoff = now - kDuplicateWindowMs;
 
     QSqlQuery existing(database_);
     existing.prepare(QStringLiteral(
-        "SELECT id,copy_count,copied_at,title,category FROM content "
-        "WHERE content_hash=? AND last_copied_at>=? ORDER BY last_copied_at DESC LIMIT 1"));
+        "SELECT id,copy_count,copied_at,title,category,source_id,source_name FROM content "
+        "WHERE content_hash=? AND last_copied_at>=? "
+        "ORDER BY last_copied_at DESC,id DESC LIMIT 1"));
     existing.addBindValue(hash);
     existing.addBindValue(duplicateCutoff);
     if (existing.exec() && existing.next()) {
@@ -268,13 +484,27 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
         item.copyCount = existing.value(1).toInt() + 1;
         item.title = existing.value(3).toString();
         item.category = existing.value(4).toString();
+        const QString existingSourceID = existing.value(5).toString();
+        const QString existingSourceName = existing.value(6).toString();
+        const bool preserveExistingSource = isDDEGrandSearchSource(item.sourceID, item.sourceName)
+            && !existingSourceID.isEmpty()
+            && !isDDEGrandSearchSource(existingSourceID, existingSourceName);
         QSqlQuery update(database_);
-        update.prepare(QStringLiteral(
-            "UPDATE content SET source_id=?,source_name=?,source_icon=?,last_copied_at=?,"
-            "copy_count=?,updated_at=? WHERE id=?"));
-        update.addBindValue(item.sourceID);
-        update.addBindValue(item.sourceName);
-        update.addBindValue(item.sourceIconData);
+        update.prepare(preserveExistingSource
+            ? QStringLiteral(
+                "UPDATE content SET last_copied_at=?,copy_count=?,updated_at=? WHERE id=?")
+            : QStringLiteral(
+                "UPDATE content SET source_id=?,source_name=?,source_icon=?,source_icon_variants=?,last_copied_at=?,"
+                "copy_count=?,updated_at=? WHERE id=?"));
+        if (!preserveExistingSource) {
+            update.addBindValue(item.sourceID);
+            update.addBindValue(item.sourceName);
+            update.addBindValue(item.sourceIconData);
+            update.addBindValue(QVariant()); // Stored once in application_icon.
+        } else {
+            item.sourceID = existingSourceID;
+            item.sourceName = existingSourceName;
+        }
         update.addBindValue(now);
         update.addBindValue(item.copyCount);
         update.addBindValue(now);
@@ -289,9 +519,10 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
     QSqlQuery insert(database_);
     insert.prepare(QStringLiteral(
         "INSERT INTO content(title,content_type,plain_text,rich_text_html,link_icon_data,link_preview_data,"
-        "link_preview_fetched,image_data,image_width,image_height,"
-        "content_hash,source_id,source_name,source_icon,category,copied_at,last_copied_at,copy_count,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        "link_preview_fetched,image_data,image_width,image_height,image_angle,"
+        "content_hash,source_id,source_name,source_icon,source_icon_variants,category,"
+        "copied_at,last_copied_at,copy_count,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
     insert.addBindValue(item.title.isEmpty()
         ? (item.isImage() ? QStringLiteral("图片") : QStringLiteral("文本"))
         : item.title);
@@ -304,10 +535,12 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
     insert.addBindValue(item.isImage() ? item.imageData : QVariant());
     insert.addBindValue(item.isImage() ? item.image.width() : QVariant());
     insert.addBindValue(item.isImage() ? item.image.height() : QVariant());
+    insert.addBindValue(item.isImage() ? ((item.imageAngle % 360) + 360) % 360 : 0);
     insert.addBindValue(hash);
     insert.addBindValue(item.sourceID);
     insert.addBindValue(item.sourceName.isEmpty() ? QStringLiteral("Unknown") : item.sourceName);
     insert.addBindValue(item.sourceIconData);
+    insert.addBindValue(QVariant()); // Stored once in application_icon.
     insert.addBindValue(item.category);
     insert.addBindValue(now);
     insert.addBindValue(now);
@@ -326,7 +559,8 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
 QVector<ClipboardItem> HistoryRepository::fetch(
     const QString &category,
     const QString &search,
-    int limit) const {
+    int limit,
+    int offset) const {
     QVector<ClipboardItem> result;
     if (!isOpen()) {
         return result;
@@ -336,8 +570,12 @@ QVector<ClipboardItem> HistoryRepository::fetch(
         "SELECT content.id,content.title,content.content_type,content.plain_text,content.rich_text_html,"
         "content.link_icon_data,content.link_preview_data,content.link_preview_fetched,"
         "content.image_data,content.image_width,content.image_height,"
-        "content.source_id,content.source_name,content.source_icon,content.category,content.last_copied_at,content.copy_count,"
-        "category.preview_language,category.icon FROM content "
+        "content.source_id,content.source_name,"
+        "COALESCE(application_icon.source_icon,content.source_icon),"
+        "COALESCE(application_icon.source_icon_variants,content.source_icon_variants),"
+        "content.category,content.last_copied_at,content.copy_count,"
+        "category.preview_language,category.icon,content.image_angle FROM content "
+        "LEFT JOIN application_icon ON application_icon.source_id=content.source_id "
         "LEFT JOIN category ON category.name=content.category WHERE 1=1");
     if (!category.isEmpty()) {
         sql += category == QStringLiteral("文本")
@@ -349,7 +587,7 @@ QVector<ClipboardItem> HistoryRepository::fetch(
     if (!search.trimmed().isEmpty()) {
         sql += QStringLiteral(" AND (content.title LIKE ? ESCAPE '\\' OR content.plain_text LIKE ? ESCAPE '\\')");
     }
-    sql += QStringLiteral(" ORDER BY content.last_copied_at DESC LIMIT ?");
+    sql += QStringLiteral(" ORDER BY content.last_copied_at DESC LIMIT ? OFFSET ?");
 
     QSqlQuery query(database_);
     query.prepare(sql);
@@ -362,6 +600,7 @@ QVector<ClipboardItem> HistoryRepository::fetch(
         query.addBindValue(pattern);
     }
     query.addBindValue(std::max(1, limit));
+    query.addBindValue(std::max(0, offset));
     if (!query.exec()) {
         lastError_ = query.lastError().text();
         return result;
@@ -404,11 +643,22 @@ bool HistoryRepository::updateImage(qint64 id, const QByteArray &pngData, const 
     hashItem.imageData = pngData;
     QSqlQuery query(database_);
     query.prepare(QStringLiteral(
-        "UPDATE content SET image_data=?,image_width=?,image_height=?,content_hash=?,updated_at=? WHERE id=?"));
+        "UPDATE content SET image_data=?,image_width=?,image_height=?,image_angle=0,content_hash=?,updated_at=? WHERE id=?"));
     query.addBindValue(pngData);
     query.addBindValue(image.width());
     query.addBindValue(image.height());
     query.addBindValue(contentHash(hashItem));
+    query.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    query.addBindValue(id);
+    return query.exec();
+}
+
+bool HistoryRepository::updateImageAngle(qint64 id, int angle) {
+    angle = ((angle % 360) + 360) % 360;
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral(
+        "UPDATE content SET image_angle=?,updated_at=? WHERE id=?"));
+    query.addBindValue(angle);
     query.addBindValue(QDateTime::currentMSecsSinceEpoch());
     query.addBindValue(id);
     return query.exec();
@@ -666,11 +916,40 @@ QString HistoryRepository::categoryScriptError(const QString &script) const {
 
 bool HistoryRepository::categoryScriptMatches(const QString &script, const QString &text,
                                               const QString &previewLanguage,
-                                              QString *error) const {
+                                              QString *error,
+                                              QStringList *consoleOutput) const {
     if (error) error->clear();
+    if (consoleOutput) consoleOutput->clear();
     QJSEngine engine;
+    engine.evaluate(QStringLiteral(
+        "var __clipDeckConsole=[];"
+        "function __clipDeckConsoleText(value){"
+        " if(typeof value==='string') return value;"
+        " try { var json=JSON.stringify(value); if(json!==undefined) return json; } catch (_) {}"
+        " return String(value);"
+        "}"
+        "function __clipDeckConsolePush(level,args){"
+        " var values=[]; for(var i=0;i<args.length;i++) values.push(__clipDeckConsoleText(args[i]));"
+        " __clipDeckConsole.push(level+'  '+values.join(' '));"
+        "}"
+        "var console={"
+        " log:function(){__clipDeckConsolePush('LOG',arguments);},"
+        " info:function(){__clipDeckConsolePush('INFO',arguments);},"
+        " warn:function(){__clipDeckConsolePush('WARN',arguments);},"
+        " error:function(){__clipDeckConsolePush('ERROR',arguments);},"
+        " debug:function(){__clipDeckConsolePush('DEBUG',arguments);}"
+        "};"));
+    const auto collectConsole = [&] {
+        if (!consoleOutput) return;
+        const QJSValue entries = engine.globalObject().property(QStringLiteral("__clipDeckConsole"));
+        const int length = entries.property(QStringLiteral("length")).toInt();
+        for (int index = 0; index < length; ++index) {
+            consoleOutput->append(entries.property(index).toString());
+        }
+    };
     const QJSValue evaluation = engine.evaluate(script, QStringLiteral("category-script"));
     if (evaluation.isError()) {
+        collectConsole();
         if (error) {
             *error = QStringLiteral("第 %1 行：%2")
                 .arg(evaluation.property(QStringLiteral("lineNumber")).toInt())
@@ -680,6 +959,7 @@ bool HistoryRepository::categoryScriptMatches(const QString &script, const QStri
     }
     QJSValue classify = engine.globalObject().property(QStringLiteral("classify"));
     if (!classify.isCallable()) {
+        collectConsole();
         if (error) *error = QStringLiteral("脚本必须定义 classify(item) 函数");
         return false;
     }
@@ -700,6 +980,7 @@ bool HistoryRepository::categoryScriptMatches(const QString &script, const QStri
         item.setProperty(QStringLiteral("codeScore"), score);
     }
     const QJSValue result = classify.call(QJSValueList{item});
+    collectConsole();
     if (result.isError()) {
         if (error) *error = result.toString();
         return false;
@@ -862,11 +1143,13 @@ ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query) {
     item.sourceName = query.value(12).toString();
     item.sourceIconData = query.value(13).toByteArray();
     if (!item.sourceIconData.isEmpty()) item.sourceIcon.loadFromData(item.sourceIconData, "PNG");
-    item.category = query.value(14).toString();
-    item.copiedAt = QDateTime::fromMSecsSinceEpoch(query.value(15).toLongLong());
-    item.copyCount = query.value(16).toInt();
-    item.previewLanguage = query.value(17).toString();
-    item.categoryIcon = query.value(18).toString();
+    item.sourceIconVariantsData = query.value(14).toByteArray();
+    item.category = query.value(15).toString();
+    item.copiedAt = QDateTime::fromMSecsSinceEpoch(query.value(16).toLongLong());
+    item.copyCount = query.value(17).toInt();
+    item.previewLanguage = query.value(18).toString();
+    item.categoryIcon = query.value(19).toString();
+    item.imageAngle = ((query.value(20).toInt() % 360) + 360) % 360;
     return item;
 }
 

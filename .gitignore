@@ -4,3 +4,6 @@ DerivedData/
 *.xcuserstate
 .DS_Store
 /artifacts/
+/script-editor/node_modules/
+/linux/build/
+/mac/dist/

@@ -1,0 +1,35 @@
+:root {
+  color-scheme: light dark;
+  --editor-background: #ffffff;
+  --editor-foreground: #202124;
+  --editor-secondary: #6e6e73;
+  --editor-line-number: #8a8a8e;
+  --editor-active-line: rgba(0, 122, 255, 0.07);
+  --editor-selection: rgba(0, 122, 255, 0.28);
+  --editor-caret: #0057d9;
+  --editor-tooltip: #ffffff;
+  --editor-border: #d2d2d7;
+}
+
+:root[data-theme="dark"] {
+  --editor-background: #1e1e20;
+  --editor-foreground: #e8e8ea;
+  --editor-secondary: #a1a1a6;
+  --editor-line-number: #77777d;
+  --editor-active-line: rgba(70, 156, 255, 0.10);
+  --editor-selection: rgba(25, 131, 255, 0.38);
+  --editor-caret: #ffd60a;
+  --editor-tooltip: #29292c;
+  --editor-border: #454549;
+}
+
+html, body, #editor {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--editor-background);
+}
+
+body { font-size: 13px; }
+*:focus { outline: none; }

@@ -30,6 +30,8 @@
 		A10000000000000000000016 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* AppPreferences.swift */; };
 		A10000000000000000000017 /* LaunchAtLoginController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* LaunchAtLoginController.swift */; };
 		A10000000000000000000018 /* clipdeck.svg in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001A /* clipdeck.svg */; };
+		A10000000000000000000019 /* ScriptEditorWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001B /* ScriptEditorWebView.swift */; };
+		A1000000000000000000001A /* script-editor in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001C /* script-editor */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,7 +52,7 @@
 		B1000000000000000000000F /* HistoryRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Persistence/HistoryRepository.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000010 /* ClassificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Services/ClassificationService.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000011 /* CategoryManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/UI/CategoryManagementView.swift; sourceTree = SOURCE_ROOT; };
-		B10000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = ../shared/assets/Assets.xcassets; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000013 /* CodeHighlightService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Services/CodeHighlightService.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000014 /* highlight.min.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Sources/ClipDeck/Resources/highlight.min.js; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000015 /* highlight-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = Sources/ClipDeck/Resources/highlight-LICENSE.txt; sourceTree = SOURCE_ROOT; };
@@ -58,7 +60,9 @@
 		B10000000000000000000017 /* DefaultCategoryScripts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Persistence/DefaultCategoryScripts.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000018 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/App/AppPreferences.swift; sourceTree = SOURCE_ROOT; };
 		B10000000000000000000019 /* LaunchAtLoginController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/App/LaunchAtLoginController.swift; sourceTree = SOURCE_ROOT; };
-		B1000000000000000000001A /* clipdeck.svg */ = {isa = PBXFileReference; lastKnownFileType = image.svg; path = Sources/ClipDeck/Resources/clipdeck.svg; sourceTree = SOURCE_ROOT; };
+		B1000000000000000000001A /* clipdeck.svg */ = {isa = PBXFileReference; lastKnownFileType = image.svg; name = clipdeck.svg; path = ../shared/assets/clipdeck.svg; sourceTree = SOURCE_ROOT; };
+		B1000000000000000000001B /* ScriptEditorWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/UI/ScriptEditorWebView.swift; sourceTree = SOURCE_ROOT; };
+		B1000000000000000000001C /* script-editor */ = {isa = PBXFileReference; explicitFileType = folder; name = "script-editor"; path = "../script-editor/dist"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +104,7 @@
 				B1000000000000000000000F /* HistoryRepository.swift */,
 				B10000000000000000000010 /* ClassificationService.swift */,
 				B10000000000000000000011 /* CategoryManagementView.swift */,
+				B1000000000000000000001B /* ScriptEditorWebView.swift */,
 				B10000000000000000000014 /* highlight.min.js */,
 				B10000000000000000000015 /* highlight-LICENSE.txt */,
 				B10000000000000000000016 /* ClipboardColorParser.swift */,
@@ -171,6 +176,7 @@
 				A10000000000000000000012 /* highlight.min.js in Resources */,
 				A10000000000000000000013 /* highlight-LICENSE.txt in Resources */,
 				A10000000000000000000018 /* clipdeck.svg in Resources */,
+				A1000000000000000000001A /* script-editor in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -200,6 +206,7 @@
 				A10000000000000000000015 /* DefaultCategoryScripts.swift in Sources */,
 				A10000000000000000000016 /* AppPreferences.swift in Sources */,
 				A10000000000000000000017 /* LaunchAtLoginController.swift in Sources */,
+				A10000000000000000000019 /* ScriptEditorWebView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -234,7 +241,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 4;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -257,7 +264,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 4;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;

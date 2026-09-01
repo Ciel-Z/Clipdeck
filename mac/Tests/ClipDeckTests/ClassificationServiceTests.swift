@@ -107,6 +107,30 @@ final class ClassificationServiceTests: XCTestCase {
         XCTAssertTrue(formatted.contains("return false;"))
     }
 
+    func testScriptConsoleOutputIsCapturedInOrderWithLevels() {
+        let result = ClassificationService.test(
+            script: #"""
+                function classify(item) {
+                    console.info("length", item.textLength);
+                    console.log({ source: item.sourceApplication.name });
+                    console.warn("check", true);
+                    console.error("sample error");
+                    return true;
+                }
+                """#,
+            text: "hello"
+        )
+
+        XCTAssertTrue(result.matches)
+        XCTAssertNil(result.error)
+        XCTAssertEqual(result.console, [
+            .init(level: .info, message: "length 5"),
+            .init(level: .log, message: #"{"source":"脚本测试"}"#),
+            .init(level: .warn, message: "check true"),
+            .init(level: .error, message: "sample error"),
+        ])
+    }
+
     func testDefaultPresetSetAndNewLanguageClassification() throws {
         let repository = try makeRepository()
         try repository.ensureDefaultCategories()

@@ -13,6 +13,7 @@ final class CategoryManager: ObservableObject {
     @Published var previewLanguage = "text"
     @Published var testText = ""
     @Published var testResult: String?
+    @Published var testConsole: [ClassificationService.ConsoleEntry] = []
     @Published var errorMessage: String?
     @Published var databaseByteCount: Int64 = 0
     @Published var maintenanceStatus: String?
@@ -53,6 +54,7 @@ final class CategoryManager: ObservableObject {
         script = item.script
         previewLanguage = item.previewLanguage ?? "text"
         testResult = nil
+        testConsole = []
         errorMessage = item.lastErrorMessage
     }
 
@@ -143,6 +145,8 @@ final class CategoryManager: ObservableObject {
         let script = script
         let text = testText
         let previewLanguage = previewLanguage
+        testResult = nil
+        testConsole = []
         Task {
             let result = await Task.detached {
                 ClassificationService.test(
@@ -151,6 +155,7 @@ final class CategoryManager: ObservableObject {
                     previewLanguage: previewLanguage
                 )
             }.value
+            testConsole = result.console
             testResult = result.error.map { "错误：\($0)" } ?? (result.matches ? "匹配：true" : "匹配：false")
         }
     }
@@ -264,6 +269,7 @@ private struct CategoryManagementView: View {
     @State private var confirmsShortcutReset = false
     @State private var confirmsPresetRestore = false
     @State private var draggedCategoryID: Int64?
+    @State private var isScriptEditorExpanded = false
     @AppStorage(PasteService.preserveFormattingKey) private var preserveFormatting = false
     @AppStorage(AppPreferences.retentionDaysKey) private var retentionDays = 30
     @AppStorage(AppPreferences.recordsImagesKey) private var recordsImages = true
@@ -391,6 +397,9 @@ private struct CategoryManagementView: View {
             Button("还原预制分类") { manager.restorePresets() }
         } message: {
             Text("缺失的预制分类会被重新创建，同名预制分类的图标、规则和预览语言会恢复默认；其他自建分类会保留。")
+        }
+        .sheet(isPresented: $isScriptEditorExpanded) {
+            ExpandedJavaScriptEditor(manager: manager)
         }
     }
 
@@ -1042,14 +1051,41 @@ private struct CategoryManagementView: View {
                             Spacer()
                             Button("格式化", action: manager.formatScript)
                                 .buttonStyle(.bordered)
+                            Button {
+                                isScriptEditorExpanded = true
+                            } label: {
+                                Label("展开编辑", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .buttonStyle(.bordered)
                         }
                         .padding(.horizontal, 16)
                         .frame(height: 48)
 
                         Divider().padding(.leading, 16)
 
-                        SyntaxTextEditor(text: $manager.script, language: "javascript")
-                            .frame(minHeight: 230)
+                        ScriptEditorWebView(
+                            text: $manager.script,
+                            onSave: manager.save,
+                            onRun: manager.testScript,
+                            onFormat: manager.formatScript
+                        )
+                        .frame(minHeight: 280)
+
+                        Divider().padding(.leading, 16)
+
+                        HStack(spacing: 8) {
+                            Text("⌘/ 注释")
+                            Text("·")
+                            Text("Tab 缩进")
+                            Spacer()
+                            Text("\(scriptLineCount) 行")
+                            Text("·")
+                            Text("\(manager.script.count) 个字符")
+                        }
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
                     }
                 }
 
@@ -1066,15 +1102,23 @@ private struct CategoryManagementView: View {
                         HStack {
                             Button("测试脚本", action: manager.testScript)
                                 .buttonStyle(.bordered)
-                            if let result = manager.testResult {
-                                Text(result)
-                                    .font(.system(size: 12.5, weight: .medium))
-                                    .foregroundStyle(result.hasPrefix("错误") ? .red : .secondary)
-                            }
                             Spacer()
                         }
                         .padding(.horizontal, 16)
                         .frame(height: 50)
+
+                        if manager.testResult != nil || !manager.testConsole.isEmpty {
+                            Divider().padding(.leading, 16)
+                            ScrollView {
+                                ScriptTestOutputView(
+                                    entries: manager.testConsole,
+                                    outcome: manager.testResult
+                                )
+                                .padding(12)
+                            }
+                            .frame(maxHeight: 150)
+                            .background(Color(nsColor: .textBackgroundColor).opacity(0.28))
+                        }
                     }
                 }
 
@@ -1096,6 +1140,10 @@ private struct CategoryManagementView: View {
             .frame(maxWidth: 820)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+    }
+
+    private var scriptLineCount: Int {
+        max(1, manager.script.split(separator: "\n", omittingEmptySubsequences: false).count)
     }
 
     private func settingsSection<Content: View>(
@@ -1284,6 +1332,236 @@ private enum ShortcutFormatter {
     }
 }
 
+private struct ExpandedJavaScriptEditor: View {
+    @ObservedObject var manager: CategoryManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var initialScript: String
+
+    init(manager: CategoryManager) {
+        self.manager = manager
+        _initialScript = State(initialValue: manager.script)
+    }
+
+    private var lineCount: Int {
+        max(1, manager.script.split(separator: "\n", omittingEmptySubsequences: false).count)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(manager.name) · JavaScript 分类规则")
+                        .font(.system(size: 17, weight: .semibold))
+                    Text("编辑分类规则并使用右侧样本验证结果")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("取消") {
+                    manager.script = initialScript
+                    dismiss()
+                }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存并完成") {
+                    manager.save()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("s", modifiers: .command)
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 62)
+            .background(.bar)
+
+            Divider()
+
+            HSplitView {
+                VStack(spacing: 0) {
+                    HStack {
+                        Label("分类脚本", systemImage: "curlybraces")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("格式化", action: manager.formatScript)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .keyboardShortcut("f", modifiers: [.command, .shift])
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 42)
+
+                    Divider()
+
+                    ScriptEditorWebView(
+                        text: $manager.script,
+                        autofocus: true,
+                        onSave: manager.save,
+                        onRun: manager.testScript,
+                        onFormat: manager.formatScript
+                    )
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.42))
+
+                    Divider()
+
+                    HStack(spacing: 8) {
+                        Text("⌘/ 注释")
+                        Text("·")
+                        Text("Tab / ⇧Tab 缩进")
+                        Text("·")
+                        Text("⇧⌘F 格式化")
+                        Spacer()
+                        Text("\(lineCount) 行")
+                        Text("·")
+                        Text("\(manager.script.count) 个字符")
+                    }
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                }
+                .frame(minWidth: 560)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text("规则测试")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Button("运行测试", action: manager.testScript)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .keyboardShortcut(.return, modifiers: .command)
+                    }
+                        .padding(.horizontal, 14)
+                        .frame(height: 42)
+
+                    Divider()
+
+                    TextEditor(text: $manager.testText)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .frame(height: 160)
+                        .padding(8)
+
+                    Divider()
+
+                    HStack {
+                        Text("控制台输出")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+
+                    ScrollView {
+                        ScriptTestOutputView(
+                            entries: manager.testConsole,
+                            outcome: manager.testResult
+                        )
+                        .padding(12)
+                    }
+                    .frame(height: 124)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.28))
+
+                    Divider()
+
+                    Text("item 可用字段")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 14)
+                        .frame(height: 42)
+
+                    Divider()
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            JavaScriptFieldRow(name: "text", detail: "复制的文本内容")
+                            JavaScriptFieldRow(name: "textLength", detail: "文本字符数")
+                            JavaScriptFieldRow(name: "sourceApplication.bundleId", detail: "来源应用标识")
+                            JavaScriptFieldRow(name: "sourceApplication.name", detail: "来源应用名称")
+                            JavaScriptFieldRow(name: "copiedAt", detail: "毫秒时间戳")
+                            if manager.previewLanguage == "code" {
+                                JavaScriptFieldRow(name: "detectedLanguage", detail: "识别的代码语言")
+                                JavaScriptFieldRow(name: "codeScore", detail: "代码识别分数")
+                                JavaScriptFieldRow(name: "codeEngineMatched", detail: "是否识别为代码")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                    }
+                }
+                .frame(minWidth: 270, idealWidth: 300, maxWidth: 360)
+            }
+        }
+        .frame(minWidth: 900, minHeight: 620)
+    }
+}
+
+private struct JavaScriptFieldRow: View {
+    let name: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("item.\(name)")
+                .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                .textSelection(.enabled)
+            Text(detail)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ScriptTestOutputView: View {
+    let entries: [ClassificationService.ConsoleEntry]
+    let outcome: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if entries.isEmpty, outcome == nil {
+                Label("等待测试", systemImage: "circle.dashed")
+                    .foregroundStyle(.tertiary)
+            }
+
+            ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(entry.level.rawValue.uppercased())
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(color(for: entry.level))
+                        .frame(width: 38, alignment: .leading)
+                    Text(entry.message.isEmpty ? "（空）" : entry.message)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if let outcome {
+                Divider()
+                Label(
+                    outcome,
+                    systemImage: outcome.hasPrefix("错误")
+                        ? "xmark.circle.fill"
+                        : (outcome.contains("true") ? "checkmark.circle.fill" : "minus.circle.fill")
+                )
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(outcome.hasPrefix("错误") ? .red : .secondary)
+                .textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func color(for level: ClassificationService.ConsoleEntry.Level) -> Color {
+        switch level {
+        case .warn: .orange
+        case .error: .red
+        case .info: .blue
+        case .debug: .purple
+        case .log: .secondary
+        }
+    }
+}
+
 enum JavaScriptFormatter {
     private enum Mode {
         case code
@@ -1459,12 +1737,15 @@ struct SyntaxTextEditor: NSViewRepresentable {
     let language: String
     var fontSize: CGFloat = 13
     var autofocus = false
+    var showsLineNumbers = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         let textView = SyntaxEditorTextView()
@@ -1476,8 +1757,25 @@ struct SyntaxTextEditor: NSViewRepresentable {
         textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.textContainerInset = NSSize(width: 10, height: 10)
         textView.drawsBackground = false
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
         textView.string = text
         scrollView.documentView = textView
+        if showsLineNumbers {
+            scrollView.hasVerticalRuler = true
+            scrollView.rulersVisible = true
+            scrollView.verticalRulerView = LineNumberRulerView(textView: textView)
+        }
         context.coordinator.highlight(textView)
         if autofocus {
             DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
@@ -1486,6 +1784,7 @@ struct SyntaxTextEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.update(self)
         guard let textView = scrollView.documentView as? NSTextView, textView.string != text else { return }
         textView.string = text
         context.coordinator.highlight(textView)
@@ -1500,6 +1799,10 @@ struct SyntaxTextEditor: NSViewRepresentable {
         private var isApplyingHighlight = false
 
         init(_ parent: SyntaxTextEditor) { self.parent = parent }
+
+        func update(_ parent: SyntaxTextEditor) {
+            self.parent = parent
+        }
 
         func textDidChange(_ notification: Notification) {
             guard !isApplyingHighlight, let textView = notification.object as? NSTextView else { return }
@@ -1536,7 +1839,30 @@ private final class SyntaxEditorTextView: NSTextView {
             selectAll(nil)
             return
         }
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers == .command, event.charactersIgnoringModifiers == "/" {
+            toggleLineComments()
+            return
+        }
+        if event.keyCode == UInt16(kVK_Tab), modifiers == [] || modifiers == .shift {
+            changeIndent(outdent: modifiers == .shift)
+            return
+        }
         super.keyDown(with: event)
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        let source = string as NSString
+        let selection = selectedRange()
+        let lineRange = source.lineRange(for: NSRange(location: selection.location, length: 0))
+        let line = source.substring(with: lineRange)
+        let indentation = String(line.prefix { $0 == " " || $0 == "\t" })
+        let beforeCursor = source.substring(with: NSRange(
+            location: lineRange.location,
+            length: max(0, selection.location - lineRange.location)
+        )).trimmingCharacters(in: .whitespacesAndNewlines)
+        let extraIndent = beforeCursor.hasSuffix("{") ? "    " : ""
+        insertText("\n\(indentation)\(extraIndent)", replacementRange: selection)
     }
 
     private func isSelectAllShortcut(_ event: NSEvent) -> Bool {
@@ -1545,12 +1871,165 @@ private final class SyntaxEditorTextView: NSTextView {
             && modifiers == .command
             && event.charactersIgnoringModifiers?.lowercased() == "a"
     }
+
+    private func changeIndent(outdent: Bool) {
+        let source = string as NSString
+        let selection = selectedRange()
+        if selection.length == 0, !outdent {
+            insertText("    ", replacementRange: selection)
+            return
+        }
+
+        let lines = source.lineRange(for: selection)
+        var replacement = source.substring(with: lines)
+        if outdent {
+            replacement = replacement.replacingOccurrences(
+                of: #"(?m)^( {1,4}|\t)"#,
+                with: "",
+                options: .regularExpression
+            )
+        } else {
+            replacement = replacement.replacingOccurrences(
+                of: #"(?m)^"#,
+                with: "    ",
+                options: .regularExpression
+            )
+        }
+        insertText(replacement, replacementRange: lines)
+        setSelectedRange(NSRange(location: lines.location, length: replacement.utf16.count))
+    }
+
+    private func toggleLineComments() {
+        let source = string as NSString
+        let lines = source.lineRange(for: selectedRange())
+        let original = source.substring(with: lines)
+        let values = original.components(separatedBy: "\n")
+        let nonEmpty = values.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let shouldUncomment = !nonEmpty.isEmpty && nonEmpty.allSatisfy {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("//")
+        }
+        let changed = values.map { line -> String in
+            guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { return line }
+            let indentation = String(line.prefix { $0 == " " || $0 == "\t" })
+            let content = String(line.dropFirst(indentation.count))
+            if shouldUncomment {
+                let uncommented = content.dropFirst(2)
+                return indentation + (uncommented.first == " " ? String(uncommented.dropFirst()) : String(uncommented))
+            }
+            return indentation + "// " + content
+        }.joined(separator: "\n")
+        insertText(changed, replacementRange: lines)
+        setSelectedRange(NSRange(location: lines.location, length: changed.utf16.count))
+    }
+}
+
+private final class LineNumberRulerView: NSRulerView {
+    private weak var textView: NSTextView?
+
+    init(textView: NSTextView) {
+        self.textView = textView
+        super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
+        clientView = textView
+        ruleThickness = 42
+        textView.enclosingScrollView?.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(invalidateRuler),
+            name: NSText.didChangeNotification,
+            object: textView
+        )
+        if let clipView = textView.enclosingScrollView?.contentView {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(invalidateRuler),
+                name: NSView.boundsDidChangeNotification,
+                object: clipView
+            )
+        }
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func invalidateRuler(_ notification: Notification) {
+        needsDisplay = true
+    }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard let textView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer,
+              let scrollView = textView.enclosingScrollView else { return }
+
+        NSColor.textBackgroundColor.withAlphaComponent(0.28).setFill()
+        rect.fill()
+
+        let source = textView.string as NSString
+        let visibleRect = scrollView.contentView.bounds
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
+        let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+
+        var lineNumber = 1
+        var lineStart = 0
+        while lineStart < min(characterRange.location, source.length) {
+            lineStart = NSMaxRange(source.lineRange(for: NSRange(location: lineStart, length: 0)))
+            lineNumber += 1
+        }
+
+        let upperBound = min(source.length, NSMaxRange(characterRange) + 1)
+        repeat {
+            let location = min(lineStart, source.length)
+            let glyphIndex = location < source.length
+                ? layoutManager.glyphIndexForCharacter(at: location)
+                : layoutManager.numberOfGlyphs
+            var y = textView.textContainerInset.height
+            if glyphIndex < layoutManager.numberOfGlyphs {
+                y += layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil).minY
+            } else if layoutManager.numberOfGlyphs > 0 {
+                let last = layoutManager.lineFragmentRect(
+                    forGlyphAt: layoutManager.numberOfGlyphs - 1,
+                    effectiveRange: nil
+                )
+                y += last.maxY
+            }
+            y -= visibleRect.minY
+            let label = "\(lineNumber)" as NSString
+            let size = label.size(withAttributes: attributes)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 8, y: y), withAttributes: attributes)
+
+            guard lineStart < source.length else { break }
+            let next = NSMaxRange(source.lineRange(for: NSRange(location: lineStart, length: 0)))
+            guard next > lineStart else { break }
+            lineStart = next
+            lineNumber += 1
+        } while lineStart <= upperBound
+    }
 }
 
 @MainActor
 final class CategorySettingsController: NSWindowController {
     var isVisible: Bool { window?.isVisible == true }
+    var ownsFocusedWindow: Bool {
+        guard NSApp.isActive, let settingsWindow = window, var focusedWindow = NSApp.keyWindow else {
+            return false
+        }
+        while let parent = focusedWindow.sheetParent {
+            focusedWindow = parent
+        }
+        return focusedWindow === settingsWindow
+    }
     private let navigation: SettingsNavigation
+    private weak var deckReturnWindow: NSWindow?
+    private weak var deckReturnResponder: NSResponder?
 
     init(repository: HistoryRepository, onChange: @escaping () -> Void) {
         let navigation = SettingsNavigation()
@@ -1585,5 +2064,32 @@ final class CategorySettingsController: NSWindowController {
 
     func hide() {
         window?.orderOut(nil)
+    }
+
+    func rememberFocusForDeck() {
+        guard ownsFocusedWindow, let focusedWindow = NSApp.keyWindow else { return }
+        deckReturnWindow = focusedWindow
+        deckReturnResponder = focusedWindow.firstResponder
+    }
+
+    func restoreFocusAndPaste() {
+        guard let settingsWindow = window, settingsWindow.isVisible else { return }
+        let targetWindow = deckReturnWindow?.isVisible == true ? deckReturnWindow : settingsWindow
+        let previousResponder = deckReturnResponder ?? targetWindow?.firstResponder
+        deckReturnWindow = nil
+        deckReturnResponder = nil
+        NSApp.activate()
+        targetWindow?.makeKeyAndOrderFront(nil)
+        if let previousResponder {
+            targetWindow?.makeFirstResponder(previousResponder)
+        }
+        DispatchQueue.main.async { [weak targetWindow, weak previousResponder] in
+            guard let targetWindow, targetWindow.isKeyWindow else { return }
+            if let previousResponder,
+               previousResponder.tryToPerform(#selector(NSText.paste(_:)), with: nil) {
+                return
+            }
+            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+        }
     }
 }

@@ -5,6 +5,7 @@
 #include <QImage>
 #include <QSqlDatabase>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 enum class ClipboardPayloadType {
@@ -23,9 +24,11 @@ struct ClipboardItem {
     bool hasFetchedLinkPreview = false;
     QByteArray imageData;
     QImage image;
+    int imageAngle = 0;
     QString sourceID;
     QString sourceName;
     QByteArray sourceIconData;
+    QByteArray sourceIconVariantsData;
     QImage sourceIcon;
     QString category;
     QString categoryIcon;
@@ -56,10 +59,12 @@ public:
     ClipboardItem save(const ClipboardItem &item);
     QVector<ClipboardItem> fetch(const QString &category = QString(),
                                  const QString &search = QString(),
-                                 int limit = 300) const;
+                                 int limit = 300,
+                                 int offset = 0) const;
     bool updateTitle(qint64 id, const QString &title);
     bool updateText(qint64 id, const QString &text, const QString &category);
     bool updateImage(qint64 id, const QByteArray &pngData, const QImage &image);
+    bool updateImageAngle(qint64 id, int angle);
     bool updateLinkMetadata(qint64 id, const QString &title, const QByteArray &iconData,
                             const QByteArray &previewData);
     bool remove(qint64 id);
@@ -82,13 +87,15 @@ public:
     QString categoryScriptError(const QString &script) const;
     bool categoryScriptMatches(const QString &script, const QString &text,
                                const QString &previewLanguage,
-                               QString *error = nullptr) const;
+                               QString *error = nullptr,
+                               QStringList *consoleOutput = nullptr) const;
     static QString detectedCodeLanguage(const QString &text, int *score = nullptr);
 
     static QStringList presetCategories();
 
 private:
     bool initialize();
+    bool collapseRecentDuplicates();
     static QByteArray contentHash(const ClipboardItem &item);
     static ClipboardItem itemFromQuery(const class QSqlQuery &query);
     bool execute(const QString &sql) const;
