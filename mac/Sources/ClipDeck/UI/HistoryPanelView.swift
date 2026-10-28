@@ -1499,6 +1499,19 @@ enum ImageRotation {
 struct ContentPreviewView: View {
     let item: ClipboardItem
 
+    private var previewSize: CGSize {
+        switch item.payload {
+        case .text:
+            return ContentPreviewLayout.textSize
+        case let .image(_, width, height, _):
+            return ContentPreviewLayout.imageSize(
+                pixelWidth: width,
+                pixelHeight: height,
+                angle: item.imageAngle
+            )
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -1538,11 +1551,38 @@ struct ContentPreviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(width: 560, height: 360)
+        .frame(width: previewSize.width, height: previewSize.height)
     }
 
     private var categoryName: String {
         item.category?.name ?? (item.payload.isText ? "文本" : "图片")
+    }
+}
+
+enum ContentPreviewLayout {
+    static let textSize = CGSize(width: 560, height: 360)
+
+    private static let minimumPopoverSize = CGSize(width: 360, height: 300)
+    private static let maximumImageViewportSize = CGSize(width: 512, height: 270)
+    private static let horizontalChrome: CGFloat = 48
+    private static let verticalChrome: CGFloat = 135
+
+    static func imageSize(pixelWidth: Int, pixelHeight: Int, angle: Int) -> CGSize {
+        guard pixelWidth > 0, pixelHeight > 0 else { return textSize }
+
+        let quarterTurn = !angle.isMultiple(of: 180)
+        let width = CGFloat(quarterTurn ? pixelHeight : pixelWidth)
+        let height = CGFloat(quarterTurn ? pixelWidth : pixelHeight)
+        let scale = min(
+            maximumImageViewportSize.width / width,
+            maximumImageViewportSize.height / height
+        )
+        let viewport = CGSize(width: width * scale, height: height * scale)
+
+        return CGSize(
+            width: max(minimumPopoverSize.width, viewport.width + horizontalChrome),
+            height: max(minimumPopoverSize.height, viewport.height + verticalChrome)
+        )
     }
 }
 

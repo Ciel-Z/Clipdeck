@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="mac/Assets.xcassets/AppIcon.appiconset/icon-256.png" width="128" height="128" alt="ClipDeck 图标">
+  <img src="shared/assets/Assets.xcassets/AppIcon.appiconset/icon-256.png" width="128" height="128" alt="ClipDeck 图标">
 </p>
 
 
 <h1 align="center">ClipDeck</h1>
 
 <p align="center">
-  原生 macOS 剪贴板历史工具，以横向卡片 Deck 让复制、查找和粘贴保持顺畅。
+  面向 macOS 与 Linux / UOS 的剪贴板历史工具，以横向卡片 Deck 让复制、查找和粘贴保持顺畅。
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 
 <p align="center"><sub>真实应用界面渲染；卡片文字、链接、代码与颜色均为虚拟演示内容。</sub></p>
 
-ClipDeck 是一款原生 macOS 剪贴板历史工具。它以屏幕底部的横向卡片 Deck 呈现最近复制的内容，在保留快速搜索、预览和键盘粘贴体验的同时，针对代码、链接和颜色等内容提供自动识别与专属展示。
+ClipDeck 提供原生 macOS 客户端和 Qt Linux / UOS 客户端。它以屏幕底部的横向卡片 Deck 呈现最近复制的内容，并针对代码、链接和颜色等内容提供自动识别与专属展示。下文以 macOS 操作为主，Linux 快捷键与安装说明见 [Linux README](linux/README.md)。
 
 所有剪贴板历史、图片和分类配置均保存在本机，不依赖云端服务。
 
@@ -52,9 +52,9 @@ ClipDeck 是一款原生 macOS 剪贴板历史工具。它以屏幕底部的横�
 
 - 保存文本、RTF 富文本和图片
 - SQLite + GRDB 持久化，使用 FTS5 提供全文搜索
-- 自动合并短时间内重复复制的内容
+- 使用 SHA-256 和数据库索引合并近 24 小时内重复复制的内容
 - 支持删除单项、清空历史和历史过期清理
-- 可输入历史保留天数
+- 按最近一次复制时间计算保留期限，缩短期限时提示确认
 - 提供图片文件大小与最大像素保护
 - 应用退出并重新启动后仍可恢复历史记录
 
@@ -81,7 +81,9 @@ ClipDeck 是一款原生 macOS 剪贴板历史工具。它以屏幕底部的横�
 
 - 分类新增、编辑、删除和排序
 - JavaScript 规则语法高亮与格式化
+- 公共 CodeMirror 6 编辑器，支持补全、自动缩进、Tab 缩进与注释快捷键
 - 测试文本和规则即时验证
+- 测试结果显示 `console.log/info/warn/error/debug` 输出
 - 删除前确认
 - 系统预制分类一键还原
 
@@ -105,7 +107,8 @@ ClipDeck 使用可支持自定义的分类检测，并本地内置的 highlight.
 ### 内容专属展示
 
 - 链接：异步获取网页标题、站点图标和域名，失败时自动降级
-- 图片：透明棋盘背景、完整缩放预览，支持向左或向右旋转
+- 图片：透明棋盘背景、完整缩放预览，支持向左或向右旋转；macOS 预览框按宽高比动态调整，并限制最大尺寸
+- macOS 图片复制：兼容同时包含图片数据与文件 URL、仅图片文件 URL，以及 JPEG、HEIC、WebP 等图片表示
 - 颜色：识别 Hex、RGB 和 RGBA，并以实际颜色填充卡片
 - 文本：支持直接编辑、重命名、复制、预览和删除
 - 图片与颜色卡片采用沉浸式头部，不遮挡主要内容
@@ -116,6 +119,7 @@ ClipDeck 使用可支持自定义的分类检测，并本地内置的 highlight.
 - 右键菜单支持粘贴、纯文本粘贴、复制、编辑、重命名、预览和删除
 - Command + E 编辑文本
 - Command + R 重命名标题
+- Command + O 使用默认浏览器访问链接，Command + Delete 删除选中卡片
 - 空格键显示悬浮预览，不关闭 Deck
 - 切换卡片或完成粘贴时自动关闭预览
 
@@ -124,14 +128,16 @@ ClipDeck 使用可支持自定义的分类检测，并本地内置的 highlight.
 - macOS 14 或更高版本
 - Apple Silicon 或 Intel Mac
 - Xcode 16 或兼容 Swift 6 的开发环境（从源码构建时）
+- Linux：UOS 20 AMD64 / X11，构建与离线安装方式见 [Linux README](linux/README.md)
 
 ## 从源码运行
 
-克隆仓库后，可使用 Xcode 打开 `ClipDeck.xcodeproj`，选择 `ClipDeck` Scheme 后直接运行。
+克隆仓库后，可使用 Xcode 打开 `mac/ClipDeck.xcodeproj`，选择 `ClipDeck` Scheme 后直接运行。
 
 也可以使用命令行：
 
 ```bash
+cd mac
 swift build
 swift run ClipDeck
 ```
@@ -139,8 +145,24 @@ swift run ClipDeck
 运行测试：
 
 ```bash
+cd mac
 swift test
 ```
+
+Linux 在仓库根目录通过 Docker 构建：
+
+```bash
+bash linux/scripts/build-linux.sh
+```
+
+## 公共目录
+
+- `mac/`：Swift / AppKit / SwiftUI 客户端与测试
+- `linux/`：Qt 客户端、X11 剪贴板读取、后台历史处理与 Debian 打包脚本
+- `script-editor/`：两端共用的 CodeMirror 6 编辑器，通过 WebView 桥接宿主
+- `shared/assets/`：共用 SVG、应用图标 PNG 与 Xcode 资源目录
+
+编辑公共编辑器后，在 `script-editor/` 中执行 `npm ci`、`npm run check` 和 `npm run build`；生成的 `dist/` 随客户端离线打包。
 
 ## 技术实现
 
@@ -151,7 +173,7 @@ swift test
 - highlight.js（随应用本地打包，不从网络加载）
 - Carbon 全局快捷键
 
-更详细的实现约束与开发说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+macOS 运行说明见 [RUNNING.md](mac/RUNNING.md)，更新说明见 [CHANGELOG.md](mac/CHANGELOG.md)。Linux 使用独立的 X11 读取线程与后台历史处理队列，在界面线程之外完成剪贴板读取、持久化和来源应用识别，并按需加载完整卡片内容。
 
 ## 隐私
 
@@ -163,4 +185,4 @@ ClipDeck 的历史内容默认仅保存在本机数据库中。应用不会上�
 
 ## License
 
-ClipDeck 使用 [MIT License](LICENSE) 开源。
+macOS 客户端使用 [MIT License](mac/LICENSE) 开源。

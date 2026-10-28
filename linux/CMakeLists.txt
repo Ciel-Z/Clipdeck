@@ -11,15 +11,25 @@ set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
 find_package(Qt5 5.11 REQUIRED COMPONENTS Core Gui Widgets Network Sql Qml X11Extras WebEngine WebEngineWidgets)
 find_package(X11 REQUIRED)
 find_library(XTST_LIBRARY Xtst)
+find_library(XCB_LIBRARY xcb)
 
-if(NOT XTST_LIBRARY)
-  message(FATAL_ERROR "libXtst was not found")
+if(NOT XTST_LIBRARY OR NOT XCB_LIBRARY)
+  message(FATAL_ERROR "libXtst and libxcb are required")
 endif()
 
 add_executable(clipdeck-linux
   src/main.cpp
   src/history_repository.cpp
   src/history_repository.h
+  src/history/clipboard_pipeline.cpp
+  src/history/clipboard_pipeline.h
+  src/history/clipboard_snapshot.h
+  src/history/clipboard_pipeline_tests.cpp
+  src/history/clipboard_pipeline_tests.h
+  src/platform/application_source.cpp
+  src/platform/application_source.h
+  src/platform/x11_clipboard_reader.cpp
+  src/platform/x11_clipboard_reader.h
   src/platform/x11_global_shortcut.cpp
   src/platform/x11_global_shortcut.h
   src/platform/linux_application_icon.cpp
@@ -46,6 +56,7 @@ target_link_libraries(clipdeck-linux PRIVATE
   Qt5::WebEngineWidgets
   ${X11_LIBRARIES}
   ${XTST_LIBRARY}
+  ${XCB_LIBRARY}
 )
 
 install(TARGETS clipdeck-linux

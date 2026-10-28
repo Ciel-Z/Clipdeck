@@ -1,4 +1,6 @@
 #include "history_repository.h"
+#include "history/clipboard_pipeline.h"
+#include "history/clipboard_pipeline_tests.h"
 #include "platform/linux_application_icon.h"
 #include "platform/x11_global_shortcut.h"
 #include "ui/display_scale.h"
@@ -18,6 +20,8 @@
 #include <QDateTime>
 #include <QDesktopWidget>
 #include <QDesktopServices>
+#include <QEventLoop>
+#include <QElapsedTimer>
 #include <QDebug>
 #include <QDialog>
 #include <QDir>
@@ -56,6 +60,7 @@
 #include <QRegion>
 #include <QRegularExpression>
 #include <QScreen>
+#include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
@@ -738,29 +743,6 @@ bool containsLocalFileURL(const QMimeData *mimeData) {
     return false;
 }
 
-QByteArray clipboardFingerprint(const QMimeData *mimeData) {
-    if (!mimeData) return {};
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    const QStringList formats = mimeData->formats();
-    for (const QString &format : formats) hash.addData(format.toUtf8());
-    if (mimeData->hasImage()) {
-        const QImage image = qvariant_cast<QImage>(mimeData->imageData());
-        hash.addData(QByteArray::number(image.width()));
-        hash.addData(QByteArray::number(image.height()));
-        if (!image.isNull()) {
-            hash.addData(QByteArray::number(image.pixel(0, 0)));
-            hash.addData(QByteArray::number(image.pixel(image.width() / 2, image.height() / 2)));
-            hash.addData(QByteArray::number(image.pixel(image.width() - 1, image.height() - 1)));
-        }
-        const QByteArray png = mimeData->data(QStringLiteral("image/png"));
-        if (!png.isEmpty()) hash.addData(png);
-    } else {
-        hash.addData(mimeData->text().toUtf8());
-        if (mimeData->hasHtml()) hash.addData(mimeData->html().toUtf8());
-    }
-    return hash.result();
-}
-
 Window topLevelWindow(Display *display, Window window) {
     if (!display || window == None || window == PointerRoot) {
         return None;
@@ -808,14 +790,6 @@ Window activeTopLevelWindow(Display *display) {
     XFree(data);
     return window;
 }
-
-struct SourceApplicationInfo {
-    QString identifier = QStringLiteral("unknown");
-    QString name = QStringLiteral("Unknown");
-    QByteArray iconData;
-    QByteArray iconVariantsData;
-    QImage icon;
-};
 
 class CardSyntaxHighlighter final : public QSyntaxHighlighter {
 public:
@@ -1028,266 +1002,6 @@ bool showClipDeckAlert(QWidget *parent, const QString &title, const QString &mes
     return dialog.exec() == QDialog::Accepted;
 }
 
-struct DesktopApplicationEntry {
-    QString path;
-    QString name;
-    QString icon;
-    QString startupWMClass;
-    QString exec;
-    QString execPath;
-    QString execBaseName;
-};
-
-struct X11ApplicationIdentity {
-    Window window = None;
-    qint64 pid = 0;
-    QString wmInstance;
-    QString wmClass;
-    QString executablePath;
-};
-
-QString normalizedApplicationToken(const QString &value) {
-    QString result = value.trimmed().toLower();
-    if (result.endsWith(QStringLiteral(".desktop"))) result.chop(8);
-    result.remove(QRegularExpression(QStringLiteral("[^a-z0-9]+")));
-    return result;
-}
-
-QString unescapeDesktopValue(QString value) {
-    value.replace(QStringLiteral("\\s"), QStringLiteral(" "));
-    value.replace(QStringLiteral("\\n"), QStringLiteral("\n"));
-    value.replace(QStringLiteral("\\t"), QStringLiteral("\t"));
-    value.replace(QStringLiteral("\\r"), QStringLiteral("\r"));
-    value.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
-    return value;
-}
-
-QString desktopExecCommand(const QString &exec) {
-    QString value = exec.trimmed();
-    QStringList tokens;
-    QString token;
-    QChar quote;
-    bool escaped = false;
-    for (const QChar character : value) {
-        if (escaped) { token.append(character); escaped = false; continue; }
-        if (character == QLatin1Char('\\')) { escaped = true; continue; }
-        if (!quote.isNull()) {
-            if (character == quote) quote = QChar();
-            else token.append(character);
-            continue;
-        }
-        if (character == QLatin1Char('\'') || character == QLatin1Char('"')) {
-            quote = character;
-        } else if (character.isSpace()) {
-            if (!token.isEmpty()) { tokens.append(token); token.clear(); }
-        } else {
-            token.append(character);
-        }
-    }
-    if (!token.isEmpty()) tokens.append(token);
-    int index = 0;
-    if (index < tokens.size() && QFileInfo(tokens[index]).fileName() == QStringLiteral("env")) ++index;
-    while (index < tokens.size() && tokens[index].contains(QLatin1Char('='))
-           && !tokens[index].startsWith(QLatin1Char('/'))) ++index;
-    while (index < tokens.size() && tokens[index].startsWith(QLatin1Char('%'))) ++index;
-    return index < tokens.size() ? tokens[index] : QString();
-}
-
-QVector<DesktopApplicationEntry> scanDesktopApplications() {
-    QVector<DesktopApplicationEntry> entries;
-    const QStringList roots = {
-        QDir::home().filePath(QStringLiteral(".local/share/applications")),
-        QStringLiteral("/usr/share/applications")
-    };
-    QSet<QString> visited;
-    for (const QString &root : roots) {
-        if (!QFileInfo(root).isDir()) continue;
-        QDirIterator iterator(root, QStringList{QStringLiteral("*.desktop")}, QDir::Files,
-                              QDirIterator::Subdirectories);
-        while (iterator.hasNext()) {
-            const QString path = iterator.next();
-            const QString desktopID = QFileInfo(path).fileName().toLower();
-            if (visited.contains(desktopID)) continue; // User entry overrides system entry.
-            QFile file(path);
-            if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
-            DesktopApplicationEntry entry;
-            entry.path = path;
-            QString localizedName;
-            bool inDesktopEntry = false;
-            while (!file.atEnd()) {
-                const QString line = QString::fromUtf8(file.readLine()).trimmed();
-                if (line.startsWith(QLatin1Char('['))) {
-                    inDesktopEntry = line == QStringLiteral("[Desktop Entry]");
-                    continue;
-                }
-                if (!inDesktopEntry || line.isEmpty() || line.startsWith(QLatin1Char('#'))) continue;
-                const int separator = line.indexOf(QLatin1Char('='));
-                if (separator <= 0) continue;
-                const QString key = line.left(separator);
-                const QString value = unescapeDesktopValue(line.mid(separator + 1));
-                if (key == QStringLiteral("Name")) entry.name = value;
-                else if ((key == QStringLiteral("Name[zh_CN]") || key == QStringLiteral("Name[zh]"))
-                         && localizedName.isEmpty()) localizedName = value;
-                else if (key == QStringLiteral("Icon")) entry.icon = value;
-                else if (key == QStringLiteral("StartupWMClass")) entry.startupWMClass = value;
-                else if (key == QStringLiteral("Exec")) entry.exec = value;
-            }
-            if (!localizedName.isEmpty()) entry.name = localizedName;
-            entry.execPath = desktopExecCommand(entry.exec);
-            entry.execBaseName = QFileInfo(entry.execPath).fileName();
-            if (!entry.name.isEmpty() || !entry.exec.isEmpty() || !entry.startupWMClass.isEmpty()) {
-                entries.append(entry);
-                visited.insert(desktopID);
-            }
-        }
-    }
-    return entries;
-}
-
-const QVector<DesktopApplicationEntry> &desktopApplications() {
-    static const QVector<DesktopApplicationEntry> entries = scanDesktopApplications();
-    return entries;
-}
-
-QString canonicalExecutablePath(const QString &path) {
-    if (path.isEmpty()) return {};
-    QFileInfo info(path);
-    const QString canonical = info.canonicalFilePath();
-    return canonical.isEmpty() ? info.absoluteFilePath() : canonical;
-}
-
-int desktopMatchScore(const DesktopApplicationEntry &entry,
-                      const X11ApplicationIdentity &identity) {
-    const QString instance = normalizedApplicationToken(identity.wmInstance);
-    const QString wmClass = normalizedApplicationToken(identity.wmClass);
-    const QString startup = normalizedApplicationToken(entry.startupWMClass);
-    if (!startup.isEmpty() && (startup == instance || startup == wmClass)) return 300;
-
-    const QString actualExe = canonicalExecutablePath(identity.executablePath);
-    QString desktopExe = entry.execPath;
-    if (!desktopExe.isEmpty() && !QFileInfo(desktopExe).isAbsolute()) {
-        desktopExe = QStandardPaths::findExecutable(desktopExe);
-    }
-    if (!actualExe.isEmpty() && !desktopExe.isEmpty()
-        && canonicalExecutablePath(desktopExe) == actualExe) return 200;
-
-    const QString actualBase = normalizedApplicationToken(QFileInfo(actualExe).fileName());
-    const QString execBase = normalizedApplicationToken(entry.execBaseName);
-    const QString desktopBase = normalizedApplicationToken(QFileInfo(entry.path).completeBaseName());
-    if (!actualBase.isEmpty() && (actualBase == execBase || actualBase == desktopBase)) return 120;
-    if ((!instance.isEmpty() && (instance == execBase || instance == desktopBase))
-        || (!wmClass.isEmpty() && (wmClass == execBase || wmClass == desktopBase))) return 100;
-    return 0;
-}
-
-qint64 windowPID(Display *display, Window window) {
-    const Atom pidAtom = XInternAtom(display, "_NET_WM_PID", True);
-    if (pidAtom == None) return 0;
-    Atom actualType = None;
-    int actualFormat = 0;
-    unsigned long itemCount = 0;
-    unsigned long bytesAfter = 0;
-    unsigned char *raw = nullptr;
-    const int status = XGetWindowProperty(display, window, pidAtom, 0, 1, False,
-                                          XA_CARDINAL, &actualType, &actualFormat,
-                                          &itemCount, &bytesAfter, &raw);
-    qint64 pid = 0;
-    if (status == Success && raw && actualFormat == 32 && itemCount > 0) {
-        pid = static_cast<qint64>(*reinterpret_cast<unsigned long *>(raw));
-    }
-    if (raw) XFree(raw);
-    return pid;
-}
-
-X11ApplicationIdentity activeX11Application(Display *display) {
-    X11ApplicationIdentity identity;
-    // _NET_ACTIVE_WINDOW identifies the managed client window.  Do not walk
-    // upward to the window-manager frame: PID and WM_CLASS live on the client.
-    identity.window = activeTopLevelWindow(display);
-    if (identity.window == None) {
-        Window focused = None;
-        int revertTo = RevertToNone;
-        XGetInputFocus(display, &focused, &revertTo);
-        identity.window = topLevelWindow(display, focused);
-    }
-    if (identity.window == None) return identity;
-    identity.pid = windowPID(display, identity.window);
-    XClassHint classHint{};
-    if (XGetClassHint(display, identity.window, &classHint)) {
-        if (classHint.res_name) {
-            identity.wmInstance = QString::fromLocal8Bit(classHint.res_name);
-            XFree(classHint.res_name);
-        }
-        if (classHint.res_class) {
-            identity.wmClass = QString::fromLocal8Bit(classHint.res_class);
-            XFree(classHint.res_class);
-        }
-    }
-    if (identity.pid > 0) {
-        identity.executablePath = QFileInfo(
-            QStringLiteral("/proc/%1/exe").arg(identity.pid)).symLinkTarget();
-        identity.executablePath = canonicalExecutablePath(identity.executablePath);
-    }
-    return identity;
-}
-
-SourceApplicationInfo activeApplication(Display *display) {
-    SourceApplicationInfo result;
-    if (!display) return result;
-    const X11ApplicationIdentity identity = activeX11Application(display);
-    const DesktopApplicationEntry *matched = nullptr;
-    int matchedScore = 0;
-    for (const DesktopApplicationEntry &entry : desktopApplications()) {
-        const int score = desktopMatchScore(entry, identity);
-        if (score > matchedScore) { matched = &entry; matchedScore = score; }
-    }
-
-    QString iconValue;
-    QString iconPath;
-    int pngVariantCount = 0;
-    bool hasSvgVariant = false;
-    if (matched) {
-        result.identifier = QFileInfo(matched->path).fileName();
-        result.name = matched->name.isEmpty() ? identity.wmClass : matched->name;
-        iconValue = matched->icon;
-        const bool isClipDeck = QFileInfo(matched->path).fileName().compare(
-            QStringLiteral("clipdeck.desktop"), Qt::CaseInsensitive) == 0;
-        if (isClipDeck) {
-            // The macOS application artwork contains a platform-style baked
-            // shadow. Linux docks and cards add their own treatment, so use a
-            // clean, shadow-free source icon here.
-            result.icon = shadowFreeClipDeckIcon();
-        } else {
-            const LinuxApplicationIconSet iconSet = resolveLinuxApplicationIconSet(iconValue);
-            result.iconVariantsData = iconSet.serialize();
-            iconPath = iconSet.selectedPath;
-            pngVariantCount = iconSet.pngVariants.size();
-            hasSvgVariant = !iconSet.svgData.isEmpty();
-            result.icon = iconSet.rasterize(QSize(256, 256), 1.0);
-        }
-    } else {
-        result.identifier = !identity.wmClass.isEmpty() ? identity.wmClass : identity.wmInstance;
-        result.name = !identity.wmClass.isEmpty() ? identity.wmClass
-                                                  : (!identity.wmInstance.isEmpty() ? identity.wmInstance
-                                                                                   : QStringLiteral("Unknown"));
-    }
-    if (!result.icon.isNull()) {
-        QBuffer buffer(&result.iconData);
-        buffer.open(QIODevice::WriteOnly);
-        result.icon.save(&buffer, "PNG");
-    }
-    qInfo().noquote()
-        << QStringLiteral("[ClipDeck][X11Source] window=0x%1 pid=%2 WM_CLASS(instance=\"%3\", class=\"%4\") exe=\"%5\" desktop=\"%6\" score=%7 Icon=\"%8\" iconPath=\"%9\" svg=%10 pngVariants=%11")
-               .arg(static_cast<qulonglong>(identity.window), 0, 16)
-               .arg(identity.pid)
-               .arg(identity.wmInstance, identity.wmClass, identity.executablePath,
-                    matched ? matched->path : QString())
-               .arg(matchedScore)
-               .arg(iconValue, iconPath)
-               .arg(hasSvgVariant ? QStringLiteral("yes") : QStringLiteral("no"))
-               .arg(pngVariantCount);
-    return result;
-}
 
 bool setLaunchAtLogin(bool enabled) {
     const QString directory = QDir::home().filePath(QStringLiteral(".config/autostart"));
@@ -1304,30 +1018,72 @@ bool setLaunchAtLogin(bool enabled) {
     return true;
 }
 
-QIcon searchFieldIcon(bool closeIcon, qreal dpr) {
-    // Generate the raster at the current screen scale instead of assuming
-    // either 1x or 2x. For example, 125% uses 40 physical pixels for the
-    // 32 logical-pixel action icon.
-    dpr = std::max<qreal>(1.0, dpr);
-    QPixmap pixmap(DisplayScale::rasterSize(QSize(32, 32), dpr));
-    pixmap.fill(Qt::transparent);
-    pixmap.setDevicePixelRatio(dpr);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(QPen(QColor(255, 255, 255, closeIcon ? 122 : 218), 2,
-                        Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    if (closeIcon) {
-        painter.setBrush(QColor(255, 255, 255, 34));
-        painter.drawEllipse(QRectF(6.5, 6.5, 19, 19));
-        painter.drawLine(QPointF(12, 12), QPointF(20, 20));
-        painter.drawLine(QPointF(20, 12), QPointF(12, 20));
-    } else {
-        painter.setBrush(Qt::NoBrush);
-        painter.drawEllipse(QRectF(7, 7, 13, 13));
-        painter.drawLine(QPointF(18.5, 18.5), QPointF(25, 25));
+class SearchFieldGlyph final : public QWidget {
+public:
+    SearchFieldGlyph(bool closeGlyph, QWidget *parent)
+        : QWidget(parent), closeGlyph_(closeGlyph) {
+        setFocusPolicy(Qt::NoFocus);
+        setCursor(Qt::PointingHandCursor);
+        setMouseTracking(true);
     }
-    return QIcon(pixmap);
-}
+
+    void setTriggered(std::function<void()> callback) { triggered_ = std::move(callback); }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        // Paint directly into the Deck backing store. Unlike QLineEdit's
+        // QAction/QIcon path this uses the same logical coordinate system as
+        // the field, so Qt 5.11 cannot reinterpret a high-DPI pixmap as a
+        // larger logical icon or blur it with a second resize.
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const int alpha = hovered_ ? (closeGlyph_ ? 205 : 245)
+                                   : (closeGlyph_ ? 155 : 220);
+        painter.setPen(QPen(QColor(255, 255, 255, alpha), 1.4,
+                            Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        if (closeGlyph_) {
+            painter.setBrush(QColor(255, 255, 255, hovered_ ? 38 : 24));
+            painter.drawEllipse(QRectF(6.5, 10.5, 13.0, 13.0));
+            painter.drawLine(QPointF(10.5, 14.5), QPointF(15.5, 19.5));
+            painter.drawLine(QPointF(15.5, 14.5), QPointF(10.5, 19.5));
+        } else {
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(QRectF(6.0, 9.5, 9.5, 9.5));
+            painter.drawLine(QPointF(14.2, 17.8), QPointF(18.2, 21.8));
+        }
+    }
+
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton) event->accept();
+        else QWidget::mousePressEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton && rect().contains(event->pos())) {
+            event->accept();
+            if (triggered_) triggered_();
+            return;
+        }
+        QWidget::mouseReleaseEvent(event);
+    }
+
+    void enterEvent(QEvent *event) override {
+        hovered_ = true;
+        update();
+        QWidget::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent *event) override {
+        hovered_ = false;
+        update();
+        QWidget::leaveEvent(event);
+    }
+
+private:
+    bool closeGlyph_ = false;
+    bool hovered_ = false;
+    std::function<void()> triggered_;
+};
 
 int normalizedImageAngle(int angle) {
     return ((angle % 360) + 360) % 360;
@@ -1344,6 +1100,31 @@ QImage imageAtAngle(const QImage &image, int angle) {
 QSize imageSizeAtAngle(const QSize &size, int angle) {
     angle = normalizedImageAngle(angle);
     return angle == 90 || angle == 270 ? QSize(size.height(), size.width()) : size;
+}
+
+QSize imagePreviewWindowSize(const QSize &imageSize, const QSize &availableSize) {
+    const int maximumWidth = std::max(1, std::min(680, availableSize.width() - 16));
+    const int maximumHeight = std::max(1, std::min(500, availableSize.height() - 16));
+    if (imageSize.isEmpty()) return QSize(std::min(560, maximumWidth),
+                                         std::min(360, maximumHeight));
+
+    // Match the original preview's image area, then fit its aspect ratio into
+    // bounded dimensions. Pixel count does not affect the window's size.
+    // ImagePreviewWidget has 10px padding; the header consumes another 58px.
+    const double aspect = imageSize.width() / static_cast<double>(imageSize.height());
+    const double area = 540.0 * 282.0;
+    double imageWidth = std::sqrt(area * aspect);
+    double imageHeight = imageWidth / aspect;
+    const double scale = std::min(1.0, std::min(
+        std::max(1, maximumWidth - 20) / imageWidth,
+        std::max(1, maximumHeight - 78) / imageHeight));
+    imageWidth *= scale;
+    imageHeight *= scale;
+    // Extreme panoramas still need a readable title and a useful body area.
+    // The image remains aspect-fitted inside these minimum dimensions.
+    const int width = std::max(std::min(260, maximumWidth), qRound(imageWidth) + 20);
+    const int height = std::max(std::min(180, maximumHeight), qRound(imageHeight) + 78);
+    return QSize(std::min(width, maximumWidth), std::min(height, maximumHeight));
 }
 
 QIcon imageRotationIcon(bool clockwise) {
@@ -1374,9 +1155,19 @@ QIcon imageRotationIcon(bool clockwise) {
 }
 
 class DeckWindow final : public QWidget {
+    struct PasteRequest {
+        quint64 generation = 0;
+        quint64 clipboardRevision = 0;
+        bool isImage = false;
+        QString text;
+        QImage image;
+    };
+    using PasteRequestPtr = std::shared_ptr<PasteRequest>;
+
 public:
-    explicit DeckWindow(Display *display, HistoryRepository *repository, QWidget *parent = nullptr)
-        : QWidget(parent), display_(display), repository_(repository) {
+    explicit DeckWindow(Display *display, HistoryRepository *repository, QWidget *parent = nullptr,
+                        ClipboardPipeline *pipeline = nullptr)
+        : QWidget(parent), display_(display), repository_(repository), pipeline_(pipeline) {
         setWindowTitle(QStringLiteral("ClipDeck"));
         setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint
                        | Qt::NoDropShadowWindowHint | Qt::WindowDoesNotAcceptFocus);
@@ -1386,6 +1177,9 @@ public:
         setAutoFillBackground(false);
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
+        QObject::connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] {
+            ++clipboardRevision_;
+        });
         searchEdit_ = new QLineEdit(this);
         searchEdit_->setPlaceholderText(QStringLiteral("搜索文本"));
         searchEdit_->setClearButtonEnabled(false);
@@ -1400,6 +1194,7 @@ public:
         QPalette searchPalette = searchEdit_->palette();
         searchPalette.setColor(QPalette::Text, QColor(255, 255, 255, 235));
         searchEdit_->setPalette(searchPalette);
+        searchEdit_->setTextMargins(27, 0, 27, 0);
         searchDebounce_ = new QTimer(this);
         searchDebounce_->setSingleShot(true);
         searchDebounce_->setInterval(90);
@@ -1439,14 +1234,22 @@ public:
             const unsigned int buttons = mask & (Button1Mask | Button2Mask | Button3Mask);
             const bool newlyPressed = (buttons & ~lastPointerButtonMask_) != 0;
             lastPointerButtonMask_ = buttons;
-            if (newlyPressed && !frameGeometry().contains(QPoint(rootX, rootY))) hide();
+            // XQueryPointer returns native X pixels while QWindow geometry is
+            // expressed in Qt logical coordinates. Comparing them directly
+            // misclassifies clicks near the search action at 125% scaling.
+            // QCursor performs the platform scale conversion for us.
+            const QPoint localPointer = mapFromGlobal(QCursor::pos());
+            const bool inPreview = previewDialog_ && previewDialog_->isVisible()
+                && previewDialog_->rect().contains(
+                    previewDialog_->mapFromGlobal(QCursor::pos()));
+            if (newlyPressed && !rect().contains(localPointer) && !inPreview) hide();
         });
-        QAction *leadingSearchAction = searchEdit_->addAction(
-            searchFieldIcon(false, DisplayScale::factor()), QLineEdit::LeadingPosition);
-        leadingSearchAction->setEnabled(false);
-        QAction *closeSearchAction = searchEdit_->addAction(
-            searchFieldIcon(true, DisplayScale::factor()), QLineEdit::TrailingPosition);
-        QObject::connect(closeSearchAction, &QAction::triggered, this, [this] { endSearch(); });
+        searchLeadingGlyph_ = new SearchFieldGlyph(false, searchEdit_);
+        searchLeadingGlyph_->setTriggered([this] {
+            searchEdit_->setFocus(Qt::MouseFocusReason);
+        });
+        searchCloseGlyph_ = new SearchFieldGlyph(true, searchEdit_);
+        searchCloseGlyph_->setTriggered([this] { endSearch(); });
         searchEdit_->installEventFilter(this);
         QObject::connect(searchEdit_, &QLineEdit::textChanged, this, [this](const QString &value) {
             searchQuery_ = value.trimmed();
@@ -1468,65 +1271,16 @@ public:
         QObject::connect(searchAnimation_, &QVariantAnimation::finished, this, [this] {
             if (!searchActive_ && searchExpansion_ <= 0.001) searchEdit_->hide();
         });
+        if (pipeline_) {
+            QObject::connect(pipeline_, &ClipboardPipeline::recentChanged, this,
+                             [this](quint64 sequence) { recentHistoryChanged(sequence); });
+        }
         refreshCategoryValues();
         reload();
         QTimer::singleShot(0, this, [this] {
             const int count = std::min(20, static_cast<int>(items_.size()));
             for (int index = 0; index < count; ++index) fetchLinkMetadataIfNeeded(items_[index]);
         });
-    }
-
-    void insertText(const QString &text, const QString &richTextHtml,
-                    const SourceApplicationInfo &source) {
-        if (text.isEmpty()) {
-            return;
-        }
-        ClipboardItem item;
-        item.title = QStringLiteral("文本");
-        item.text = text;
-        item.richTextHtml = richTextHtml;
-        item.sourceID = source.identifier;
-        item.sourceName = source.name;
-        item.sourceIcon = source.icon;
-        item.sourceIconData = source.iconData;
-        item.sourceIconVariantsData = source.iconVariantsData;
-        item.category = repository_->classifyText(text, source.identifier, source.name,
-                                                   QDateTime::currentDateTime());
-        item.copiedAt = QDateTime::currentDateTime();
-        item = repository_->save(item);
-        fetchLinkMetadataIfNeeded(item);
-        selectedCategory_ = QStringLiteral("History");
-        selectedIndex_ = -1;
-        scrollOffset_ = 0;
-        reload();
-    }
-
-    void insertImage(const QImage &image, const SourceApplicationInfo &source) {
-        if (image.isNull()) {
-            return;
-        }
-        QByteArray pngData;
-        QBuffer buffer(&pngData);
-        buffer.open(QIODevice::WriteOnly);
-        if (!image.save(&buffer, "PNG")) {
-            return;
-        }
-        ClipboardItem item;
-        item.title = QStringLiteral("图片");
-        item.type = ClipboardPayloadType::Image;
-        item.image = image;
-        item.imageData = pngData;
-        item.sourceID = source.identifier;
-        item.sourceName = source.name;
-        item.sourceIcon = source.icon;
-        item.sourceIconData = source.iconData;
-        item.sourceIconVariantsData = source.iconVariantsData;
-        item.copiedAt = QDateTime::currentDateTime();
-        repository_->save(item);
-        selectedCategory_ = QStringLiteral("History");
-        selectedIndex_ = -1;
-        scrollOffset_ = 0;
-        reload();
     }
 
     void toggleNearPointer() {
@@ -1538,7 +1292,16 @@ public:
     }
 
     void showNearPointer() {
+        ++pasteRequestGeneration_;
+        if (pipeline_) {
+            pipeline_->setDeckVisible(true);
+            if (selectedCategory_ == QStringLiteral("History") && searchQuery_.isEmpty())
+                applyHistoryItems(pipeline_->recentItems(), selectedDatabaseID(), 10);
+        }
         rememberPasteTarget();
+        lastCardPressID_ = -1;
+        lastCardPressAt_ = 0;
+        pendingMousePasteID_ = -1;
         quickPasteOverlay_ = false;
         nonActivatingPresentation_ = true;
 
@@ -1559,6 +1322,7 @@ public:
         clampScrollOffset();
         show();
         raise();
+        if (pipeline_) reload();
         // Keep the source application's X input focus untouched. The keyboard
         // grab routes Deck navigation keys here without causing browser DOM
         // fields (for example online Excel search) to blur.
@@ -1574,24 +1338,36 @@ public:
             return;
         }
 
-        suppressClipboardCaptureUntil_ = QDateTime::currentMSecsSinceEpoch() + 800;
+        if (ensureSelectedPayload([this, forcePlainText, quickPaste] {
+                pasteSelected(forcePlainText, quickPaste);
+            }, true)) return;
         const ClipboardItem selectedItem = items_[selectedIndex_];
-        if (selectedItem.isImage()) {
-            QApplication::clipboard()->setImage(
-                imageAtAngle(selectedItem.image, selectedItem.imageAngle), QClipboard::Clipboard);
-        } else {
-            QSettings settings;
-            const bool preserveFormatting = !forcePlainText && settings.value(
-                QStringLiteral("paste/preserveFormatting"), false).toBool();
-            if (preserveFormatting && !selectedItem.richTextHtml.isEmpty()) {
-                auto *mimeData = new QMimeData;
-                mimeData->setText(selectedItem.text);
-                mimeData->setHtml(selectedItem.richTextHtml);
-                QApplication::clipboard()->setMimeData(mimeData, QClipboard::Clipboard);
+        const auto request = std::make_shared<PasteRequest>();
+        request->generation = ++pasteRequestGeneration_;
+        request->isImage = selectedItem.isImage();
+        request->text = selectedItem.text;
+        {
+            // Only this explicit history action may replace CLIPBOARD. Do not
+            // suppress external copies/cuts for an arbitrary time afterwards.
+            QScopedValueRollback<bool> writing(writingHistoryClipboard_, true);
+            if (selectedItem.isImage()) {
+                request->image = imageAtAngle(selectedItem.image, selectedItem.imageAngle);
+                QApplication::clipboard()->setImage(request->image, QClipboard::Clipboard);
             } else {
-                QApplication::clipboard()->setText(selectedItem.text, QClipboard::Clipboard);
+                QSettings settings;
+                const bool preserveFormatting = !forcePlainText && settings.value(
+                    QStringLiteral("paste/preserveFormatting"), false).toBool();
+                if (preserveFormatting && !selectedItem.richTextHtml.isEmpty()) {
+                    auto *mimeData = new QMimeData;
+                    mimeData->setText(selectedItem.text);
+                    mimeData->setHtml(selectedItem.richTextHtml);
+                    QApplication::clipboard()->setMimeData(mimeData, QClipboard::Clipboard);
+                } else {
+                    QApplication::clipboard()->setText(selectedItem.text, QClipboard::Clipboard);
+                }
             }
         }
+        request->clipboardRevision = clipboardRevision_;
         // In non-activating presentation the source application's input
         // focus is intentionally left untouched. Remember that state before
         // hideEvent clears it, and synchronously release the X keyboard grab
@@ -1610,17 +1386,18 @@ public:
 
         const Window target = pasteTarget_;
         QTimer::singleShot(20, this,
-                           [this, target, quickPaste, forcePlainText, preservedSourceFocus] {
+                           [this, target, request, quickPaste, forcePlainText, preservedSourceFocus] {
+            if (!pasteRequestIsCurrent(request)) return;
             const bool heldControlPaste = quickPaste && configuredModifier(
                 QStringLiteral("shortcuts/quickPasteModifier"), Qt::ControlModifier)
                     == Qt::ControlModifier;
             if (heldControlPaste) {
                 if (preservedSourceFocus) {
-                    pasteUsingPreservedFocus(target, true);
+                    pasteUsingPreservedFocus(target, request, true);
                 } else {
                     activateTarget(target);
                     restorePasteWidgetFocus(target);
-                    waitForTargetAndPaste(target, 0, true);
+                    waitForTargetAndPaste(target, request, 0, true);
                 }
             } else if (forcePlainText && configuredModifier(
                            QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier)
@@ -1630,23 +1407,22 @@ public:
                 // once and temporarily suppress Shift only around synthetic
                 // Ctrl+V; the clipboard payload is already plain text.
                 if (preservedSourceFocus) {
-                    pasteUsingPreservedFocus(target, false, true);
+                    pasteUsingPreservedFocus(target, request, false, true);
                 } else {
                     activateTarget(target);
                     restorePasteWidgetFocus(target);
-                    waitForTargetAndPaste(target, 0, false, true);
+                    waitForTargetAndPaste(target, request, 0, false, true);
                 }
             } else {
-                waitForPasteModifiersReleased(target, 0, preservedSourceFocus);
+                waitForPasteModifiersReleased(target, request, 0, preservedSourceFocus);
             }
         });
     }
 
-    bool takeClipboardCaptureSuppression() {
-        return QDateTime::currentMSecsSinceEpoch() <= suppressClipboardCaptureUntil_;
-    }
+    bool isWritingHistoryClipboard() const { return writingHistoryClipboard_; }
 
     void refresh() {
+        if (pipeline_) pipeline_->refreshRecent();
         refreshCategoryValues();
         reload();
     }
@@ -1675,7 +1451,19 @@ public:
         if (index < static_cast<int>(items_.size())) {
             selectedIndex_ = index;
             quickPasteOverlay_ = false;
-            QTimer::singleShot(0, this, [this] { pasteSelected(false, true); });
+            const qint64 itemID = items_[index].databaseID;
+            const quint64 revision = clipboardRevision_;
+            const quint64 generation = ++pasteRequestGeneration_;
+            QTimer::singleShot(0, this, [this, itemID, revision, generation] {
+                if (!isVisible() || revision != clipboardRevision_
+                        || generation != pasteRequestGeneration_) return;
+                for (int selected = 0; selected < static_cast<int>(items_.size()); ++selected) {
+                    if (items_[selected].databaseID != itemID) continue;
+                    selectedIndex_ = selected;
+                    pasteSelected(false, true);
+                    break;
+                }
+            });
         }
         return true;
     }
@@ -1753,6 +1541,18 @@ protected:
     }
 
     bool eventFilter(QObject *watched, QEvent *event) override {
+        if (previewDialog_ && previewKeyHandler_
+                && (watched == previewDialog_ || previewDialog_->isAncestorOf(
+                        qobject_cast<QWidget *>(watched)))) {
+            if (event->type() == QEvent::ShortcutOverride) {
+                event->accept();
+                return true;
+            }
+            if (event->type() == QEvent::KeyPress) {
+                previewKeyHandler_(static_cast<QKeyEvent *>(event));
+                return true;
+            }
+        }
         if (watched == searchEdit_ && event->type() == QEvent::KeyPress) {
             auto *keyEvent = static_cast<QKeyEvent *>(event);
             if (keyEvent->key() == Qt::Key_Escape) {
@@ -1805,6 +1605,18 @@ protected:
     }
 
     void hideEvent(QHideEvent *event) override {
+        if (pipeline_) {
+            pipeline_->setDeckVisible(false);
+            ++historyQueryGeneration_;
+            ++payloadRequestGeneration_;
+            const qint64 selectedID = selectedDatabaseID();
+            applyHistoryItems(selectedCategory_ == QStringLiteral("History") && searchQuery_.isEmpty()
+                ? pipeline_->recentItems() : QVector<ClipboardItem>{}, selectedID, 10);
+        }
+        lastCardPressID_ = -1;
+        lastCardPressAt_ = 0;
+        pendingMousePasteID_ = -1;
+        if (previewDialog_) previewDialog_->reject();
         releaseDeckKeyboard();
         if (outsideClickTimer_) outsideClickTimer_->stop();
         nonActivatingPresentation_ = false;
@@ -1813,6 +1625,10 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent *event) override {
+        if (previewKeyHandler_) {
+            previewKeyHandler_(event);
+            return;
+        }
         if (event->key() == Qt::Key_Escape) {
             if (searchActive_) endSearch();
             else hide();
@@ -1927,9 +1743,13 @@ protected:
     }
 
     void mousePressEvent(QMouseEvent *event) override {
+        pendingMousePasteID_ = -1;
+        if (previewDialog_) previewDialog_->reject();
         if (event->button() != Qt::LeftButton) {
+            lastCardPressID_ = -1;
             return QWidget::mousePressEvent(event);
         }
+        if (cardIndexAt(event->pos()) < 0) lastCardPressID_ = -1;
         if (event->pos().y() <= 12) {
             resizing_ = true;
             if (blurUpdateTimer_) blurUpdateTimer_->stop();
@@ -1971,11 +1791,25 @@ protected:
         }
         const int index = cardIndexAt(event->pos());
         if (index >= 0) {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            const qint64 cardID = items_[index].databaseID >= 0
+                ? items_[index].databaseID : index;
+            const bool fallbackDoubleClick = lastCardPressID_ == cardID
+                && now - lastCardPressAt_ <= QApplication::doubleClickInterval()
+                && (event->globalPos() - lastCardPressGlobalPos_).manhattanLength()
+                    <= QApplication::startDragDistance();
             selectedIndex_ = index;
             if (searchActive_) {
                 searchEdit_->clearFocus();
                 setFocus(Qt::MouseFocusReason);
             }
+            if (fallbackDoubleClick) {
+                armMousePaste(index, event);
+                return;
+            }
+            lastCardPressID_ = cardID;
+            lastCardPressAt_ = now;
+            lastCardPressGlobalPos_ = event->globalPos();
             // A mouse-selected card is already under the pointer. Moving the
             // row here (even just enough to reveal a clipped edge) changes the
             // hit target between the two presses of a double click.
@@ -2005,21 +1839,62 @@ protected:
             finishLiveResize();
             return;
         }
+        if (event->button() == Qt::LeftButton && pendingMousePasteID_ >= 0) {
+            const qint64 itemID = pendingMousePasteID_;
+            const bool plainText = pendingMousePasteModifiers_ == configuredModifier(
+                QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier);
+            pendingMousePasteID_ = -1;
+            const int index = cardIndexAt(event->pos());
+            if (index >= 0 && items_[index].databaseID == itemID
+                    && (event->globalPos() - pendingMousePastePosition_).manhattanLength()
+                        <= QApplication::startDragDistance()) {
+                // Qt releases its implicit pointer grab after this handler.
+                // Keep Deck mapped through button-up, then paste on the next
+                // event-loop turn so neither the click nor Ctrl+V is rerouted
+                // while button 1 is still held.
+                const quint64 revision = clipboardRevision_;
+                const quint64 generation = ++pasteRequestGeneration_;
+                QTimer::singleShot(0, this, [this, itemID, plainText, revision, generation] {
+                    if (!isVisible() || revision != clipboardRevision_
+                            || generation != pasteRequestGeneration_) return;
+                    for (int selected = 0; selected < static_cast<int>(items_.size()); ++selected) {
+                        if (items_[selected].databaseID != itemID) continue;
+                        selectedIndex_ = selected;
+                        qInfo() << "[ClipDeck][Paste] card double-click released id=" << itemID;
+                        pasteSelected(plainText);
+                        break;
+                    }
+                });
+            }
+            event->accept();
+            return;
+        }
         QWidget::mouseReleaseEvent(event);
+    }
+
+    void armMousePaste(int index, QMouseEvent *event) {
+        selectedIndex_ = index;
+        pendingMousePasteID_ = items_[index].databaseID;
+        pendingMousePasteModifiers_ = standardKeyboardModifiers(event->modifiers());
+        pendingMousePastePosition_ = event->globalPos();
+        lastCardPressID_ = -1;
+        lastCardPressAt_ = 0;
+        update();
+        event->accept();
     }
 
     void mouseDoubleClickEvent(QMouseEvent *event) override {
         const int index = cardIndexAt(event->pos());
         if (event->button() == Qt::LeftButton && index >= 0) {
-            selectedIndex_ = index;
-            pasteSelected(standardKeyboardModifiers(event->modifiers()) == configuredModifier(
-                QStringLiteral("shortcuts/plainTextModifier"), Qt::ShiftModifier));
+            armMousePaste(index, event);
             return;
         }
         QWidget::mouseDoubleClickEvent(event);
     }
 
     void wheelEvent(QWheelEvent *event) override {
+        lastCardPressID_ = -1;
+        pendingMousePasteID_ = -1;
         const int delta = event->angleDelta().x() != 0
             ? event->angleDelta().x()
             : event->angleDelta().y();
@@ -2572,12 +2447,13 @@ private:
             painter.setFont(smallFont);
             painter.setPen(QColor(255, 255, 255, 115));
             if (expanded && !isLink) {
-                const QSize displayedImageSize = imageSizeAtAngle(item.image.size(), item.imageAngle);
+                const QSize displayedImageSize = imageSizeAtAngle(
+                    item.imagePixelSize.isValid() ? item.imagePixelSize : item.image.size(), item.imageAngle);
                 const QString footer = item.isImage()
                     ? QStringLiteral("%1 × %2")
                         .arg(displayedImageSize.width()).arg(displayedImageSize.height())
                     : parsedColor.isValid() ? item.text.trimmed()
-                    : QStringLiteral("%1 个字符").arg(item.text.size());
+                    : QStringLiteral("%1 个字符").arg(item.textLength > 0 ? item.textLength : item.text.size());
                 if (item.isImage() || parsedColor.isValid()) {
                     QFont badgeFont = font();
                     badgeFont.setPointSizeF(item.isImage() ? 9.5 : 11);
@@ -2658,15 +2534,25 @@ private:
                 imageBatchLoading_ = false;
                 return;
             }
-            const QVector<ClipboardItem> next = repository_->fetch(
-                QStringLiteral("图片"), expectedSearch, requested, offset);
-            for (const ClipboardItem &item : next) items_.push_back(item);
-            imageLoadLimit_ = static_cast<int>(items_.size());
-            imageHasMore_ = next.size() == requested
-                && imageLoadLimit_ < kHistoryCapacity;
-            imageBatchLoading_ = false;
-            clampScrollOffset();
-            update();
+            const auto append = [this, offset, expectedSearch, generation, requested](QVector<ClipboardItem> next) {
+                if (selectedCategory_ != QStringLiteral("Images")
+                    || imageLoadGeneration_ != generation || searchQuery_ != expectedSearch
+                    || static_cast<int>(items_.size()) != offset) return;
+                for (const ClipboardItem &item : next) items_.push_back(item);
+                imageLoadLimit_ = static_cast<int>(items_.size());
+                imageHasMore_ = next.size() == requested
+                    && imageLoadLimit_ < kHistoryCapacity;
+                imageBatchLoading_ = false;
+                clampScrollOffset();
+                update();
+            };
+            if (pipeline_) {
+                const QPointer<DeckWindow> guard(this);
+                pipeline_->requestHistory(QStringLiteral("图片"), expectedSearch, requested, offset,
+                    [guard, append](QVector<ClipboardItem> next) {
+                        if (guard) append(std::move(next));
+                    });
+            } else append(repository_->fetch(QStringLiteral("图片"), expectedSearch, requested, offset));
         });
     }
 
@@ -2695,6 +2581,7 @@ private:
             return;
         }
         repository_->remove(items_[selectedIndex_].databaseID);
+        if (pipeline_) pipeline_->refreshRecent();
         items_.erase(items_.begin() + selectedIndex_);
         if (items_.empty()) {
             selectedIndex_ = -1;
@@ -2828,30 +2715,59 @@ private:
     }
 
     void updateSearchGeometry() {
-        if (searchEdit_) searchEdit_->setGeometry(searchRect());
+        if (!searchEdit_) return;
+        searchEdit_->setGeometry(searchRect());
+        const int glyphWidth = 26;
+        if (searchLeadingGlyph_) {
+            searchLeadingGlyph_->setGeometry(0, 0, glyphWidth, searchEdit_->height());
+            searchLeadingGlyph_->raise();
+        }
+        if (searchCloseGlyph_) {
+            searchCloseGlyph_->setGeometry(
+                std::max(0, searchEdit_->width() - glyphWidth), 0,
+                glyphWidth, searchEdit_->height());
+            searchCloseGlyph_->setVisible(searchActive_ && searchEdit_->width() >= 72);
+            searchCloseGlyph_->raise();
+        }
     }
 
-    void preparePopover(QDialog &dialog, const QSize &size) const {
-        dialog.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
-        dialog.setAttribute(Qt::WA_TranslucentBackground, true);
-        dialog.setAttribute(Qt::WA_NoSystemBackground, true);
-        dialog.setModal(true);
-        dialog.resize(size);
-        // Do not use an XShape window mask here.  UOS/DDE rasterizes the
-        // rounded mask into visible horizontal scan bands at its top and
-        // bottom edges.  WA_TranslucentBackground plus the stylesheet's
-        // antialiased border radius supplies the rounded corners per pixel.
-        dialog.clearMask();
+    QRect selectedCardScreenGeometry() const {
         const QRect card = selectedIndex_ >= 0 ? cardRect(selectedIndex_) : rect();
-        const QPoint cardTopLeft = mapToGlobal(card.topLeft());
-        const QRect globalCard(cardTopLeft, card.size());
-        const QRect available = QApplication::desktop()->availableGeometry(globalCard.center());
+        return QApplication::desktop()->availableGeometry(mapToGlobal(card.center()));
+    }
+
+    void positionPopover(QDialog &dialog, const QSize &size) const {
+        dialog.resize(size);
+        const QRect card = selectedIndex_ >= 0 ? cardRect(selectedIndex_) : rect();
+        const QRect globalCard(mapToGlobal(card.topLeft()), card.size());
+        const QRect available = selectedCardScreenGeometry();
         int x = globalCard.center().x() - size.width() / 2;
         int y = globalCard.top() - size.height() - 12;
         if (y < available.top() + 8) y = globalCard.bottom() + 12;
         x = std::max(available.left() + 8, std::min(x, available.right() - size.width() - 7));
         y = std::max(available.top() + 8, std::min(y, available.bottom() - size.height() - 7));
         dialog.move(x, y);
+    }
+
+    void preparePopover(QDialog &dialog, const QSize &size, bool passivePreview = false) const {
+        if (passivePreview) {
+            dialog.setWindowFlags(Qt::Tool | Qt::FramelessWindowHint
+                | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus
+                | Qt::NoDropShadowWindowHint);
+            dialog.setAttribute(Qt::WA_X11DoNotAcceptFocus, true);
+            dialog.setAttribute(Qt::WA_ShowWithoutActivating, true);
+        } else {
+            dialog.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+        }
+        dialog.setAttribute(Qt::WA_TranslucentBackground, true);
+        dialog.setAttribute(Qt::WA_NoSystemBackground, true);
+        dialog.setModal(!passivePreview);
+        // Do not use an XShape window mask here.  UOS/DDE rasterizes the
+        // rounded mask into visible horizontal scan bands at its top and
+        // bottom edges.  WA_TranslucentBackground plus the stylesheet's
+        // antialiased border radius supplies the rounded corners per pixel.
+        dialog.clearMask();
+        positionPopover(dialog, size);
         dialog.setStyleSheet(QStringLiteral(
             "QDialog{background:#242427;color:#eee;border:1px solid #49494d;border-radius:14px;}"
             "QPlainTextEdit{background:#111113;color:#eee;border:1px solid #38383c;border-radius:10px;"
@@ -2893,27 +2809,20 @@ private:
     }
 
     void previewSelected() {
-        if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (previewDialog_ || selectedIndex_ < 0
+                || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (ensureSelectedPayload([this] { previewSelected(); })) return;
         ClipboardItem item = items_[selectedIndex_];
         QDialog dialog(this);
-        preparePopover(dialog, QSize(560, 360));
+        const QSize previewSize = item.isImage()
+            ? imagePreviewWindowSize(imageSizeAtAngle(item.image.size(), item.imageAngle),
+                                     selectedCardScreenGeometry().size())
+            : QSize(560, 360);
+        preparePopover(dialog, previewSize, true);
         bool editRequested = false;
         bool imageAngleChanged = false;
-        QShortcut *edit = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_E), &dialog);
-        QObject::connect(edit, &QShortcut::activated, &dialog, [&] {
-            editRequested = true;
-            dialog.accept();
-        });
-        auto closeAndMove = [this, &dialog](int direction) {
-            dialog.reject();
-            moveSelection(direction);
-        };
-        QShortcut *previous = new QShortcut(QKeySequence(Qt::Key_Left), &dialog);
-        QShortcut *next = new QShortcut(QKeySequence(Qt::Key_Right), &dialog);
-        QObject::connect(previous, &QShortcut::activated, &dialog,
-                         [closeAndMove] { closeAndMove(-1); });
-        QObject::connect(next, &QShortcut::activated, &dialog,
-                         [closeAndMove] { closeAndMove(1); });
+        int moveDirection = 0;
+        std::function<void(int)> rotatePreview;
         QVBoxLayout *layout = new QVBoxLayout(&dialog);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
@@ -2928,35 +2837,40 @@ private:
         category->setObjectName(QStringLiteral("previewCategory"));
         QLabel *source = new QLabel(item.sourceName, header);
         source->setObjectName(QStringLiteral("previewSource"));
+        // Narrow portrait previews must not be expanded by a long app name.
+        source->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        source->setToolTip(item.sourceName);
+        category->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        category->setToolTip(category->text());
+        category->ensurePolished();
+        category->setFixedWidth(std::min(100,
+            category->fontMetrics().horizontalAdvance(category->text())));
         QLabel *time = new QLabel(item.copiedAt.toString(QStringLiteral("yyyy-MM-dd  HH:mm")), header);
         time->setObjectName(QStringLiteral("previewTime"));
         headerLayout->addWidget(category);
-        headerLayout->addWidget(source);
-        headerLayout->addStretch();
+        headerLayout->addWidget(source, 1);
         headerLayout->addWidget(time);
         layout->addWidget(header);
         QPlainTextEdit *previewText = nullptr;
         ImagePreviewWidget *imagePreview = nullptr;
         if (item.isImage()) {
             imagePreview = new ImagePreviewWidget(&dialog);
+            imagePreview->setMinimumSize(0, 0);
             imagePreview->setImage(imageAtAngle(item.image, item.imageAngle));
             layout->addWidget(imagePreview, 1);
 
-            auto rotatePreview = [this, &item, imagePreview, &imageAngleChanged](int degrees) {
-                item.imageAngle = normalizedImageAngle(item.imageAngle + degrees);
-                if (!repository_->updateImageAngle(item.databaseID, item.imageAngle)) return;
+            rotatePreview = [this, &dialog, &item, imagePreview, &imageAngleChanged](int degrees) {
+                const int angle = normalizedImageAngle(item.imageAngle + degrees);
+                if (!repository_->updateImageAngle(item.databaseID, angle)) return;
+                if (pipeline_) pipeline_->refreshRecent();
+                item.imageAngle = angle;
                 imageThumbnailCache_.remove(item.databaseID);
                 imagePreview->setImage(imageAtAngle(item.image, item.imageAngle));
+                positionPopover(dialog, imagePreviewWindowSize(
+                    imageSizeAtAngle(item.image.size(), item.imageAngle),
+                    selectedCardScreenGeometry().size()));
                 imageAngleChanged = true;
             };
-            QShortcut *rotateLeft = new QShortcut(
-                QKeySequence(Qt::CTRL | Qt::Key_BracketLeft), &dialog);
-            QShortcut *rotateRight = new QShortcut(
-                QKeySequence(Qt::CTRL | Qt::Key_BracketRight), &dialog);
-            QObject::connect(rotateLeft, &QShortcut::activated, &dialog,
-                             [rotatePreview] { rotatePreview(-90); });
-            QObject::connect(rotateRight, &QShortcut::activated, &dialog,
-                             [rotatePreview] { rotatePreview(90); });
         } else {
             QPlainTextEdit *text = new QPlainTextEdit(item.text.left(200000), &dialog);
             previewText = text;
@@ -2977,27 +2891,56 @@ private:
             new CardSyntaxHighlighter(text->document(), item.previewLanguage);
             layout->addWidget(text, 1);
         }
-        if (previewText) {
-            auto installScrollShortcut = [&dialog, previewText](int key, int direction) {
-                QShortcut *shortcut = new QShortcut(QKeySequence(key), &dialog);
-                QObject::connect(shortcut, &QShortcut::activated, &dialog,
-                                 [previewText, direction] {
-                    QScrollBar *bar = previewText->verticalScrollBar();
-                    const int step = std::max(1, bar->singleStep());
-                    bar->setValue(bar->value() + direction * step);
-                });
-            };
-            installScrollShortcut(Qt::Key_Up, -1);
-            installScrollShortcut(Qt::Key_Down, 1);
-            previewText->setFocus(Qt::PopupFocusReason);
-        }
-        dialog.exec();
+        // A Qt::Popup/exec() takes native focus and may replace Deck's X11
+        // keyboard grab. Keep this read-only window nonmodal and nonactivating;
+        // the existing Deck grab dispatches preview controls here instead.
+        previewDialog_ = &dialog;
+        previewKeyHandler_ = [&](QKeyEvent *event) {
+            const auto modifiers = standardKeyboardModifiers(event->modifiers());
+            if (modifiers == Qt::NoModifier
+                    && (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
+                moveDirection = event->key() == Qt::Key_Left ? -1 : 1;
+                dialog.reject();
+            } else if (modifiers == Qt::NoModifier
+                    && (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Space)) {
+                dialog.reject();
+            } else if (modifiers == Qt::ControlModifier && event->key() == Qt::Key_E) {
+                editRequested = true;
+                dialog.accept();
+            } else if (rotatePreview && modifiers == Qt::ControlModifier
+                    && (event->key() == Qt::Key_BracketLeft
+                        || event->key() == Qt::Key_BracketRight)) {
+                rotatePreview(event->key() == Qt::Key_BracketLeft ? -90 : 90);
+            } else if (previewText && modifiers == Qt::NoModifier
+                    && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+                QScrollBar *bar = previewText->verticalScrollBar();
+                bar->setValue(bar->value() + (event->key() == Qt::Key_Up ? -1 : 1)
+                    * std::max(1, bar->singleStep()));
+            }
+            event->accept();
+        };
+        dialog.installEventFilter(this);
+        if (previewText) previewText->installEventFilter(this);
+        QEventLoop previewLoop;
+        QObject::connect(&dialog, &QDialog::finished, &previewLoop, &QEventLoop::quit);
+        dialog.show();
+        dialog.raise();
+        previewLoop.exec();
+        previewKeyHandler_ = {};
+        previewDialog_.clear();
+        dialog.hide();
         if (imageAngleChanged) reload();
-        if (editRequested) editSelected();
+        if (moveDirection != 0) moveSelection(moveDirection);
+        if (isVisible()) {
+            setFocus(Qt::OtherFocusReason);
+            grabDeckKeyboard(0);
+            if (editRequested) editSelected();
+        }
     }
 
     void editSelected() {
         if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (ensureSelectedPayload([this] { editSelected(); })) return;
         const ClipboardItem item = items_[selectedIndex_];
         QDialog dialog(this);
         preparePopover(dialog, QSize(560, 360));
@@ -3145,6 +3088,7 @@ private:
             const QString value = editor->toPlainText();
             repository_->updateText(item.databaseID, value, repository_->classifyText(value));
         }
+        if (pipeline_) pipeline_->refreshRecent();
         reload();
     }
 
@@ -3172,6 +3116,7 @@ private:
         title->setFocus(); title->selectAll();
         if (dialog.exec() == QDialog::Accepted) {
             repository_->updateTitle(item.databaseID, title->text());
+            if (pipeline_) pipeline_->refreshRecent();
             reload();
         }
     }
@@ -3183,6 +3128,7 @@ private:
         repository_->updateImageAngle(
             item.databaseID, normalizedImageAngle(item.imageAngle + degrees));
         imageThumbnailCache_.remove(items_[selectedIndex_].databaseID);
+        if (pipeline_) pipeline_->refreshRecent();
         reload();
     }
 
@@ -3285,6 +3231,7 @@ private:
             if (pageData.size() > 2 * 1024 * 1024) pageData.clear();
             if (pageData.isEmpty()) {
                 repository_->updateLinkMetadata(databaseID, finalURL.host(), QByteArray(), QByteArray());
+                if (pipeline_) pipeline_->refreshRecent();
                 reload();
                 return;
             }
@@ -3311,6 +3258,7 @@ private:
                 if (--state->pending != 0) return;
                 repository_->updateLinkMetadata(state->databaseID, state->title,
                                                 state->icon, state->preview);
+                if (pipeline_) pipeline_->refreshRecent();
                 reload();
             };
             downloadLinkImage(iconURL, 2 * 1024 * 1024,
@@ -3350,6 +3298,7 @@ private:
 
     void openSelected() {
         if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (ensureSelectedPayload([this] { openSelected(); })) return;
         const QUrl url(items_[selectedIndex_].text.trimmed());
         if (url.isValid() && (url.scheme() == QStringLiteral("http")
                              || url.scheme() == QStringLiteral("https"))) {
@@ -3411,8 +3360,43 @@ private:
         return false;
     }
 
-    void waitForPasteModifiersReleased(Window target, int attempt,
+    bool pasteRequestIsCurrent(const PasteRequestPtr &request) {
+        if (!request || request->generation != pasteRequestGeneration_) return false;
+        if (request->clipboardRevision == clipboardRevision_) return true;
+
+        // UOS's clipboard manager may take ownership while preserving the
+        // same payload. Permit that handoff, but never emit a stale Ctrl+V
+        // once a user's newer cut/copy has replaced the selected content.
+        QClipboard *clipboard = QApplication::clipboard();
+        const quint64 revisionBeforeRead = clipboardRevision_;
+        bool sameContent = false;
+        if (request->isImage) {
+            const QMimeData *mime = clipboard->mimeData(QClipboard::Clipboard);
+            if (mime && mime->hasImage()) {
+                const QImage current = qvariant_cast<QImage>(mime->imageData());
+                sameContent = current.size() == request->image.size()
+                    && current.convertToFormat(QImage::Format_ARGB32)
+                        == request->image.convertToFormat(QImage::Format_ARGB32);
+            }
+        } else {
+            sameContent = clipboard->text(QClipboard::Clipboard) == request->text;
+        }
+        // Clipboard reads can dispatch X11 events and enter another paste
+        // operation. Recheck the generation before updating the request.
+        if (request->generation != pasteRequestGeneration_
+                || revisionBeforeRead != clipboardRevision_) return false;
+        if (sameContent) {
+            request->clipboardRevision = clipboardRevision_;
+            return true;
+        }
+        ++pasteRequestGeneration_;
+        qInfo() << "[ClipDeck][Paste] cancelled obsolete paste after new clipboard content";
+        return false;
+    }
+
+    void waitForPasteModifiersReleased(Window target, PasteRequestPtr request, int attempt,
                                        bool preservedSourceFocus = false) {
+        if (!pasteRequestIsCurrent(request)) return;
         // Ctrl+number is handled while Ctrl is still physically down. Sending
         // synthetic Ctrl+V at that point can be swallowed, or release the
         // user's Ctrl before the target receives V. Wait for the gesture to
@@ -3422,23 +3406,23 @@ private:
                 qWarning() << "[ClipDeck][Paste] modifier release timed out";
                 return;
             }
-            QTimer::singleShot(20, this, [this, target, attempt, preservedSourceFocus] {
-                waitForPasteModifiersReleased(target, attempt + 1, preservedSourceFocus);
+            QTimer::singleShot(20, this, [this, target, request, attempt, preservedSourceFocus] {
+                waitForPasteModifiersReleased(target, request, attempt + 1, preservedSourceFocus);
             });
             return;
         }
         if (preservedSourceFocus) {
-            pasteUsingPreservedFocus(target);
+            pasteUsingPreservedFocus(target, request);
             return;
         }
         activateTarget(target);
         restorePasteWidgetFocus(target);
-        waitForTargetAndPaste(target, 0);
+        waitForTargetAndPaste(target, request, 0);
     }
 
-    void pasteUsingPreservedFocus(Window target, bool useHeldControl = false,
+    void pasteUsingPreservedFocus(Window target, PasteRequestPtr request, bool useHeldControl = false,
                                   bool temporarilyReleaseShift = false) {
-        if (!display_ || target == None) return;
+        if (!display_ || target == None || !pasteRequestIsCurrent(request)) return;
         Window focused = None;
         int revertTo = RevertToNone;
         XGetInputFocus(display_, &focused, &revertTo);
@@ -3460,7 +3444,7 @@ private:
         // Fall back to the established activation path only in that case.
         activateTarget(target);
         restorePasteWidgetFocus(target);
-        waitForTargetAndPaste(target, 0, useHeldControl, temporarilyReleaseShift);
+        waitForTargetAndPaste(target, request, 0, useHeldControl, temporarilyReleaseShift);
     }
 
     void restorePasteWidgetFocus(Window target) {
@@ -3652,15 +3636,16 @@ private:
         return false;
     }
 
-    void waitForTargetAndPaste(Window target, int attempt, bool useHeldControl = false,
+    void waitForTargetAndPaste(Window target, PasteRequestPtr request, int attempt, bool useHeldControl = false,
                                bool temporarilyReleaseShift = false) {
-        if (!display_ || target == None) return;
+        if (!display_ || target == None || !pasteRequestIsCurrent(request)) return;
         if (activeTopLevelWindow(display_) == target) {
             // The WM may acknowledge _NET_ACTIVE_WINDOW asynchronously. Set
             // the remembered Qt child focus again immediately before paste so
             // a QWebEngine editor receives Ctrl+V rather than the dialog shell.
             restorePasteWidgetFocus(target);
             restoreExternalInputFocus(target);
+            if (!pasteRequestIsCurrent(request)) return;
             if (useHeldControl && controlKeyPressed()) sendVWhileControlHeld();
             else sendControlV(temporarilyReleaseShift);
             return;
@@ -3674,28 +3659,85 @@ private:
             activateTarget(target);
             restorePasteWidgetFocus(target);
             restoreExternalInputFocus(target);
+            if (!pasteRequestIsCurrent(request)) return;
             if (useHeldControl && controlKeyPressed()) sendVWhileControlHeld();
             else sendControlV(temporarilyReleaseShift);
             return;
         }
         QTimer::singleShot(10, this,
-                          [this, target, attempt, useHeldControl, temporarilyReleaseShift] {
+                          [this, target, request, attempt, useHeldControl, temporarilyReleaseShift] {
             waitForTargetAndPaste(
-                target, attempt + 1, useHeldControl, temporarilyReleaseShift);
+                target, request, attempt + 1, useHeldControl, temporarilyReleaseShift);
         });
     }
 
+    qint64 selectedDatabaseID() const {
+        return selectedIndex_ >= 0 && selectedIndex_ < int(items_.size())
+            ? items_[selectedIndex_].databaseID : -1;
+    }
+
+    // Cards use bounded summaries; only an explicit action needs the original
+    // payload. Bind that load to identity and clipboard revision, never index.
+    bool ensureSelectedPayload(std::function<void()> action, bool protectClipboard = false) {
+        const quint64 generation = ++payloadRequestGeneration_;
+        if (!pipeline_ || selectedIndex_ < 0 || selectedIndex_ >= int(items_.size())
+            || items_[selectedIndex_].payloadComplete) return false;
+        const qint64 id = selectedDatabaseID();
+        const quint64 revision = clipboardRevision_;
+        const QPointer<DeckWindow> guard(this);
+        pipeline_->requestItem(id, [guard, id, generation, revision, protectClipboard,
+                                    action = std::move(action)](QVector<ClipboardItem> items) {
+            if (!guard || generation != guard->payloadRequestGeneration_
+                || guard->selectedDatabaseID() != id || items.isEmpty()
+                || (protectClipboard && revision != guard->clipboardRevision_)) return;
+            guard->items_[guard->selectedIndex_] = std::move(items.first());
+            action();
+        });
+        return true;
+    }
+
+    void recentHistoryChanged(quint64 sequence) {
+        if (!pipeline_) return;
+        const bool newCapture = sequence > latestCaptureSequence_;
+        if (newCapture) {
+            latestCaptureSequence_ = sequence;
+            ++payloadRequestGeneration_;
+            searchDebounce_->stop();
+            searchAnimation_->stop();
+            searchActive_ = false;
+            searchExpansion_ = 0;
+            searchQuery_.clear();
+            const QSignalBlocker blocker(searchEdit_);
+            searchEdit_->clear();
+            searchEdit_->hide();
+            selectedCategory_ = QStringLiteral("History");
+            categoryPageStart_ = 0;
+            selectedIndex_ = -1;
+            scrollOffset_ = 0;
+            updateSearchGeometry();
+        }
+        if (!isVisible() || newCapture || items_.empty())
+            applyHistoryItems(pipeline_->recentItems(), selectedDatabaseID(), 10);
+        if (isVisible()) reload();
+        // Metadata requests remain asynchronous network operations; the
+        // capture callback itself never performs them or creates card widgets.
+        for (const auto &item : pipeline_->recentItems()) {
+            if (!metadataRequested_.contains(item.databaseID)) {
+                metadataRequested_.insert(item.databaseID);
+                fetchLinkMetadataIfNeeded(item);
+            }
+        }
+    }
+
     void reload() {
+        imageBatchLoading_ = false;
+        ++imageLoadGeneration_;
         const bool categoryChanged = loadedCategory_ != selectedCategory_;
         if (categoryChanged) {
             loadedCategory_ = selectedCategory_;
             imageLoadLimit_ = kInitialImageCapacity;
-            imageBatchLoading_ = false;
-            ++imageLoadGeneration_;
         }
-        const qint64 selectedDatabaseID = selectedIndex_ >= 0
-            && selectedIndex_ < static_cast<int>(items_.size())
-            ? items_[selectedIndex_].databaseID : -1;
+        const qint64 selectedID = selectedDatabaseID();
         QString repositoryCategory;
         if (selectedCategory_ == QStringLiteral("Text")) repositoryCategory = QStringLiteral("文本");
         else if (selectedCategory_ == QStringLiteral("Images")) repositoryCategory = QStringLiteral("图片");
@@ -3703,16 +3745,43 @@ private:
         const int fetchLimit = selectedCategory_ == QStringLiteral("Images")
             ? std::min(kHistoryCapacity, std::max(kInitialImageCapacity, imageLoadLimit_))
             : kHistoryCapacity;
-        items_ = repository_->fetch(repositoryCategory, searchQuery_, fetchLimit).toStdVector();
+        const quint64 generation = ++historyQueryGeneration_;
+        if (pipeline_) {
+            if (!isVisible()) return;
+            const QPointer<DeckWindow> guard(this);
+            pipeline_->requestHistory(repositoryCategory, searchQuery_, fetchLimit, 0,
+                [guard, generation, selectedID, fetchLimit](QVector<ClipboardItem> items) {
+                    if (guard && generation == guard->historyQueryGeneration_) {
+                        // Preserve navigation performed while the query was in flight.
+                        const qint64 currentID = guard->selectedDatabaseID();
+                        guard->applyHistoryItems(std::move(items), currentID >= 0 ? currentID : selectedID, fetchLimit);
+                    }
+                });
+        } else applyHistoryItems(repository_->fetch(repositoryCategory, searchQuery_, fetchLimit), selectedID, fetchLimit);
+    }
+
+    void applyHistoryItems(QVector<ClipboardItem> items, qint64 selectedID, int fetchLimit) {
+        items_ = items.toStdVector();
+        QSet<qint64> retained;
+        for (const auto &item : items_) retained.insert(item.databaseID);
+        const auto prune = [&retained](QHash<qint64, QImage> &cache) {
+            for (auto it = cache.begin(); it != cache.end();) {
+                if (!retained.contains(it.key())) it = cache.erase(it);
+                else ++it;
+            }
+        };
+        prune(imageThumbnailCache_);
+        prune(linkPreviewCache_);
+        prune(linkIconCache_);
         imageLoadLimit_ = selectedCategory_ == QStringLiteral("Images")
             ? static_cast<int>(items_.size()) : kInitialImageCapacity;
         imageHasMore_ = selectedCategory_ == QStringLiteral("Images")
             && static_cast<int>(items_.size()) == fetchLimit
             && fetchLimit < kHistoryCapacity;
         selectedIndex_ = -1;
-        if (selectedDatabaseID >= 0) {
+        if (selectedID >= 0) {
             for (int index = 0; index < static_cast<int>(items_.size()); ++index) {
-                if (items_[index].databaseID == selectedDatabaseID) {
+                if (items_[index].databaseID == selectedID) {
                     selectedIndex_ = index;
                     break;
                 }
@@ -3725,10 +3794,17 @@ private:
 
     Display *display_ = nullptr;
     HistoryRepository *repository_ = nullptr;
+    ClipboardPipeline *pipeline_ = nullptr;
+    quint64 historyQueryGeneration_ = 0;
+    quint64 payloadRequestGeneration_ = 0;
+    quint64 latestCaptureSequence_ = 0;
+    QSet<qint64> metadataRequested_;
     QNetworkAccessManager network_;
     Window pasteTarget_ = None;
     Window pasteTargetInputWindow_ = None;
     QPointer<QWidget> pasteTargetWidget_;
+    QPointer<QDialog> previewDialog_;
+    std::function<void(QKeyEvent *)> previewKeyHandler_;
     std::vector<ClipboardItem> items_;
     QStringList categoryValuesCache_;
     QVector<int> categoryWidthsCache_;
@@ -3739,10 +3815,18 @@ private:
     bool imageBatchLoading_ = false;
     int selectedIndex_ = -1;
     int scrollOffset_ = 0;
-    qint64 suppressClipboardCaptureUntil_ = 0;
+    bool writingHistoryClipboard_ = false;
+    quint64 clipboardRevision_ = 0;
+    quint64 pasteRequestGeneration_ = 0;
     qint64 focusAcquisitionDeadline_ = 0;
     bool nonActivatingPresentation_ = false;
     bool keyboardGrabbed_ = false;
+    qint64 lastCardPressID_ = -1;
+    qint64 lastCardPressAt_ = 0;
+    QPoint lastCardPressGlobalPos_;
+    qint64 pendingMousePasteID_ = -1;
+    Qt::KeyboardModifiers pendingMousePasteModifiers_ = Qt::NoModifier;
+    QPoint pendingMousePastePosition_;
     unsigned int lastPointerButtonMask_ = 0;
     bool resizing_ = false;
     int resizeStartGlobalY_ = 0;
@@ -3750,6 +3834,8 @@ private:
     int categoryPageStart_ = 0;
     static constexpr int kCategoriesPerPage = 6;
     QLineEdit *searchEdit_ = nullptr;
+    SearchFieldGlyph *searchLeadingGlyph_ = nullptr;
+    SearchFieldGlyph *searchCloseGlyph_ = nullptr;
     QVariantAnimation *searchAnimation_ = nullptr;
     qreal searchExpansion_ = 0.0;
     QTimer *searchDebounce_ = nullptr;
@@ -4615,6 +4701,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
 } // namespace
 
 int main(int argc, char *argv[]) {
+    XInitThreads();
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     QApplication app(argc, argv);
@@ -4888,25 +4975,6 @@ int main(int argc, char *argv[]) {
         QMimeData localFileMime;
         localFileMime.setUrls({QUrl::fromLocalFile(QStringLiteral("/tmp/example.txt"))});
 
-        X11ApplicationIdentity sourceIdentity;
-        sourceIdentity.wmInstance = QStringLiteral("code");
-        sourceIdentity.wmClass = QStringLiteral("Code");
-        sourceIdentity.executablePath = QStringLiteral("/usr/bin/code");
-        DesktopApplicationEntry startupMatch;
-        startupMatch.startupWMClass = QStringLiteral("Code");
-        startupMatch.exec = QStringLiteral("/unrelated/application %F");
-        startupMatch.execPath = desktopExecCommand(startupMatch.exec);
-        startupMatch.execBaseName = QFileInfo(startupMatch.execPath).fileName();
-        DesktopApplicationEntry executableMatch;
-        executableMatch.path = QStringLiteral("/usr/share/applications/code.desktop");
-        executableMatch.exec = QStringLiteral("env GTK_THEME=dark /usr/bin/code --unity-launch %F");
-        executableMatch.execPath = desktopExecCommand(executableMatch.exec);
-        executableMatch.execBaseName = QFileInfo(executableMatch.execPath).fileName();
-        DesktopApplicationEntry fallbackMatch;
-        fallbackMatch.path = QStringLiteral("/usr/share/applications/code.desktop");
-        fallbackMatch.exec = QStringLiteral("code %F");
-        fallbackMatch.execPath = desktopExecCommand(fallbackMatch.exec);
-        fallbackMatch.execBaseName = QFileInfo(fallbackMatch.execPath).fileName();
         QString defaultColorError;
         bool defaultColorScriptMatches = false;
         bool defaultScriptsFormatted = true;
@@ -4992,16 +5060,7 @@ int main(int argc, char *argv[]) {
                 QStringLiteral("collapse-existing-dde-grand-search-duplicate"));
         require(!containsLocalFileURL(&httpURLMime) && containsLocalFileURL(&localFileMime),
                 QStringLiteral("clipboard-url-filter"));
-        require(desktopExecCommand(QStringLiteral("env FOO=bar '/opt/My App/bin/example' %U"))
-                    == QStringLiteral("/opt/My App/bin/example"),
-                QStringLiteral("desktop-exec-parse"));
-        require(desktopMatchScore(startupMatch, sourceIdentity) == 300,
-                QStringLiteral("desktop-match-startup-wm-class"));
-        require(desktopMatchScore(executableMatch, sourceIdentity) == 200,
-                QStringLiteral("desktop-match-executable"));
-        sourceIdentity.executablePath = QStringLiteral("/not/installed/code");
-        require(desktopMatchScore(fallbackMatch, sourceIdentity) == 120,
-                QStringLiteral("desktop-match-fallback"));
+        failures.append(applicationSourceSelfTestFailures());
         require(repository.classifyText(QStringLiteral("https://example.com")) == QStringLiteral("URL"),
                 QStringLiteral("classify-url"));
         require(repository.classifyText(QStringLiteral("{\"ok\":true}")) == QStringLiteral("JSON"),
@@ -5036,6 +5095,330 @@ int main(int argc, char *argv[]) {
                 QStringLiteral("link-title"));
         require(linked != stored.cend() && linked->hasFetchedLinkPreview,
                 QStringLiteral("link-preview-state"));
+        const QSize previewScreen(1920, 1080);
+        for (const QSize imageSize : {QSize(3000, 2000), QSize(2000, 3000), QSize(2000, 2000)}) {
+            const QSize window = imagePreviewWindowSize(imageSize, previewScreen);
+            const double bodyAspect = (window.width() - 20) / double(window.height() - 78);
+            require(std::abs(bodyAspect - imageSize.width() / double(imageSize.height())) < 0.01,
+                    QStringLiteral("image-preview-preserves-aspect"));
+            require(window.width() <= 680 && window.height() <= 500,
+                    QStringLiteral("image-preview-bounded-size"));
+        }
+        require(imagePreviewWindowSize(QSize(30, 20), previewScreen)
+                    == imagePreviewWindowSize(QSize(30000, 20000), previewScreen),
+                QStringLiteral("image-preview-independent-of-pixel-count"));
+        for (const QSize imageSize : {QSize(100000, 1), QSize(1, 100000)}) {
+            const QSize window = imagePreviewWindowSize(imageSize, QSize(600, 400));
+            require(window.width() <= 584 && window.height() <= 384
+                        && window.width() >= 260 && window.height() >= 180,
+                    QStringLiteral("image-preview-extreme-aspect-screen-bounds"));
+        }
+        {
+            // Exercise the actual nested preview/navigation path. With xcb,
+            // also verify that the source's native input focus never moves.
+            HistoryRepository previewRepository(selfTestDirectory.filePath(
+                QStringLiteral("preview-focus.sqlite")));
+            ClipboardItem textItem;
+            textItem.text = QStringLiteral("preview focus regression");
+            textItem.title = QStringLiteral("文本");
+            textItem.copiedAt = now;
+            previewRepository.save(textItem);
+            ClipboardItem imageItem;
+            imageItem.type = ClipboardPayloadType::Image;
+            imageItem.title = QStringLiteral("图片");
+            imageItem.imageData = solidPng(64, QColor(40, 90, 220));
+            imageItem.image.loadFromData(imageItem.imageData);
+            imageItem.image = imageItem.image.scaled(120, 80);
+            imageItem.imageData.clear();
+            QBuffer imageBuffer(&imageItem.imageData);
+            imageBuffer.open(QIODevice::WriteOnly);
+            imageItem.image.save(&imageBuffer, "PNG");
+            imageItem.copiedAt = now.addSecs(1);
+            previewRepository.save(imageItem);
+
+            QLineEdit sourceInput;
+            sourceInput.show();
+            app.processEvents();
+            Window sourceFocus = None;
+            int revertTo = RevertToNone;
+            if (display) {
+                XSetInputFocus(display, static_cast<Window>(sourceInput.winId()),
+                               RevertToParent, CurrentTime);
+                XSync(display, False);
+                XGetInputFocus(display, &sourceFocus, &revertTo);
+            }
+            DeckWindow previewDeck(display, &previewRepository);
+            previewDeck.showNearPointer();
+            auto sendKey = [](QWidget *receiver, int key, const QString &text = QString()) {
+                QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, text);
+                QApplication::sendEvent(receiver, &press);
+            };
+            auto checkPreview = [&](int direction, const QString &expectedTitle) {
+                bool navigated = false;
+                QTimer watchdog;
+                watchdog.setSingleShot(true);
+                QObject::connect(&watchdog, &QTimer::timeout, [&] {
+                    for (QDialog *dialog : previewDeck.findChildren<QDialog *>()) {
+                        if (dialog->isVisible()) dialog->reject();
+                    }
+                });
+                watchdog.start(2000);
+                QTimer::singleShot(0, &previewDeck, [&] {
+                    for (QDialog *dialog : previewDeck.findChildren<QDialog *>()) {
+                        if (!dialog->isVisible()) continue;
+                        require(dialog->windowType() == Qt::Tool
+                                    && dialog->windowFlags().testFlag(Qt::WindowDoesNotAcceptFocus)
+                                    && !dialog->isModal(),
+                                QStringLiteral("preview-nonactivating-nonmodal"));
+                        QLabel *label = dialog->findChild<QLabel *>(QStringLiteral("previewCategory"));
+                        require(label && label->text() == expectedTitle,
+                                QStringLiteral("preview-navigation-content"));
+                        if (expectedTitle == QStringLiteral("图片")) {
+                            const QSize screen = QApplication::desktop()->availableGeometry(
+                                dialog->frameGeometry().center()).size();
+                            require(dialog->size() == imagePreviewWindowSize(imageItem.image.size(), screen),
+                                    QStringLiteral("image-preview-dynamic-window-size"));
+                            QKeyEvent rotate(QEvent::KeyPress, Qt::Key_BracketRight, Qt::ControlModifier);
+                            QApplication::sendEvent(&previewDeck, &rotate);
+                            require(dialog->size() == imagePreviewWindowSize(
+                                        imageSizeAtAngle(imageItem.image.size(), 90), screen),
+                                    QStringLiteral("image-preview-rotation-resizes-window"));
+                        }
+                        if (display) {
+                            Window actual = None;
+                            XGetInputFocus(display, &actual, &revertTo);
+                            require(actual == sourceFocus, QStringLiteral("preview-preserves-native-focus"));
+                        }
+                        navigated = true;
+                        if (display) {
+                            const KeyCode code = XKeysymToKeycode(display,
+                                direction == Qt::Key_Left ? XK_Left : XK_Right);
+                            XTestFakeKeyEvent(display, code, True, CurrentTime);
+                            XTestFakeKeyEvent(display, code, False, CurrentTime);
+                            XFlush(display);
+                        } else {
+                            sendKey(&previewDeck, direction);
+                        }
+                        break;
+                    }
+                });
+                sendKey(&previewDeck, Qt::Key_Space);
+                require(navigated && previewDeck.isVisible(),
+                        QStringLiteral("preview-navigation-keeps-deck"));
+                if (display) {
+                    Window actual = None;
+                    XGetInputFocus(display, &actual, &revertTo);
+                    require(actual == sourceFocus, QStringLiteral("preview-navigation-preserves-native-focus"));
+                }
+            };
+            checkPreview(Qt::Key_Right, QStringLiteral("图片"));
+            checkPreview(Qt::Key_Left, QStringLiteral("文本"));
+            if (display) {
+                const KeyCode code = XKeysymToKeycode(display, XK_a);
+                XTestFakeKeyEvent(display, code, True, CurrentTime);
+                XTestFakeKeyEvent(display, code, False, CurrentTime);
+                XFlush(display);
+                QEventLoop inputLoop;
+                QTimer::singleShot(100, &inputLoop, &QEventLoop::quit);
+                inputLoop.exec();
+            } else {
+                sendKey(&previewDeck, Qt::Key_A, QStringLiteral("a"));
+            }
+            QLineEdit *search = previewDeck.findChild<QLineEdit *>();
+            require(search && search->isVisible() && search->text() == QStringLiteral("a"),
+                    QStringLiteral("preview-navigation-resumes-deck-search"));
+            previewDeck.hide();
+        }
+        {
+            HistoryRepository mouseRepository(selfTestDirectory.filePath(
+                QStringLiteral("mouse-paste.sqlite")));
+            ClipboardItem mouseItem;
+            mouseItem.text = QStringLiteral("mouse-paste-target");
+            mouseItem.copiedAt = now;
+            mouseRepository.save(mouseItem);
+            DeckWindow mouseDeck(display, &mouseRepository);
+            auto waitForEvents = [](int milliseconds) {
+                QEventLoop loop;
+                QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+                loop.exec();
+            };
+            auto sendMouse = [&mouseDeck](QEvent::Type type, Qt::MouseButtons buttons) {
+                const QPoint local(kContentInset + 40, mouseDeck.height() - 100);
+                QMouseEvent event(type, local, mouseDeck.mapToGlobal(local),
+                                  Qt::LeftButton, buttons, Qt::NoModifier);
+                QApplication::sendEvent(&mouseDeck, &event);
+            };
+            // Cover both Qt's native DblClick and UOS's two-press fallback.
+            for (bool fallback : {false, true}) {
+                QApplication::clipboard()->setText(QStringLiteral("before-mouse-paste"));
+                mouseDeck.showNearPointer();
+                sendMouse(QEvent::MouseButtonPress, Qt::LeftButton);
+                sendMouse(QEvent::MouseButtonRelease, Qt::NoButton);
+                sendMouse(fallback ? QEvent::MouseButtonPress : QEvent::MouseButtonDblClick,
+                          Qt::LeftButton);
+                waitForEvents(60);
+                require(mouseDeck.isVisible()
+                            && QApplication::clipboard()->text() == QStringLiteral("before-mouse-paste"),
+                        QStringLiteral("double-click-defers-paste-until-release"));
+                sendMouse(QEvent::MouseButtonRelease, Qt::NoButton);
+                waitForEvents(60);
+                require(!mouseDeck.isVisible()
+                            && QApplication::clipboard()->text() == mouseItem.text,
+                        QStringLiteral("double-click-pastes-on-release"));
+            }
+            // A new cut/copy must supersede an older mouse-paste gesture
+            // which is still queued for the next event-loop turn.
+            mouseDeck.showNearPointer();
+            sendMouse(QEvent::MouseButtonPress, Qt::LeftButton);
+            sendMouse(QEvent::MouseButtonRelease, Qt::NoButton);
+            sendMouse(QEvent::MouseButtonDblClick, Qt::LeftButton);
+            sendMouse(QEvent::MouseButtonRelease, Qt::NoButton);
+            QApplication::clipboard()->setText(QStringLiteral("new-cut-before-queued-paste"));
+            waitForEvents(60);
+            require(QApplication::clipboard()->text() == QStringLiteral("new-cut-before-queued-paste"),
+                    QStringLiteral("new-cut-cancels-queued-mouse-paste"));
+            mouseDeck.hide();
+            if (display) {
+                // Separate X client: detect Ctrl+V delivered to the original
+                // focus, and whether it arrives while button 1 is still held.
+                Display *receiver = XOpenDisplay(nullptr);
+                require(receiver != nullptr, QStringLiteral("mouse-paste-x11-receiver"));
+                if (receiver) {
+                    const Window target = XCreateSimpleWindow(receiver,
+                        DefaultRootWindow(receiver), 20, 20, 500, 180, 0, 0, 0);
+                    XSelectInput(receiver, target, KeyPressMask | KeyReleaseMask);
+                    XMapWindow(receiver, target);
+                    XSetInputFocus(receiver, target, RevertToParent, CurrentTime);
+                    XSync(receiver, False);
+                    mouseDeck.showNearPointer();
+                    QCursor::setPos(mouseDeck.mapToGlobal(
+                        QPoint(kContentInset + 40, mouseDeck.height() - 100)));
+                    XSync(display, False);
+                    XTestFakeButtonEvent(display, 1, True, CurrentTime);
+                    XTestFakeButtonEvent(display, 1, False, CurrentTime);
+                    XFlush(display);
+                    waitForEvents(40);
+                    XTestFakeButtonEvent(display, 1, True, CurrentTime);
+                    XFlush(display);
+                    waitForEvents(100);
+                    require(mouseDeck.isVisible(), QStringLiteral("native-double-click-keeps-deck-until-release"));
+                    XTestFakeButtonEvent(display, 1, False, CurrentTime);
+                    XFlush(display);
+                    waitForEvents(150);
+                    int pasteCount = 0;
+                    bool pastedWhileMouseHeld = false;
+                    while (XPending(receiver)) {
+                        XEvent event{};
+                        XNextEvent(receiver, &event);
+                        if (event.type == 2 /* X11 KeyPress */
+                                && XLookupKeysym(&event.xkey, 0) == XK_v
+                                && (event.xkey.state & ControlMask)) {
+                            ++pasteCount;
+                            pastedWhileMouseHeld |= (event.xkey.state & Button1Mask) != 0;
+                        }
+                    }
+                    require(pasteCount == 1 && !pastedWhileMouseHeld,
+                            QStringLiteral("native-double-click-delivers-one-paste-after-release"));
+                    mouseDeck.showNearPointer();
+                    mouseDeck.pasteSelected(false, true);
+                    QApplication::clipboard()->setText(QStringLiteral("new-cut-before-delayed-control-v"));
+                    waitForEvents(150);
+                    int obsoletePasteCount = 0;
+                    while (XPending(receiver)) {
+                        XEvent event{};
+                        XNextEvent(receiver, &event);
+                        if (event.type == 2 && XLookupKeysym(&event.xkey, 0) == XK_v
+                                && (event.xkey.state & ControlMask)) ++obsoletePasteCount;
+                    }
+                    require(obsoletePasteCount == 0,
+                            QStringLiteral("new-cut-cancels-obsolete-control-v"));
+                    mouseDeck.showNearPointer();
+                    mouseDeck.pasteSelected(false, true);
+                    QApplication::clipboard()->setText(mouseItem.text);
+                    waitForEvents(150);
+                    int sameContentPasteCount = 0;
+                    while (XPending(receiver)) {
+                        XEvent event{};
+                        XNextEvent(receiver, &event);
+                        if (event.type == 2 && XLookupKeysym(&event.xkey, 0) == XK_v
+                                && (event.xkey.state & ControlMask)) ++sameContentPasteCount;
+                    }
+                    require(sameContentPasteCount == 1,
+                            QStringLiteral("same-content-clipboard-handoff-keeps-paste"));
+                    mouseDeck.showNearPointer();
+                    mouseDeck.handleNativeQuickPaste(XKeysymToKeycode(display, XK_1), ControlMask);
+                    QApplication::clipboard()->setText(QStringLiteral("new-cut-before-queued-quick-paste"));
+                    waitForEvents(100);
+                    require(QApplication::clipboard()->text()
+                                == QStringLiteral("new-cut-before-queued-quick-paste"),
+                            QStringLiteral("new-cut-cancels-queued-quick-paste"));
+                    mouseDeck.hide();
+                    XDestroyWindow(receiver, target);
+                    XCloseDisplay(receiver);
+                }
+            }
+        }
+        {
+            QTemporaryDir asyncDirectory;
+            HistoryRepository asyncRepository(asyncDirectory.filePath(QStringLiteral("async-deck.sqlite")));
+            const qint64 captureTime = QDateTime::currentMSecsSinceEpoch();
+            const auto content = [](int index) {
+                return QStringLiteral("async-card-%1\n").arg(index) + QString(6000, QLatin1Char('b'));
+            };
+            for (int index = 0; index < 30; ++index) {
+                ClipboardItem item;
+                item.text = content(index);
+                item.copiedAt = QDateTime::fromMSecsSinceEpoch(captureTime + index);
+                asyncRepository.save(item);
+            }
+            ClipboardPipeline asyncPipeline(asyncRepository.databasePath(), false, {});
+            DeckWindow asyncDeck(nullptr, &asyncRepository, nullptr, &asyncPipeline);
+            asyncPipeline.start();
+            const auto waitUntil = [&](const std::function<bool()> &done) {
+                QElapsedTimer elapsed;
+                elapsed.start();
+                while (!done() && elapsed.elapsed() < 5000) {
+                    app.processEvents(QEventLoop::AllEvents, 5);
+                    QThread::msleep(1);
+                }
+                return done();
+            };
+            const auto pump = [&](int duration) {
+                QEventLoop loop;
+                QTimer::singleShot(duration, &loop, &QEventLoop::quit);
+                loop.exec();
+            };
+            require(waitUntil([&] { return asyncPipeline.recentItems().size() == 10; }),
+                    QStringLiteral("async-deck-startup-ten-item-cache"));
+            asyncDeck.showNearPointer();
+            pump(150);
+            for (int index = 0; index < 10; ++index) {
+                QKeyEvent right(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+                QApplication::sendEvent(&asyncDeck, &right);
+            }
+            asyncDeck.pasteSelected();
+            require(waitUntil([&] { return QApplication::clipboard()->text() == content(19); }),
+                    QStringLiteral("async-deck-loads-beyond-cache-and-pastes-full-selected-id"));
+            asyncDeck.showNearPointer();
+            asyncDeck.pasteSelected();
+            QApplication::clipboard()->setText(QStringLiteral("new-cut-during-payload-load"));
+            pump(150);
+            require(QApplication::clipboard()->text() == QStringLiteral("new-cut-during-payload-load"),
+                    QStringLiteral("async-payload-load-cannot-overwrite-new-native-cut"));
+            ClipboardSnapshot incoming;
+            incoming.text = QByteArrayLiteral("new-capture-goes-to-history-first");
+            incoming.copiedAt = QDateTime::fromMSecsSinceEpoch(captureTime + 100);
+            asyncPipeline.submit(incoming);
+            require(waitUntil([&] {
+                return !asyncPipeline.recentItems().isEmpty()
+                    && asyncPipeline.recentItems().first().text == QString::fromUtf8(incoming.text);
+            }), QStringLiteral("async-deck-receives-new-history"));
+            asyncDeck.pasteSelected();
+            require(QApplication::clipboard()->text() == QString::fromUtf8(incoming.text),
+                    QStringLiteral("async-deck-new-capture-selects-history-first"));
+            asyncDeck.hide();
+        }
+        failures.append(clipboardPipelineSelfTestFailures());
         const bool passed = failures.isEmpty();
         QTextStream(stdout) << (passed ? QStringLiteral("self-test: ok\n")
                                       : QStringLiteral("self-test: failed: ") + failures.join(QStringLiteral(", "))
@@ -5058,7 +5441,9 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     repository.clearExpired(settings.value(QStringLiteral("history/retentionDays"), 30).toInt());
-    DeckWindow deck(display, &repository);
+    ClipboardPipeline pipeline(repository.databasePath(), display != nullptr);
+    const bool rendering = !renderCheckPath.isEmpty() || !settingsRenderPath.isEmpty();
+    DeckWindow deck(display, &repository, nullptr, rendering ? nullptr : &pipeline);
 
     if (!settingsRenderPath.isEmpty()) {
         const QFileInfo output(settingsRenderPath);
@@ -5180,40 +5565,19 @@ int main(int argc, char *argv[]) {
     }
 
     QClipboard *clipboard = QApplication::clipboard();
-    QByteArray lastClipboardFingerprint = clipboardFingerprint(
-        clipboard->mimeData(QClipboard::Clipboard));
-    auto captureClipboard = [&](bool captureEvenIfUnchanged) {
-        const QMimeData *mimeData = clipboard->mimeData(QClipboard::Clipboard);
-        const QByteArray fingerprint = clipboardFingerprint(mimeData);
-        if (!captureEvenIfUnchanged && fingerprint == lastClipboardFingerprint) return;
-        lastClipboardFingerprint = fingerprint;
-        if (deck.takeClipboardCaptureSuppression()) return;
-        if (containsLocalFileURL(mimeData)) return;
-
-        const auto source = activeApplication(QX11Info::display());
-        if (mimeData && mimeData->hasImage()) {
-            if (!settings.value(QStringLiteral("clipboard/recordsImages"), true).toBool()) return;
-            const QImage image = qvariant_cast<QImage>(mimeData->imageData());
-            if (image.isNull()
-                || static_cast<qint64>(image.width()) * image.height() > 60'000'000) return;
-            const int maximumBytes = settings.value(QStringLiteral("clipboard/maximumImageMegabytes"), 10).toInt()
-                * 1024 * 1024;
-            QByteArray encoded;
-            QBuffer buffer(&encoded);
-            buffer.open(QIODevice::WriteOnly);
-            image.save(&buffer, "PNG");
-            if (encoded.size() <= maximumBytes) deck.insertImage(image, source);
-            return;
-        }
-        const QString text = clipboard->text(QClipboard::Clipboard);
-        if (!text.isEmpty()) {
-            deck.insertText(text, mimeData && mimeData->hasHtml() ? mimeData->html() : QString(), source);
-        }
-    };
-    QObject::connect(clipboard, &QClipboard::dataChanged, [&] { captureClipboard(true); });
+    QObject::connect(clipboard, &QClipboard::dataChanged, [&] {
+        // No MIME reads, image encoding, source lookup or database work here.
+        pipeline.captureChanged(deck.isWritingHistoryClipboard() || clipboard->ownsClipboard());
+    });
+    QObject::connect(&pipeline, &ClipboardPipeline::processingError, [](const QString &message) {
+        qWarning() << "[ClipDeck][Capture]" << message;
+    });
+    pipeline.start();
     QTimer clipboardPollTimer;
     clipboardPollTimer.setInterval(400);
-    QObject::connect(&clipboardPollTimer, &QTimer::timeout, [&] { captureClipboard(false); });
+    QObject::connect(&clipboardPollTimer, &QTimer::timeout, [&] {
+        if (!clipboard->ownsClipboard()) pipeline.pollClipboard();
+    });
     clipboardPollTimer.start();
 
     // The shipped UOS target uses X11/xcb. Keeping the non-X11 path inert lets

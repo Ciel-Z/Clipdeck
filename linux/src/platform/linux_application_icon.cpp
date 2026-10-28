@@ -181,7 +181,7 @@ QImage LinuxApplicationIconSet::rasterize(const QSize &targetPhysicalSize, qreal
 }
 
 LinuxApplicationIconSet resolveLinuxApplicationIconSet(const QString &iconValue) {
-    static QMap<QString, LinuxApplicationIconSet> cache;
+    static thread_local QMap<QString, LinuxApplicationIconSet> cache;
     if (cache.contains(iconValue)) return cache.value(iconValue);
 
     LinuxApplicationIconSet result;

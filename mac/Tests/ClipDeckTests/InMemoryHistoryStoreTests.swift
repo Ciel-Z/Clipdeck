@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import XCTest
 @testable import ClipDeck
 
@@ -155,6 +156,72 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(width, 100)
         XCTAssertEqual(height, 100)
         XCTAssertLessThan(data.count, tiff.count)
+    }
+
+    func testClipboardReaderPrefersImageWhenFileURLIsAlsoPresent() throws {
+        let pasteboard = NSPasteboard(name: .init("ClipDeckTests.wechat.\(UUID())"))
+        let tiff = try testImageTIFF()
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.setString("file:///tmp/wechat-photo.jpg", forType: .fileURL))
+        XCTAssertTrue(pasteboard.setData(tiff, forType: .tiff))
+
+        let payload = try withImageRecordingEnabled {
+            try XCTUnwrap(ClipboardReader().read(from: pasteboard))
+        }
+
+        guard case let .image(_, width, height, format) = payload else {
+            return XCTFail("Expected the image representation to win over the file URL")
+        }
+        XCTAssertEqual(width, 8)
+        XCTAssertEqual(height, 4)
+        XCTAssertEqual(format, .png)
+    }
+
+    func testClipboardReaderImportsImageFromTemporaryFileURL() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipdeck-wechat-\(UUID().uuidString).png")
+        let png = try testImagePNG()
+        try png.write(to: fileURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let pasteboard = NSPasteboard(name: .init("ClipDeckTests.wechat-file.\(UUID())"))
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([fileURL as NSURL]))
+
+        let payload = try withImageRecordingEnabled {
+            try XCTUnwrap(ClipboardReader().read(from: pasteboard))
+        }
+
+        guard case let .image(_, width, height, format) = payload else {
+            return XCTFail("Expected an image loaded from the temporary file URL")
+        }
+        XCTAssertEqual(width, 8)
+        XCTAssertEqual(height, 4)
+        XCTAssertEqual(format, .png)
+    }
+
+    func testClipboardReaderImportsJPEGRepresentation() throws {
+        let jpeg = try XCTUnwrap(testBitmap().representation(
+            using: .jpeg,
+            properties: [.compressionFactor: 0.8]
+        ))
+        let pasteboard = NSPasteboard(name: .init("ClipDeckTests.jpeg.\(UUID())"))
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.setData(
+            jpeg,
+            forType: NSPasteboard.PasteboardType(UTType.jpeg.identifier)
+        ))
+
+        let payload = try withImageRecordingEnabled {
+            try XCTUnwrap(ClipboardReader().read(from: pasteboard))
+        }
+
+        guard case let .image(_, width, height, format) = payload else {
+            return XCTFail("Expected JPEG pasteboard data to be normalized")
+        }
+        XCTAssertEqual(width, 8)
+        XCTAssertEqual(height, 4)
+        XCTAssertEqual(format, .png)
     }
 
     func testCategorySwitchingFiltersItemsAndKeepsAVisibleSelection() {
@@ -365,6 +432,34 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.items.first?.imageAngle, 90)
     }
 
+    func testImagePreviewSizeUsesAspectRatioInsteadOfPixelCount() {
+        let small = ContentPreviewLayout.imageSize(pixelWidth: 400, pixelHeight: 200, angle: 0)
+        let large = ContentPreviewLayout.imageSize(pixelWidth: 8_000, pixelHeight: 4_000, angle: 0)
+        let portrait = ContentPreviewLayout.imageSize(pixelWidth: 2_000, pixelHeight: 4_000, angle: 0)
+
+        XCTAssertEqual(small, large)
+        XCTAssertGreaterThan(small.width, small.height)
+        XCTAssertLessThan(portrait.width, portrait.height)
+        XCTAssertLessThanOrEqual(large.width, 560)
+        XCTAssertLessThanOrEqual(large.height, 405)
+    }
+
+    func testImagePreviewSizeAccountsForRenderedRotation() {
+        let landscape = ContentPreviewLayout.imageSize(
+            pixelWidth: 4_000,
+            pixelHeight: 2_000,
+            angle: 0
+        )
+        let rotated = ContentPreviewLayout.imageSize(
+            pixelWidth: 4_000,
+            pixelHeight: 2_000,
+            angle: 90
+        )
+
+        XCTAssertGreaterThan(landscape.width, landscape.height)
+        XCTAssertLessThan(rotated.width, rotated.height)
+    }
+
     func testJSONTextFormatterPrettyPrintsValidJSONAndRejectsInvalidInput() {
         XCTAssertEqual(
             JSONTextFormatter.format(#"{"b":2,"a":1}"#),
@@ -401,5 +496,49 @@ final class InMemoryHistoryStoreTests: XCTestCase {
 
     private func item(_ text: String) -> ClipboardItem {
         ClipboardItem(payload: .text(plainText: text, rtfData: nil), sourceApplication: source)
+    }
+
+    private func testImageTIFF() throws -> Data {
+        try XCTUnwrap(testBitmap().tiffRepresentation)
+    }
+
+    private func testImagePNG() throws -> Data {
+        try XCTUnwrap(testBitmap().representation(using: .png, properties: [:]))
+    }
+
+    private func testBitmap() throws -> NSBitmapImageRep {
+        try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 8,
+            pixelsHigh: 4,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+    }
+
+    private func withImageRecordingEnabled<T>(_ body: () throws -> T) rethrows -> T {
+        let defaults = UserDefaults.standard
+        let previousRecordsImages = defaults.object(forKey: AppPreferences.recordsImagesKey)
+        let previousMaximumMegabytes = defaults.object(forKey: AppPreferences.maximumImageMegabytesKey)
+        defaults.set(true, forKey: AppPreferences.recordsImagesKey)
+        defaults.set(10, forKey: AppPreferences.maximumImageMegabytesKey)
+        defer {
+            if let previousRecordsImages {
+                defaults.set(previousRecordsImages, forKey: AppPreferences.recordsImagesKey)
+            } else {
+                defaults.removeObject(forKey: AppPreferences.recordsImagesKey)
+            }
+            if let previousMaximumMegabytes {
+                defaults.set(previousMaximumMegabytes, forKey: AppPreferences.maximumImageMegabytesKey)
+            } else {
+                defaults.removeObject(forKey: AppPreferences.maximumImageMegabytesKey)
+            }
+        }
+        return try body()
     }
 }

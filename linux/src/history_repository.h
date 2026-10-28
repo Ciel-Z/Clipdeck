@@ -3,10 +3,12 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QImage>
+#include <QSize>
 #include <QSqlDatabase>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 enum class ClipboardPayloadType {
     Text,
@@ -24,6 +26,9 @@ struct ClipboardItem {
     bool hasFetchedLinkPreview = false;
     QByteArray imageData;
     QImage image;
+    QSize imagePixelSize;
+    bool payloadComplete = true;
+    qint64 textLength = 0;
     int imageAngle = 0;
     QString sourceID;
     QString sourceName;
@@ -51,16 +56,21 @@ struct ClipboardCategory {
 
 class HistoryRepository final {
 public:
+    using ItemTransform = std::function<void(ClipboardItem &)>;
     explicit HistoryRepository(const QString &databasePath = QString());
     ~HistoryRepository();
 
     bool isOpen() const;
     QString lastError() const;
+    QString databasePath() const { return databasePath_; }
     ClipboardItem save(const ClipboardItem &item);
     QVector<ClipboardItem> fetch(const QString &category = QString(),
                                  const QString &search = QString(),
                                  int limit = 300,
-                                 int offset = 0) const;
+                                 int offset = 0,
+                                 qint64 itemID = -1,
+                                 bool decodeImages = true,
+                                 const ItemTransform &prepare = {}) const;
     bool updateTitle(qint64 id, const QString &title);
     bool updateText(qint64 id, const QString &text, const QString &category);
     bool updateImage(qint64 id, const QByteArray &pngData, const QImage &image);
@@ -97,7 +107,7 @@ private:
     bool initialize();
     bool collapseRecentDuplicates();
     static QByteArray contentHash(const ClipboardItem &item);
-    static ClipboardItem itemFromQuery(const class QSqlQuery &query);
+    static ClipboardItem itemFromQuery(const class QSqlQuery &query, bool decodeImages = true);
     bool execute(const QString &sql) const;
     static QString classifyBuiltinText(const QString &text);
 

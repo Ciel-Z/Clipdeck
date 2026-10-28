@@ -166,7 +166,8 @@ QString HistoryRepository::lastError() const {
 }
 
 bool HistoryRepository::initialize() {
-    if (!execute(QStringLiteral("PRAGMA foreign_keys = ON"))
+    if (!execute(QStringLiteral("PRAGMA busy_timeout = 2000"))
+        || !execute(QStringLiteral("PRAGMA foreign_keys = ON"))
         || !execute(QStringLiteral("PRAGMA journal_mode = WAL"))
         || !execute(QStringLiteral("PRAGMA synchronous = NORMAL"))) {
         return false;
@@ -474,11 +475,12 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
 
     QSqlQuery existing(database_);
     existing.prepare(QStringLiteral(
-        "SELECT id,copy_count,copied_at,title,category,source_id,source_name FROM content "
-        "WHERE content_hash=? AND last_copied_at>=? "
+        "SELECT id,copy_count,copied_at,title,category,source_id,source_name,last_copied_at FROM content "
+        "WHERE content_hash=? AND last_copied_at>=? AND last_copied_at<=? "
         "ORDER BY last_copied_at DESC,id DESC LIMIT 1"));
     existing.addBindValue(hash);
     existing.addBindValue(duplicateCutoff);
+    existing.addBindValue(now + kDuplicateWindowMs);
     if (existing.exec() && existing.next()) {
         item.databaseID = existing.value(0).toLongLong();
         item.copyCount = existing.value(1).toInt() + 1;
@@ -486,9 +488,10 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
         item.category = existing.value(4).toString();
         const QString existingSourceID = existing.value(5).toString();
         const QString existingSourceName = existing.value(6).toString();
-        const bool preserveExistingSource = isDDEGrandSearchSource(item.sourceID, item.sourceName)
+        const qint64 existingTime = existing.value(7).toLongLong();
+        const bool preserveExistingSource = now < existingTime || (isDDEGrandSearchSource(item.sourceID, item.sourceName)
             && !existingSourceID.isEmpty()
-            && !isDDEGrandSearchSource(existingSourceID, existingSourceName);
+            && !isDDEGrandSearchSource(existingSourceID, existingSourceName));
         QSqlQuery update(database_);
         update.prepare(preserveExistingSource
             ? QStringLiteral(
@@ -505,14 +508,14 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
             item.sourceID = existingSourceID;
             item.sourceName = existingSourceName;
         }
-        update.addBindValue(now);
+        update.addBindValue(std::max(now, existingTime));
         update.addBindValue(item.copyCount);
         update.addBindValue(now);
         update.addBindValue(item.databaseID);
         if (!update.exec()) {
             lastError_ = update.lastError().text();
         }
-        item.copiedAt = QDateTime::fromMSecsSinceEpoch(now);
+        item.copiedAt = QDateTime::fromMSecsSinceEpoch(std::max(now, existingTime));
         return item;
     }
 
@@ -560,7 +563,10 @@ QVector<ClipboardItem> HistoryRepository::fetch(
     const QString &category,
     const QString &search,
     int limit,
-    int offset) const {
+    int offset,
+    qint64 itemID,
+    bool decodeImages,
+    const ItemTransform &prepare) const {
     QVector<ClipboardItem> result;
     if (!isOpen()) {
         return result;
@@ -587,7 +593,8 @@ QVector<ClipboardItem> HistoryRepository::fetch(
     if (!search.trimmed().isEmpty()) {
         sql += QStringLiteral(" AND (content.title LIKE ? ESCAPE '\\' OR content.plain_text LIKE ? ESCAPE '\\')");
     }
-    sql += QStringLiteral(" ORDER BY content.last_copied_at DESC LIMIT ? OFFSET ?");
+    if (itemID >= 0) sql += QStringLiteral(" AND content.id=?");
+    sql += QStringLiteral(" ORDER BY content.last_copied_at DESC,content.id DESC LIMIT ? OFFSET ?");
 
     QSqlQuery query(database_);
     query.prepare(sql);
@@ -599,6 +606,7 @@ QVector<ClipboardItem> HistoryRepository::fetch(
         query.addBindValue(pattern);
         query.addBindValue(pattern);
     }
+    if (itemID >= 0) query.addBindValue(itemID);
     query.addBindValue(std::max(1, limit));
     query.addBindValue(std::max(0, offset));
     if (!query.exec()) {
@@ -606,7 +614,9 @@ QVector<ClipboardItem> HistoryRepository::fetch(
         return result;
     }
     while (query.next()) {
-        result.append(itemFromQuery(query));
+        ClipboardItem item = itemFromQuery(query, decodeImages);
+        if (prepare) prepare(item);
+        result.append(std::move(item));
     }
     return result;
 }
@@ -990,7 +1000,10 @@ bool HistoryRepository::categoryScriptMatches(const QString &script, const QStri
 
 QString HistoryRepository::detectedCodeLanguage(const QString &source, int *score) {
     if (score) *score = 0;
-    const QString text = source.trimmed();
+    // This is a heuristic, not the stored payload or the input to user JS.
+    // Bound regex work so a megabyte-long clipboard line cannot monopolize
+    // the capture worker while newer cuts wait behind it.
+    const QString text = source.left(32768).trimmed();
     if (text.size() < 4) return QString();
     if (!text.contains(QLatin1Char('\n')) && text.size() >= 24) {
         const int structural = text.count(QRegularExpression(QStringLiteral("[{}\\[\\]();=<>$#@]")));
@@ -1124,7 +1137,7 @@ QByteArray HistoryRepository::contentHash(const ClipboardItem &item) {
     return hash.result();
 }
 
-ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query) {
+ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query, bool decodeImages) {
     ClipboardItem item;
     item.databaseID = query.value(0).toLongLong();
     item.title = query.value(1).toString();
@@ -1136,7 +1149,9 @@ ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query) {
     item.linkPreviewData = query.value(6).toByteArray();
     item.hasFetchedLinkPreview = query.value(7).toBool();
     item.imageData = query.value(8).toByteArray();
-    if (item.isImage()) {
+    item.imagePixelSize = QSize(query.value(9).toInt(), query.value(10).toInt());
+    item.textLength = item.text.size();
+    if (item.isImage() && decodeImages) {
         item.image.loadFromData(item.imageData, "PNG");
     }
     item.sourceID = query.value(11).toString();
