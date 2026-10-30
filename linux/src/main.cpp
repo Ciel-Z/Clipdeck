@@ -1091,6 +1091,100 @@ private:
     std::function<void()> triggered_;
 };
 
+// Approximates the macOS behind-window material without the compositor:
+// downsample, box-blur three times (close to a gaussian), then scale back up
+// so bilinear filtering removes any remaining blockiness.
+// Tunable without rebuilding: edit the [material] group in
+// ~/.config/ClipDeck/ClipDeck.conf and reopen the Deck.
+struct DeckMaterial {
+    // Close to the UOS terminal's look: translucent black over the live desktop.
+    int opacity = 37;     // percent of black laid over the backdrop
+    int blur = 0;         // approximate blur radius in physical pixels, 0 = off
+
+    static DeckMaterial load() {
+        QSettings settings;
+        settings.beginGroup(QStringLiteral("material"));
+        DeckMaterial material;
+        auto value = [&settings](const char *key, int fallback, int low, int high) {
+            const QString name = QString::fromLatin1(key);
+            if (!settings.contains(name)) settings.setValue(name, fallback);
+            return qBound(low, settings.value(name, fallback).toInt(), high);
+        };
+        material.opacity = value("opacity", material.opacity, 0, 100);
+        material.blur = value("blur", material.blur, 0, 80);
+        settings.endGroup();
+        settings.sync();
+        return material;
+    }
+
+    void save() const {
+        QSettings settings;
+        settings.beginGroup(QStringLiteral("material"));
+        settings.setValue(QStringLiteral("opacity"), opacity);
+        settings.setValue(QStringLiteral("blur"), blur);
+        settings.endGroup();
+        settings.sync();
+    }
+
+    QColor tint() const { return QColor(0, 0, 0, qRound(opacity * 2.55)); }
+};
+
+QPixmap frostedBackdrop(const QImage &source, const QSize &logicalSize, qreal dpr, int blur) {
+    if (source.isNull() || logicalSize.isEmpty()) return {};
+    // Three box passes of radius 2 give sigma ~2.45 samples, so the
+    // downsample factor sets the blur radius in source pixels.
+    const int downsample = std::max(1, qRound(blur / 2.45));
+    const int radius = std::min(blur, 2);
+    QImage small = source.convertToFormat(QImage::Format_RGB32).scaled(
+        std::max(1, source.width() / downsample), std::max(1, source.height() / downsample),
+        Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    const int w = small.width();
+    const int h = small.height();
+    std::vector<QRgb> buffer(static_cast<size_t>(w) * h);
+    std::vector<QRgb> scratch(buffer.size());
+    for (int y = 0; y < h; ++y) {
+        const auto *line = reinterpret_cast<const QRgb *>(small.constScanLine(y));
+        std::copy(line, line + w, buffer.begin() + static_cast<ptrdiff_t>(y) * w);
+    }
+    auto boxPass = [&](const std::vector<QRgb> &in, std::vector<QRgb> &out, bool horizontal) {
+        const int outer = horizontal ? h : w;
+        const int inner = horizontal ? w : h;
+        for (int o = 0; o < outer; ++o) {
+            auto at = [&](int i) {
+                i = qBound(0, i, inner - 1);
+                return in[horizontal ? static_cast<size_t>(o) * w + i : static_cast<size_t>(i) * w + o];
+            };
+            int r = 0, g = 0, b = 0;
+            for (int i = -radius; i <= radius; ++i) {
+                const QRgb c = at(i);
+                r += qRed(c); g += qGreen(c); b += qBlue(c);
+            }
+            const int span = radius * 2 + 1;
+            for (int i = 0; i < inner; ++i) {
+                out[horizontal ? static_cast<size_t>(o) * w + i : static_cast<size_t>(i) * w + o]
+                    = qRgb(r / span, g / span, b / span);
+                const QRgb add = at(i + radius + 1);
+                const QRgb drop = at(i - radius);
+                r += qRed(add) - qRed(drop);
+                g += qGreen(add) - qGreen(drop);
+                b += qBlue(add) - qBlue(drop);
+            }
+        }
+    };
+    for (int pass = 0; pass < 3; ++pass) {
+        boxPass(buffer, scratch, true);
+        boxPass(scratch, buffer, false);
+    }
+    for (int y = 0; y < h; ++y)
+        std::copy(buffer.begin() + static_cast<ptrdiff_t>(y) * w,
+                  buffer.begin() + static_cast<ptrdiff_t>(y + 1) * w,
+                  reinterpret_cast<QRgb *>(small.scanLine(y)));
+    QPixmap result = QPixmap::fromImage(small.scaled(
+        DisplayScale::rasterSize(logicalSize, dpr), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    result.setDevicePixelRatio(dpr);
+    return result;
+}
+
 int normalizedImageAngle(int angle) {
     return ((angle % 360) + 360) % 360;
 }
@@ -1330,11 +1424,20 @@ public:
             std::max(340, static_cast<int>(available.height() * 0.385))).toInt();
         const int height = std::min(maximumHeight, std::max(250, preferred));
 
-        setGeometry(
+        const QRect deckRect(
             available.x() + kHorizontalInset,
             available.y() + available.height() - height,
             std::max(320, available.width() - kHorizontalInset * 2),
             height);
+        // Capture what sits behind the Deck before it appears.  Cover the
+        // tallest resize height so dragging the top edge never runs past it.
+        if (!isVisible()) {
+            const QRect band(deckRect.x(), deckRect.bottom() + 1 - maximumHeight,
+                             deckRect.width(), maximumHeight);
+            material_ = DeckMaterial::load();
+            captureBackdrop(band);
+        }
+        setGeometry(deckRect);
         clampScrollOffset();
         show();
         raise();
@@ -1457,6 +1560,14 @@ public:
 
     bool isWritingHistoryClipboard() const { return writingHistoryClipboard_; }
 
+    const DeckMaterial &material() const { return material_; }
+    void setMaterial(const DeckMaterial &material) {
+        material_ = material;
+        material_.save();
+        rebuildBackdrop();
+        update();
+    }
+
     void refresh() {
         if (pipeline_) pipeline_->refreshRecent();
         refreshCategoryValues();
@@ -1559,21 +1670,27 @@ protected:
 
         QPainterPath deckPath;
         deckPath.addRoundedRect(QRectF(0, 0, width(), height()), 24, 24);
-        // Match the macOS material stack: compositor blur behind the window, a
-        // restrained dark tint, then a very light vertical sheen.  Keep this
-        // per-pixel instead of changing window opacity so cards remain opaque.
-        // UOS does not provide the same behind-window material response as
-        // macOS.  Use the slightly darker macOS neutral (#c9c9c9) and a
-        // stronger black-grey tint so bright windows do not wash the Deck out.
-        // This remains per-pixel; cards are still fully opaque.
-        painter.fillPath(deckPath, QColor(184, 184, 184, 138));
-        painter.fillPath(deckPath, QColor(0, 0, 0, 72));
+        // Material: an optional frosted snapshot of what is behind the Deck,
+        // then black at the configured opacity (the UOS terminal uses 60%).
+        // Without the snapshot the compositor shows the live desktop through
+        // the same tint.  Cards stay fully opaque either way.
+        if (!backdrop_.isNull()) {
+            painter.save();
+            painter.setClipPath(deckPath);
+            painter.drawPixmap(backdropOrigin_ - mapToGlobal(QPoint(0, 0)), backdrop_);
+            painter.restore();
+        }
+        painter.fillPath(deckPath, material_.tint());
 
         QLinearGradient materialSheen(0, 0, 0, height());
         materialSheen.setColorAt(0, QColor(255, 255, 255, 15));
         materialSheen.setColorAt(0.50, QColor(255, 255, 255, 0));
         materialSheen.setColorAt(1, QColor(0, 0, 0, 15));
         painter.fillPath(deckPath, materialSheen);
+        // The faint light rim macOS draws around dark translucent windows.
+        painter.setPen(QPen(QColor(255, 255, 255, 22), 1));
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 23.5, 23.5);
+        painter.setPen(Qt::NoPen);
 
         paintHeader(painter);
         if (items_.empty()) {
@@ -2144,6 +2261,21 @@ private:
         return card.adjusted(0, header, 0, 0);
     }
 
+    // macOS marks selection with a faint white fill and a soft 4px shadow
+    // (no visible edge); stacked low-alpha rings approximate that blur.
+    static void paintSelectionPill(QPainter &painter, const QRect &area, int radius, int fillAlpha) {
+        painter.save();
+        painter.setPen(Qt::NoPen);
+        for (int ring = 4; ring >= 1; --ring) {
+            painter.setBrush(QColor(0, 0, 0, 7));
+            painter.drawRoundedRect(QRectF(area).translated(0, 1).adjusted(-ring, -ring, ring, ring),
+                                    radius + ring, radius + ring);
+        }
+        painter.setBrush(QColor(255, 255, 255, fillAlpha));
+        painter.drawRoundedRect(area, radius, radius);
+        painter.restore();
+    }
+
     void paintHeader(QPainter &painter) {
         QFont font = categoryFont();
         painter.setFont(font);
@@ -2153,11 +2285,7 @@ private:
         for (int index=0; index<4; ++index) {
             const QRect area=fixedTypeRect(index);
             const bool selected=categories.value(index)==selectedCategory_;
-            if (selected) {
-                painter.setPen(Qt::NoPen); painter.setBrush(QColor(0,0,0,30));
-                painter.drawRoundedRect(area.translated(0,2).adjusted(-2,-1,2,2),11,11);
-                painter.setBrush(QColor(255,255,255,41)); painter.drawRoundedRect(area,9,9);
-            }
+            if (selected) paintSelectionPill(painter,area,9,36);
             drawDeckSymbol(painter,QRect(area.x()+10,area.y()+8,19,19),symbols[index],QColor(255,255,255,selected?255:166));
             if (index==0 || selected) {
                 painter.setPen(QColor(255,255,255,selected?255:166));
@@ -2172,11 +2300,7 @@ private:
             const QRect area=categoryRect(index-4);
             if (!area.intersects(customStripRect())) continue;
             const bool selected=categories[index]==selectedCategory_;
-            if (selected) {
-                painter.setPen(Qt::NoPen); painter.setBrush(QColor(0,0,0,25));
-                painter.drawRoundedRect(area.translated(0,2).adjusted(-1,0,1,1),16,16);
-                painter.setBrush(QColor(255,255,255,36)); painter.drawRoundedRect(area,16,16);
-            }
+            if (selected) paintSelectionPill(painter,area,16,31);
             QFont labelFont=font;
             const int natural=QFontMetrics(labelFont).horizontalAdvance(categories[index]);
             const int available=area.width()-22;
@@ -3653,6 +3777,32 @@ private:
         XFlush(display_);
     }
 
+    void captureBackdrop(const QRect &band) {
+        backdropShot_ = QImage();
+        backdrop_ = QPixmap();
+        if (band.isEmpty()) return;
+        // QGuiApplication::screenAt() can return null on Qt 5.11/X11.
+        QScreen *screen = QGuiApplication::primaryScreen();
+        for (QScreen *candidate : QGuiApplication::screens()) {
+            if (candidate->geometry().contains(band.center())) screen = candidate;
+        }
+        if (!screen) return;
+        const QRect local = band.translated(-screen->geometry().topLeft());
+        const QImage shot = screen->grabWindow(0, local.x(), local.y(),
+                                               local.width(), local.height()).toImage();
+        if (shot.isNull()) qWarning("ClipDeck: could not capture the Deck backdrop");
+        backdropShot_ = shot;
+        backdropOrigin_ = band.topLeft();
+        backdropSize_ = band.size();
+        rebuildBackdrop();
+    }
+
+    void rebuildBackdrop() {
+        backdrop_ = material_.blur > 0
+            ? frostedBackdrop(backdropShot_, backdropSize_, devicePixelRatioF(), material_.blur)
+            : QPixmap();
+    }
+
     void suspendKWinBlur() {
         clearMask();
         if (!display_) return;
@@ -4002,6 +4152,11 @@ private:
     qreal searchExpansion_ = 0.0;
     QTimer *searchDebounce_ = nullptr;
     QTimer *blurUpdateTimer_ = nullptr;
+    QImage backdropShot_;
+    QSize backdropSize_;
+    QPixmap backdrop_;
+    DeckMaterial material_;
+    QPoint backdropOrigin_;
     QTimer *resizeReleaseTimer_ = nullptr;
     QTimer *resizeFrameTimer_ = nullptr;
     QTimer *outsideClickTimer_ = nullptr;
@@ -5907,6 +6062,9 @@ int main(int argc, char *argv[]) {
     QMenu trayMenu;
     QAction *showAction = trayMenu.addAction(QStringLiteral("显示 Deck"));
     QAction *settingsAction = trayMenu.addAction(QStringLiteral("设置…"));
+    QAction *blurAction = trayMenu.addAction(QStringLiteral("背景模糊"));
+    blurAction->setCheckable(true);
+    blurAction->setChecked(DeckMaterial::load().blur > 0);
     settingsAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Comma));
     settingsAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
     settingsAction->setShortcutVisibleInContextMenu(true);
@@ -6003,6 +6161,11 @@ int main(int argc, char *argv[]) {
 
     QObject::connect(showAction, &QAction::triggered, [&deck] { deck.toggleNearPointer(); });
     QObject::connect(settingsAction, &QAction::triggered, [&] { openSettingsProcess(0); });
+    QObject::connect(blurAction, &QAction::toggled, [&deck](bool enabled) {
+        DeckMaterial material = deck.material();
+        material.blur = enabled ? 1 : 0;
+        deck.setMaterial(material);
+    });
     deck.setSettingsCallback([&](int page) { openSettingsProcess(page); });
     QObject::connect(quitAction, &QAction::triggered, &app, &QApplication::quit);
     QObject::connect(&tray, &QSystemTrayIcon::activated,
