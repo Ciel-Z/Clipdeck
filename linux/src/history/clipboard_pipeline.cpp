@@ -1,6 +1,8 @@
 #include "clipboard_pipeline.h"
 #include "capture_payload.h"
+#ifndef CLIPDECK_NO_X11
 #include "../platform/x11_clipboard_reader.h"
+#endif
 #include "../ui/display_scale.h"
 
 #include <QBuffer>
@@ -200,6 +202,7 @@ private:
 
 ClipboardPipeline::ClipboardPipeline(QString path, bool useX11, SourceResolver resolver, QObject *parent)
     : QObject(parent), worker_(new HistoryWorker(this, std::move(path), std::move(resolver))) {
+#ifndef CLIPDECK_NO_X11
     if (useX11) {
         reader_ = new X11ClipboardReader([this](ClipboardSnapshot snapshot) {
             worker_->enqueue(std::move(snapshot));
@@ -208,11 +211,17 @@ ClipboardPipeline::ClipboardPipeline(QString path, bool useX11, SourceResolver r
         QObject::connect(&readerThread_, &QThread::started, reader_, [this] { reader_->start(); });
         QObject::connect(&readerThread_, &QThread::finished, reader_, &QObject::deleteLater);
     }
+#else
+    // Snapshots come from a platform monitor through submit().
+    Q_UNUSED(useX11)
+#endif
 }
 
 ClipboardPipeline::~ClipboardPipeline() {
     if (reader_ && started_) { readerThread_.quit(); readerThread_.wait(); }
+#ifndef CLIPDECK_NO_X11
     else if (reader_) delete reader_;
+#endif
     if (started_) worker_->stop();
 }
 
@@ -228,9 +237,13 @@ void ClipboardPipeline::notifyReader(bool changed, bool ignore, bool baseline) {
     const quint64 sequence = ++nextSequence_;
     lastCaptureTime_ = std::max(QDateTime::currentMSecsSinceEpoch(), lastCaptureTime_ + 1);
     const auto time = QDateTime::fromMSecsSinceEpoch(lastCaptureTime_);
+#ifndef CLIPDECK_NO_X11
     QMetaObject::invokeMethod(reader_, [reader = reader_, sequence, time, changed, ignore, baseline] {
         reader->capture(sequence, time, changed, ignore, baseline, !changed && !baseline);
     }, Qt::QueuedConnection);
+#else
+    Q_UNUSED(sequence) Q_UNUSED(time) Q_UNUSED(changed) Q_UNUSED(ignore) Q_UNUSED(baseline)
+#endif
 }
 
 void ClipboardPipeline::captureChanged(bool ownHistoryWrite) { notifyReader(true, ownHistoryWrite); }

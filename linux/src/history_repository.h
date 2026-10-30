@@ -8,6 +8,7 @@
 #include <QSqlDatabase>
 #include <QString>
 #include <QStringList>
+#include <QUuid>
 #include <QVector>
 #include <functional>
 
@@ -18,6 +19,9 @@ enum class ClipboardPayloadType {
 };
 
 struct ClipboardItem {
+    // In-memory identity (mac ClipboardItem.id). Survives save() so a transient
+    // capture can be reconciled with its persisted row.
+    QUuid id = QUuid::createUuid();
     qint64 databaseID = -1;
     QString title;
     ClipboardPayloadType type = ClipboardPayloadType::Text;

@@ -1,5 +1,12 @@
 #include "history_repository.h"
 
+#include <QtGlobal>
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+#define QT_STRING_SKIP_EMPTY Qt::SkipEmptyParts
+#else
+#define QT_STRING_SKIP_EMPTY QString::SkipEmptyParts
+#endif
+
 #include <QCryptographicHash>
 #include <QDebug>
 #include <QDir>
@@ -908,7 +915,7 @@ QString HistoryRepository::classifyText(const QString &text, const QString &sour
         if (!classify.isCallable()) continue;
         QJSValue item = engine.newObject();
         item.setProperty(QStringLiteral("text"), text);
-        item.setProperty(QStringLiteral("textLength"), text.size());
+        item.setProperty(QStringLiteral("textLength"), int(text.size()));
         QJSValue application = engine.newObject();
         application.setProperty(QStringLiteral("bundleId"), sourceID);
         application.setProperty(QStringLiteral("name"), sourceName);
@@ -994,7 +1001,7 @@ bool HistoryRepository::categoryScriptMatches(const QString &script, const QStri
     }
     QJSValue item = engine.newObject();
     item.setProperty(QStringLiteral("text"), text);
-    item.setProperty(QStringLiteral("textLength"), text.size());
+    item.setProperty(QStringLiteral("textLength"), int(text.size()));
     QJSValue application = engine.newObject();
     application.setProperty(QStringLiteral("bundleId"), QStringLiteral("app.clipdeck.script-test"));
     application.setProperty(QStringLiteral("name"), QStringLiteral("脚本测试"));
@@ -1026,7 +1033,7 @@ QString HistoryRepository::detectedCodeLanguage(const QString &source, int *scor
     if (text.size() < 4) return QString();
     if (!text.contains(QLatin1Char('\n')) && text.size() >= 24) {
         const int structural = text.count(QRegularExpression(QStringLiteral("[{}\\[\\]();=<>$#@]")));
-        const int words = text.split(QRegularExpression(QStringLiteral("\\s+")), QString::SkipEmptyParts).size();
+        const int words = text.split(QRegularExpression(QStringLiteral("\\s+")), QT_STRING_SKIP_EMPTY).size();
         if (words >= 5 && structural == 0) return QString();
     }
     struct Signal { QString pattern; int weight; };

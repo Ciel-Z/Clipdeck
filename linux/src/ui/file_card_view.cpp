@@ -153,7 +153,7 @@ void paintFileCard(QPainter &p, const QRect &content, const QVector<ClipboardFil
     } else {
         const int available = std::max(0,body.height()-24);
         const int footer = files.size()*30-4<=available ? 0 : 22;
-        const int count = std::min(files.size(),std::max(0,(available-footer+4)/30));
+        const int count = std::min(int(files.size()),std::max(0,(available-footer+4)/30));
         for (int i=0;i<count;++i) {
             const auto &file=files[i]; const int y=body.y()+12+i*30;
             drawDeckSymbol(p,QRect(body.x()+12,y+3,20,20),fileSymbol(file),fileBlue);
