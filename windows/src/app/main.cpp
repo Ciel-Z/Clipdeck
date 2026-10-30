@@ -28,6 +28,9 @@ int main(int argc, char *argv[]) {
 
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
     QQuickWindow::setDefaultAlphaBuffer(true);
+    // Native glyph rasterisation (as on mac) instead of distance fields,
+    // which look soft at 11–14 px.
+    QQuickWindow::setTextRenderType(QQuickWindow::NativeTextRendering);
     // Qt 6.12 + D3D11 + an alpha-buffer window: the threaded render loop
     // stalls after the first frames (Phase 0 finding); the basic loop does not.
     if (!qEnvironmentVariableIsSet("QSG_RENDER_LOOP")) qputenv("QSG_RENDER_LOOP", "basic");

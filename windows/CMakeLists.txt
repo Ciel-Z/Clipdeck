@@ -56,6 +56,7 @@ target_link_libraries(clipdeck-store PUBLIC clipdeck-core)
 # The ClipDeck application: Deck window (QML), tray, hot key, capture, paste.
 add_library(clipdeck-app STATIC
   src/app/deck_presentation.cpp
+  src/app/deck_backdrop.cpp
   src/app/deck_image_provider.cpp
   src/app/deck_item_model.cpp
   src/app/deck_controller.cpp
@@ -94,6 +95,7 @@ qt_add_qml_module(clipdeck
     qml/ConfirmDialog.qml
     qml/TextButton.qml
     qml/CategorySettings.qml
+    qml/DropShadow.qml
 )
 set(APP_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/../shared/assets/Assets.xcassets/AppIcon.appiconset")
 qt_add_resources(clipdeck "app_icons"

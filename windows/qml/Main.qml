@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Window
 
 // Port of HistoryPanelView (toolbar, category entries, card strip, empty
@@ -19,9 +20,9 @@ Window {
     // strip scrolls or the Deck moves.
     readonly property rect popoverAnchor: {
         const index = deck.popover.index !== undefined ? deck.popover.index : -1
-        const dependencies = [cards.contentX, root.x, root.y, root.width, root.height, root.cardSide]
+        const dependencies = [cards.contentX, root.x, root.y, root.width, root.height, root.cardSide, deck.deckHeight]
         const item = index >= 0 ? cards.itemAtIndex(index) : null
-        if (!item) return Qt.rect(root.x + root.width / 2 - 1, root.y + 60, 2, 2)
+        if (!item) return Qt.rect(root.x + root.width / 2 - 1, root.y + root.height - deck.deckHeight + 60, 2, 2)
         const origin = item.mapToGlobal(0, 0)
         return Qt.rect(origin.x, origin.y, item.width, item.height)
     }
@@ -47,10 +48,48 @@ Window {
 
     Item {
         id: deckRoot
-        anchors.fill: parent
+        // The window is as tall as the Deck can get; the Deck is its bottom part.
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: deck.deckHeight
         focus: true
 
-        // Container: OS acrylic + black 20% + white 6% → clear → black 6%.
+        // Material (DeckMaterialView): the frosted screen behind the Deck,
+        // clipped to 24 pt corners, then the vibrancy tint, black 20 % and
+        // white 6 % → clear → black 6 %.
+        Item {
+            id: material
+            anchors.fill: parent
+            layer.enabled: true
+            layer.effect: MultiEffect {
+                maskEnabled: true
+                maskSource: materialMask
+                maskThresholdMin: 0.5
+                maskSpreadAtMin: 1.0
+            }
+            Image {
+                // Screen-aligned: the capture covers the whole window.
+                y: deckRoot.height - root.height
+                width: root.width
+                height: root.height
+                source: deck.backdropUrl
+                smooth: true
+                cache: false
+            }
+            Rectangle {
+                anchors.fill: parent
+                color: Qt.rgba(0.118, 0.118, 0.125, 0.51)
+            }
+        }
+        Rectangle {
+            id: materialMask
+            anchors.fill: parent
+            radius: 24
+            visible: false
+            layer.enabled: true
+            layer.smooth: true
+        }
         Rectangle {
             anchors.fill: parent
             radius: 24

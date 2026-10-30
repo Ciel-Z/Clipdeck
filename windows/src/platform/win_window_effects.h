@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QRect>
 #include <QtGlobal>
 
 #include <windows.h>
@@ -20,6 +21,9 @@ bool setAccent(HWND window, Accent accent, quint32 tint);
 bool isAccentAvailable();
 // radius <= 0 removes the region.
 bool setRoundedRegion(HWND window, int radiusPixels);
+// A rounded rect inside the client area (physical pixels). On a
+// DirectComposition window this shapes hit-testing, not what is drawn.
+bool setRoundedRegion(HWND window, const QRect &rect, int radiusPixels);
 // Keeps the window out of Alt+Tab and the taskbar (mac nonactivating panel).
 void setToolWindow(HWND window);
 // Dark caption for the settings window (DWMWA_USE_IMMERSIVE_DARK_MODE: 20,

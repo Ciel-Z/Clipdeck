@@ -37,6 +37,10 @@ class DeckController final : public QObject {
     Q_PROPERTY(QString feedbackMessage READ feedbackMessage NOTIFY feedbackChanged)
     Q_PROPERTY(bool resizing READ resizing NOTIFY resizingChanged)
     Q_PROPERTY(bool deckVisible READ deckVisible NOTIFY deckVisibleChanged)
+    // The window keeps the maximum height; the Deck is the bottom deckHeight of it,
+    // so resizing never resizes the native window (or its swap chain).
+    Q_PROPERTY(qreal deckHeight READ deckHeight NOTIFY deckHeightChanged)
+    Q_PROPERTY(QString backdropUrl READ backdropUrl NOTIFY backdropChanged)
     // Preview / edit / rename popover: {kind: "" | "preview" | "edit" | "rename", index, …}
     Q_PROPERTY(QVariantMap popover READ popover NOTIFY popoverChanged)
     // Configurable in Settings → 键盘快捷键 (Qt::KeyboardModifier / Qt::Key values).
@@ -65,6 +69,8 @@ public:
     QString feedbackMessage() const { return store_.filePasteFeedback().message; }
     bool resizing() const { return resizing_; }
     bool deckVisible() const { return window_ && window_->isVisible(); }
+    qreal deckHeight() const { return deckHeight_; }
+    QString backdropUrl() const;
 
     // Window
     Q_INVOKABLE void toggle(const QString &trigger);
@@ -133,6 +139,8 @@ Q_SIGNALS:
     void resizingChanged();
     void deckVisibleChanged();
     void deckShown();
+    void deckHeightChanged();
+    void backdropChanged();
     void popoverChanged();
     void previewScrollRequested(int direction);
     void shortcutsChanged();
@@ -148,7 +156,8 @@ private:
     void performSearch(const QString &query);
     void pasteItem(const ClipboardItem &item, bool plainText);
     void deliverPaste(const ClipboardItem &item, bool plainText);
-    void updateGeometry(qreal height);
+    void captureBackdrop(QScreen *screen, const QRect &frame);
+    void updateRegion();
     void applyEffects();
     void onActiveChanged();
     HWND deckWindow() const;
@@ -174,4 +183,8 @@ private:
     bool resizing_ = false;
     qreal resizeStartY_ = 0;
     qreal resizeStartHeight_ = 0;
+    qreal deckHeight_ = 340;
+    qreal minimumHeight_ = 250;
+    qreal maximumHeight_ = 420;
+    int backdropRevision_ = 0;
 };

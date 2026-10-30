@@ -56,6 +56,7 @@ Rectangle {
         z: 1000
 
         MouseArea { anchors.fill: parent; onClicked: popup.visible = false }
+        DropShadow { target: list; blur: 18; offsetY: 4 }
 
         Rectangle {
             id: list
@@ -67,8 +68,6 @@ Rectangle {
             radius: 8
             color: "#2E2E32"
             border.color: Qt.rgba(1, 1, 1, 0.12)
-            layer.enabled: true
-            layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Qt.rgba(0, 0, 0, 0.45); blurMax: 18; shadowBlur: 1.0; shadowVerticalOffset: 4 }
             Column {
                 id: optionColumn
                 x: 5; y: 5

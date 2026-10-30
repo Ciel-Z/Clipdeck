@@ -94,6 +94,25 @@ Window {
         function onDeckVisibleChanged() { if (!deck.deckVisible) menu.close() }
     }
 
+    // The shadow is its own layer behind the panel: text rendered inside an
+    // effect layer is resampled and looks soft.
+    Rectangle {
+        x: panel.x
+        y: panel.y
+        width: panel.width
+        height: panel.height
+        radius: panel.radius
+        color: "black"
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: Qt.rgba(0, 0, 0, 0.45)
+            blurMax: 20
+            shadowBlur: 1.0
+            shadowVerticalOffset: 5
+        }
+    }
+
     Rectangle {
         id: panel
         x: menu.margin
@@ -103,14 +122,6 @@ Window {
         radius: 10
         color: Qt.rgba(0.17, 0.17, 0.19, 0.97)
         border.color: Qt.rgba(1, 1, 1, 0.12)
-        layer.enabled: true
-        layer.effect: MultiEffect {
-            shadowEnabled: true
-            shadowColor: Qt.rgba(0, 0, 0, 0.45)
-            blurMax: 20
-            shadowBlur: 1.0
-            shadowVerticalOffset: 5
-        }
 
         Column {
             id: column

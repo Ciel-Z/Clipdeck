@@ -4,6 +4,7 @@
 #include "deck_item_model.h"
 #include "deck_presentation.h"
 #include "app_preferences.h"
+#include "deck_backdrop.h"
 #include "javascript_formatter.h"
 #include "settings_controller.h"
 
@@ -185,6 +186,27 @@ void settingsLogicTests() {
     settings.remove(QStringLiteral("shortcuts"));
 }
 
+void backdropTests() {
+    QImage stripes(800, 160, QImage::Format_RGB32);
+    for (int y = 0; y < stripes.height(); ++y) {
+        for (int x = 0; x < stripes.width(); ++x) stripes.setPixel(x, y, (x / 8) % 2 ? qRgb(255, 255, 255) : qRgb(0, 0, 0));
+    }
+    const QImage frosted = DeckBackdrop::frost(stripes, 8, 3, 3, 1.0);
+    check(frosted.size() == QSize(100, 20), "backdrop-is-downscaled");
+    int minimum = 255, maximum = 0;
+    for (int x = 10; x < 90; ++x) {
+        minimum = std::min(minimum, qRed(frosted.pixel(x, 10)));
+        maximum = std::max(maximum, qRed(frosted.pixel(x, 10)));
+    }
+    check(maximum - minimum < 20 && minimum > 100 && maximum < 160, "backdrop-blurs-stripes-to-grey");
+
+    QImage red(64, 64, QImage::Format_RGB32);
+    red.fill(qRgb(180, 100, 100));
+    const QImage vivid = DeckBackdrop::frost(red, 8, 1, 1, 1.5);
+    check(qRed(vivid.pixel(4, 4)) > 180 && qGreen(vivid.pixel(4, 4)) < 100, "backdrop-raises-saturation");
+    check(DeckBackdrop::frost(QImage()).isNull(), "backdrop-of-nothing-is-null");
+}
+
 void modelTests() {
     auto *images = new DeckImageProvider;
     DeckItemModel model(images);
@@ -236,6 +258,7 @@ int main(int argc, char *argv[]) {
     jsonTests();
     popoverTextTests();
     settingsLogicTests();
+    backdropTests();
     modelTests();
     std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "ALL PASSED", failures);
     return failures ? 1 : 0;

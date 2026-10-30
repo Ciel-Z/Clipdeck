@@ -33,15 +33,16 @@ Item {
         color: Qt.rgba(0, 0, 0, 0.45)
         MouseArea { anchors.fill: parent }
     }
+    DropShadow { target: panel; blur: 30; offsetY: 8; strength: 0.5 }
     Rectangle {
-        anchors.centerIn: parent
+        id: panel
+        x: Math.round((parent.width - width) / 2)
+        y: Math.round((parent.height - height) / 2)
         width: 380
         height: content.implicitHeight + 44
         radius: 12
         color: "#2E2E32"
         border.color: Qt.rgba(1, 1, 1, 0.12)
-        layer.enabled: true
-        layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Qt.rgba(0, 0, 0, 0.5); blurMax: 30; shadowBlur: 1.0; shadowVerticalOffset: 8 }
 
         Column {
             id: content

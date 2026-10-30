@@ -53,6 +53,15 @@ bool setRoundedRegion(HWND window, int radiusPixels) {
     return false;
 }
 
+bool setRoundedRegion(HWND window, const QRect &rect, int radiusPixels) {
+    if (!window || rect.isEmpty()) return false;
+    HRGN region = CreateRoundRectRgn(rect.left(), rect.top(), rect.left() + rect.width() + 1,
+                                     rect.top() + rect.height() + 1, radiusPixels * 2, radiusPixels * 2);
+    if (SetWindowRgn(window, region, FALSE) != 0) return true; // no repaint: the scene draws the shape
+    DeleteObject(region);
+    return false;
+}
+
 void setDarkTitleBar(HWND window) {
     if (!window) return;
     const BOOL dark = TRUE;

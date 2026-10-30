@@ -1,6 +1,7 @@
 #include "deck_controller.h"
 
 #include "app_preferences.h"
+#include "deck_backdrop.h"
 #include "deck_image_provider.h"
 #include "deck_presentation.h"
 #include "history/file_paste_controller.h"
@@ -24,7 +25,6 @@
 namespace {
 
 const QString preferredHeightKey = QStringLiteral("deck/preferredHeight");
-constexpr quint32 kAcrylicTint = 0x99161618; // AABBGGRR; Phase 0 default
 
 struct HeightLimits {
     qreal minimum;
@@ -582,9 +582,18 @@ void DeckController::showDeck(const QString &trigger) {
 
     QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
     if (!screen) screen = QGuiApplication::primaryScreen();
+    const QRect area = screen->availableGeometry();
+    const HeightLimits limits = heightLimits(area);
+    minimumHeight_ = limits.minimum;
+    maximumHeight_ = limits.maximum;
+    deckHeight_ = std::clamp(QSettings().value(preferredHeightKey, limits.preferred).toReal(), minimumHeight_, maximumHeight_);
+    Q_EMIT deckHeightChanged();
+    // 8 DIP from both edges, flush with the work area bottom, as tall as the
+    // Deck can get; the part above the Deck is transparent and click-through.
+    const QRect frame(area.x() + 8, int(area.y() + area.height() - maximumHeight_), area.width() - 16, int(maximumHeight_));
+    captureBackdrop(screen, frame); // before showing: the screen behind the Deck
     window_->setScreen(screen);
-    const HeightLimits limits = heightLimits(screen->availableGeometry());
-    updateGeometry(QSettings().value(preferredHeightKey, limits.preferred).toReal());
+    window_->setGeometry(frame);
 
     model_.refreshTimes();
     if (!store_.selectedItem()) store_.setSelectedItemId(store_.displayedItems().isEmpty() ? QUuid()
@@ -608,42 +617,61 @@ void DeckController::hideDeck(const QString &reason) {
     window_->hide();
 }
 
-void DeckController::updateGeometry(qreal height) {
-    QScreen *screen = window_->screen();
-    const QRect area = screen->availableGeometry();
-    const HeightLimits limits = heightLimits(area);
-    const qreal deckHeight = std::clamp(height, limits.minimum, limits.maximum);
-    // 8 DIP from both edges, flush with the work area bottom.
-    window_->setGeometry(area.x() + 8, int(area.y() + area.height() - deckHeight), area.width() - 16, int(deckHeight));
+QString DeckController::backdropUrl() const {
+    return backdropRevision_ > 0 ? QStringLiteral("image://deck/backdrop?%1").arg(backdropRevision_) : QString();
+}
+
+void DeckController::captureBackdrop(QScreen *screen, const QRect &frame) {
+    const QRect screenGeometry = screen->geometry();
+    const QPixmap shot = screen->grabWindow(0, frame.x() - screenGeometry.x(), frame.y() - screenGeometry.y(),
+                                            frame.width(), frame.height());
+    const QImage frosted = DeckBackdrop::frost(shot.toImage());
+    if (frosted.isNull()) return;
+    images_->insert(QStringLiteral("backdrop"), frosted);
+    ++backdropRevision_;
+    Q_EMIT backdropChanged();
 }
 
 void DeckController::applyEffects() {
     HWND window = deckWindow();
     if (!window || !deckVisible()) return;
-    // Acrylic redraws slowly while resizing; the classic blur keeps up.
-    WinEffects::setAccent(window, resizing_ ? WinEffects::Accent::BlurBehind : WinEffects::Accent::AcrylicBlurBehind,
-                          kAcrylicTint);
-    WinEffects::setRoundedRegion(window, int(std::lround(24 * window_->devicePixelRatio())));
+    // No DWM blur: it ignores the window region and shows square corners.
+    WinEffects::setAccent(window, WinEffects::Accent::Disabled, 0);
+    updateRegion();
+}
+
+void DeckController::updateRegion() {
+    HWND window = deckWindow();
+    if (!window || !window_) return;
+    // Hit-testing follows the visible Deck: clicks above it reach other apps.
+    const qreal ratio = window_->devicePixelRatio();
+    const int width = int(std::lround(window_->width() * ratio));
+    const int height = int(std::lround(window_->height() * ratio));
+    const int top = int(std::lround((window_->height() - deckHeight_) * ratio));
+    WinEffects::setRoundedRegion(window, QRect(0, top, width, height - top), int(std::lround(24 * ratio)));
 }
 
 void DeckController::beginResize(qreal globalY) {
     resizing_ = true;
     resizeStartY_ = globalY;
-    resizeStartHeight_ = window_->height();
-    applyEffects();
+    resizeStartHeight_ = deckHeight_;
     Q_EMIT resizingChanged();
 }
 
 void DeckController::updateResize(qreal globalY) {
     if (!resizing_) return;
-    updateGeometry(resizeStartHeight_ + (resizeStartY_ - globalY));
+    const qreal height = std::clamp(resizeStartHeight_ + (resizeStartY_ - globalY), minimumHeight_, maximumHeight_);
+    if (qFuzzyCompare(height, deckHeight_)) return;
+    // Only the scene changes; the native window keeps its size.
+    deckHeight_ = height;
+    Q_EMIT deckHeightChanged();
+    updateRegion();
 }
 
 void DeckController::endResize() {
     if (!resizing_) return;
     resizing_ = false;
-    QSettings().setValue(preferredHeightKey, window_->height());
-    applyEffects();
+    QSettings().setValue(preferredHeightKey, deckHeight_);
     store_.revealSelection();
     Q_EMIT resizingChanged();
 }

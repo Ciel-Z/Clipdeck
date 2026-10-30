@@ -71,13 +71,13 @@ Window {
         }
     }
 
-    Item {
-        id: bubble
+    // Shadow of the bubble, drawn as its own layer so the text in the bubble
+    // is not resampled through an effect.
+    Shape {
         x: popup.margin
         y: popup.margin
         width: popup.contentWidth
         height: popup.contentHeight + popup.arrowHeight
-
         layer.enabled: true
         layer.effect: MultiEffect {
             shadowEnabled: true
@@ -86,6 +86,19 @@ Window {
             shadowBlur: 1.0
             shadowVerticalOffset: 6
         }
+        ShapePath {
+            strokeWidth: -1
+            fillColor: "black"
+            PathSvg { path: popup.bubblePath() }
+        }
+    }
+
+    Item {
+        id: bubble
+        x: popup.margin
+        y: popup.margin
+        width: popup.contentWidth
+        height: popup.contentHeight + popup.arrowHeight
 
         Shape {
             anchors.fill: parent
