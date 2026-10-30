@@ -356,7 +356,9 @@ final class PanelController: NSWindowController, NSWindowDelegate {
 
         super.init(window: panel)
         panel.onEscape = { [weak self, weak store] in
-            if store?.renamingItemID != nil {
+            if store?.filePasteFeedback != nil {
+                store?.filePasteFeedback = nil
+            } else if store?.renamingItemID != nil {
                 store?.cancelRenaming()
             } else if store?.editingItemID != nil {
                 store?.cancelEditing()
@@ -542,6 +544,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
     }
 
     func hide() {
+        store.filePasteFeedback = nil
         if window?.isVisible == true {
             NSLog("ClipDeck panel hidden")
         }

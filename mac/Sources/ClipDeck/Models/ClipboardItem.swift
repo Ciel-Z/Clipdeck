@@ -40,11 +40,52 @@ struct ClipboardCategory: Identifiable, Equatable, Sendable {
 enum ClipboardPayload: Equatable, Sendable {
     case text(plainText: String, rtfData: Data?)
     case image(data: Data, width: Int, height: Int, format: ClipboardImageFormat)
+    case files([ClipboardFileReference])
+}
+
+struct ClipboardFileReference: Codable, Equatable, Sendable, Identifiable {
+    let path: String
+    let name: String
+    let typeIdentifier: String
+    let isDirectory: Bool
+    let iconData: Data?
+
+    var id: String { path }
+    var url: URL { URL(fileURLWithPath: path) }
+
+    static func encoded(_ files: [Self]) -> Data {
+        (try? JSONEncoder().encode(files)) ?? Data()
+    }
+
+    static func decoded(_ data: Data) -> [Self]? {
+        guard let files = try? JSONDecoder().decode([Self].self, from: data),
+              !files.isEmpty else { return nil }
+        return files
+    }
+
+    // File order and captured metadata do not affect the identity of a copy.
+    static func identityData(_ files: [Self]) -> Data {
+        (try? JSONEncoder().encode(files.map(\.path).sorted())) ?? Data()
+    }
 }
 
 enum ClipboardImageFormat: String, Equatable, Sendable {
     case png
     case tiff
+}
+
+extension ClipboardPayload {
+    func hasSameContent(as other: ClipboardPayload) -> Bool {
+        if case let .files(lhs) = self, case let .files(rhs) = other {
+            return ClipboardFileReference.identityData(lhs) == ClipboardFileReference.identityData(rhs)
+        }
+        return self == other
+    }
+
+    var fileReferences: [ClipboardFileReference]? {
+        if case let .files(files) = self { return files }
+        return nil
+    }
 }
 
 struct ClipboardItem: Identifiable, Equatable, Sendable {
@@ -115,6 +156,7 @@ private extension ClipboardPayload {
         switch self {
         case .text: "文本"
         case .image: "图片"
+        case let .files(files): files.count == 1 ? files[0].name : "文件 · \(files.count) 项"
         }
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct HistoryPanelView: View {
     @ObservedObject var store: InMemoryHistoryStore
@@ -29,10 +30,14 @@ struct HistoryPanelView: View {
         }
         .overlay(alignment: .top) {
             DeckResizeHandle()
+                .frame(maxWidth: .infinity)
                 .frame(height: 18)
+                .contentShape(Rectangle())
         }
         .onExitCommand {
-            if store.renamingItemID != nil {
+            if store.filePasteFeedback != nil {
+                store.filePasteFeedback = nil
+            } else if store.renamingItemID != nil {
                 store.cancelRenaming()
             } else if store.editingItemID != nil {
                 store.cancelEditing()
@@ -89,9 +94,22 @@ struct HistoryPanelView: View {
                                     isResizing: isResizing,
                                     quickPasteNumber: store.isQuickPasteOverlayVisible && entry.offset < 9
                                         ? entry.offset + 1
-                                        : nil
+                                        : nil,
+                                    fileFeedback: store.filePasteFeedback?.itemID == item.id
+                                        ? store.filePasteFeedback : nil
                                 )
                                 .id(item.id)
+                                .overlay(alignment: .bottom) {
+                                    if let feedback = store.filePasteFeedback, feedback.itemID == item.id {
+                                        FilePasteFeedbackView(
+                                            feedback: feedback,
+                                            onCancel: { store.filePasteFeedback = nil },
+                                            onConfirm: { onPaste(item, false) },
+                                            isSingleFile: item.payload.fileReferences?.count == 1
+                                        )
+                                        .padding(item.payload.fileReferences?.count == 1 ? 4 : 10)
+                                    }
+                                }
                                 .onTapGesture {
                                     store.finishSearchEditing()
                                     store.selectedItemID = item.id
@@ -161,6 +179,7 @@ struct HistoryPanelView: View {
                                         Label("编辑", systemImage: "pencil")
                                     }
                                     .keyboardShortcut("e", modifiers: .command)
+                                    .disabled(item.payload.fileReferences != nil)
 
                                     Button {
                                         store.selectedItemID = item.id
@@ -310,6 +329,7 @@ struct HistoryPanelView: View {
                 .padding(.leading, 5)
             }
             .foregroundStyle(.white.opacity(0.92))
+            .padding(.trailing, 54)
         }
         .padding(.horizontal, 24)
         .padding(.top, 7)
@@ -319,34 +339,19 @@ struct HistoryPanelView: View {
     private var categoryStrip: some View {
         ScrollViewReader { proxy in
             HStack(spacing: 7) {
+                HStack(spacing: 4) {
+                    typeButton(.all, icon: .history, label: "History")
+                    typeButton(.text, icon: .text, label: "文本")
+                    typeButton(.images, icon: .image, label: "图片")
+                    typeButton(.files, icon: .folder, label: "文件")
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                Rectangle()
+                    .fill(.white.opacity(0.18))
+                    .frame(width: 1, height: 22)
+                    .padding(.horizontal, 7)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
-                        HStack(spacing: 7) {
-                            Image(systemName: "clock.arrow.circlepath")
-                            Text("History")
-                                .lineLimit(1)
-                        }
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .frame(width: 96, height: 35)
-                        .background(
-                            store.selectedCategory == .all ? .white.opacity(0.16) : .clear,
-                            in: Capsule()
-                        )
-                        .contentShape(Capsule())
-                        .onTapGesture { store.selectCategory(.all) }
-                        .id(HistoryCategory.all)
-
-                        category(
-                            color: Color(red: 1.00, green: 0.22, blue: 0.28),
-                            label: "Text",
-                            value: .text
-                        )
-                        category(
-                            color: Color(red: 1.00, green: 0.57, blue: 0.19),
-                            label: "Images",
-                            value: .images
-                        )
-
                         ForEach(store.automaticCategories) { item in
                             category(
                                 color: automaticCategoryColor(item.sortOrder),
@@ -356,7 +361,7 @@ struct HistoryPanelView: View {
                         }
                     }
                 }
-                .frame(width: 636)
+                .frame(minWidth: 240, idealWidth: 760, maxWidth: 760)
 
                 if categoryValues.count > 6 {
                     HStack(spacing: 0) {
@@ -395,7 +400,34 @@ struct HistoryPanelView: View {
     }
 
     private var categoryValues: [HistoryCategory] {
-        [.all, .text, .images] + store.automaticCategories.map { .automatic($0.id) }
+        store.automaticCategories.map { .automatic($0.id) }
+    }
+
+    private func typeButton(_ value: HistoryCategory, icon: DeckNavigationIcon.Kind, label: String) -> some View {
+        Button {
+            store.selectCategory(value)
+        } label: {
+            HStack(spacing: 6) {
+                DeckNavigationIcon(kind: icon)
+                    .frame(width: 19, height: 19)
+                if value == .all || store.selectedCategory == value {
+                    Text(label).font(.system(size: 13, weight: .semibold))
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 35)
+            .foregroundStyle(.white.opacity(store.selectedCategory == value ? 1 : 0.65))
+            .background(store.selectedCategory == value ? .white.opacity(0.16) : .clear,
+                        in: RoundedRectangle(cornerRadius: 9))
+            .shadow(color: .black.opacity(store.selectedCategory == value ? 0.24 : 0), radius: 4, y: 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .focusable(false)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(store.selectedCategory == value ? .isSelected : [])
     }
 
     private func categoryPageButton(
@@ -447,8 +479,10 @@ struct HistoryPanelView: View {
         .font(.system(size: 13, weight: .semibold))
         .frame(width: 96, height: 31)
         .background(store.selectedCategory == value ? .white.opacity(0.14) : .clear, in: Capsule())
+        .shadow(color: .black.opacity(store.selectedCategory == value ? 0.20 : 0), radius: 4, y: 1)
         .contentShape(Capsule())
         .onTapGesture { store.selectCategory(value) }
+        .help(label)
         .id(value)
     }
 
@@ -463,7 +497,7 @@ struct HistoryPanelView: View {
                 .font(.system(size: 30, weight: .light))
             Text(store.isSearchActive ? "没有找到匹配内容" : "Copy something to get started")
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
-            Text(store.isSearchActive ? "尝试其他关键词" : "Text and images will appear here")
+            Text(store.isSearchActive ? "尝试其他关键词" : "复制的文本、图片和文件会显示在这里")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
         }
@@ -481,6 +515,7 @@ private struct ClipboardCardView: View {
     let height: CGFloat
     let isResizing: Bool
     let quickPasteNumber: Int?
+    let fileFeedback: FilePasteFeedback?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -556,7 +591,12 @@ private struct ClipboardCardView: View {
                     .opacity(0.78)
             }
             Spacer(minLength: 8)
-            sourceBadge(size: sourceIconSize)
+            if item.payload.fileReferences != nil {
+                DeckNavigationIcon(kind: .folder)
+                    .frame(width: 30, height: 30)
+            } else {
+                sourceBadge(size: sourceIconSize)
+            }
         }
         .foregroundStyle(.white)
         .padding(.leading, 14)
@@ -639,6 +679,10 @@ private struct ClipboardCardView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case let .files(files):
+            FileReferenceList(files: files, compact: true, feedback: fileFeedback)
+                .padding(.top, showFooter ? 0 : 30)
+                .padding(.bottom, fileFeedback == nil ? 0 : 92)
         }
     }
 
@@ -710,7 +754,8 @@ private struct ClipboardCardView: View {
     }
 
     private var cardHeaderTitle: String {
-        item.webURL == nil ? item.title : "链接"
+        if let files = item.payload.fileReferences { return "文件 · \(files.count) 项" }
+        return item.webURL == nil ? item.title : "链接"
     }
 
     private var linkFooterHeight: CGFloat {
@@ -789,6 +834,12 @@ private struct ClipboardCardView: View {
                 colors: isSelected
                     ? [Color(red: 0.01, green: 0.14, blue: 0.35), Color(red: 0.02, green: 0.26, blue: 0.60)]
                     : [Color(red: 0.27, green: 0.62, blue: 0.93), Color(red: 0.13, green: 0.47, blue: 0.88)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .files:
+            LinearGradient(
+                colors: [Color(red: 0.141, green: 0.420, blue: 0.725), Color(red: 0.13, green: 0.38, blue: 0.68)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -899,6 +950,8 @@ private struct DeckResizeHandle: NSViewRepresentable {
         private var frameUpdateScheduled = false
         private var lastFrameUpdateTime: TimeInterval = 0
         private let indicatorLayer = CALayer()
+        private var resizeTrackingArea: NSTrackingArea?
+        private var isDragging = false
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -911,6 +964,7 @@ private struct DeckResizeHandle: NSViewRepresentable {
         }
 
         private func configureIndicator() {
+            identifier = NSUserInterfaceItemIdentifier("deck-resize-handle")
             wantsLayer = true
             indicatorLayer.backgroundColor = NSColor.white.withAlphaComponent(0.32).cgColor
             indicatorLayer.cornerRadius = 1.5
@@ -926,14 +980,55 @@ private struct DeckResizeHandle: NSViewRepresentable {
                 width: 44,
                 height: 3
             )
+            window?.invalidateCursorRects(for: self)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.acceptsMouseMovedEvents = true
+            window?.invalidateCursorRects(for: self)
+            updateTrackingAreas()
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let resizeTrackingArea { removeTrackingArea(resizeTrackingArea) }
+            let area = NSTrackingArea(
+                rect: .zero,
+                options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited,
+                          .mouseMoved, .cursorUpdate, .enabledDuringMouseDrag],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            resizeTrackingArea = area
         }
 
         override func resetCursorRects() {
-            addCursorRect(bounds, cursor: .resizeUpDown)
+            super.resetCursorRects()
+            addCursorRect(visibleRect, cursor: .resizeUpDown)
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            NSCursor.resizeUpDown.set()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            NSCursor.resizeUpDown.set()
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            NSCursor.resizeUpDown.set()
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            if !isDragging { NSCursor.arrow.set() }
         }
 
         override func mouseDown(with event: NSEvent) {
             guard let window else { return }
+            isDragging = true
+            NSCursor.resizeUpDown.set()
             startMouseY = NSEvent.mouseLocation.y
             startFrame = window.frame
             pendingFrame = nil
@@ -944,6 +1039,7 @@ private struct DeckResizeHandle: NSViewRepresentable {
         }
 
         override func mouseDragged(with event: NSEvent) {
+            NSCursor.resizeUpDown.set()
             guard let window, let screen = window.screen ?? NSScreen.main else { return }
             let delta = NSEvent.mouseLocation.y - startMouseY
             let maximum = max(250, min(420, floor(screen.visibleFrame.height * 0.42)))
@@ -959,6 +1055,7 @@ private struct DeckResizeHandle: NSViewRepresentable {
         }
 
         override func mouseUp(with event: NSEvent) {
+            isDragging = false
             if let window {
                 applyPendingFrame(to: window, display: true)
                 window.hasShadow = true
@@ -968,6 +1065,12 @@ private struct DeckResizeHandle: NSViewRepresentable {
             }
             indicatorLayer.isHidden = true
             NotificationCenter.default.post(name: .clipDeckResizeEnded, object: nil)
+            let mouse = convert(event.locationInWindow, from: nil)
+            if visibleRect.contains(mouse) {
+                NSCursor.resizeUpDown.set()
+            } else {
+                NSCursor.arrow.set()
+            }
         }
 
         private func scheduleFrameUpdate(for window: NSWindow, screen: NSScreen) {
@@ -1225,6 +1328,8 @@ private struct ContentEditorView: View {
                 textEditor
             case .image:
                 imageEditor
+            case let .files(files):
+                FileReferenceList(files: files, compact: false)
             }
         }
         .frame(width: 560, height: 430)
@@ -1405,6 +1510,8 @@ private struct ContentEditorView: View {
             onSave(.text(plainText: text, rtfData: nil), nil)
         case .image:
             onSave(item.payload, imageAngle)
+        case .files:
+            break
         }
     }
 
@@ -1501,7 +1608,7 @@ struct ContentPreviewView: View {
 
     private var previewSize: CGSize {
         switch item.payload {
-        case .text:
+        case .text, .files:
             return ContentPreviewLayout.textSize
         case let .image(_, width, height, _):
             return ContentPreviewLayout.imageSize(
@@ -1516,7 +1623,8 @@ struct ContentPreviewView: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(categoryName)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.system(size: item.payload.fileReferences == nil ? 18 : 15,
+                                  weight: .semibold))
                 Text(item.sourceApplication.name)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -1526,7 +1634,7 @@ struct ContentPreviewView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 22)
-            .frame(height: 58)
+            .frame(height: item.payload.fileReferences == nil ? 58 : 52)
 
             Divider()
 
@@ -1549,13 +1657,325 @@ struct ContentPreviewView: View {
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case let .files(files):
+                FileReferenceList(files: files, compact: false)
             }
         }
         .frame(width: previewSize.width, height: previewSize.height)
+        .background(item.payload.fileReferences == nil ? .clear : Color(red: 0.075, green: 0.075, blue: 0.082))
     }
 
     private var categoryName: String {
-        item.category?.name ?? (item.payload.isText ? "文本" : "图片")
+        if let files = item.payload.fileReferences { return "文件 · \(files.count) 项" }
+        return item.category?.name ?? (item.payload.isText ? "文本" : "图片")
+    }
+}
+
+// The same 24-point outline geometry as the navigation mockup: history, type,
+// image and folder. Using paths keeps these icons consistent across OS versions.
+struct DeckNavigationIcon: View {
+    enum Kind { case history, text, image, folder }
+    let kind: Kind
+
+    var body: some View {
+        GeometryReader { geometry in
+            Path { path in
+                switch kind {
+                case .history:
+                    path.addArc(center: CGPoint(x: 12, y: 12), radius: 9,
+                                startAngle: .degrees(200), endAngle: .degrees(160), clockwise: false)
+                    path.move(to: CGPoint(x: 3, y: 3))
+                    path.addLine(to: CGPoint(x: 3, y: 8))
+                    path.addLine(to: CGPoint(x: 8, y: 8))
+                    path.move(to: CGPoint(x: 12, y: 7))
+                    path.addLine(to: CGPoint(x: 12, y: 12))
+                    path.addLine(to: CGPoint(x: 16, y: 14))
+                case .text:
+                    path.move(to: CGPoint(x: 4, y: 7))
+                    path.addLine(to: CGPoint(x: 4, y: 4))
+                    path.addLine(to: CGPoint(x: 20, y: 4))
+                    path.addLine(to: CGPoint(x: 20, y: 7))
+                    path.move(to: CGPoint(x: 12, y: 4)); path.addLine(to: CGPoint(x: 12, y: 20))
+                    path.move(to: CGPoint(x: 8, y: 20)); path.addLine(to: CGPoint(x: 16, y: 20))
+                case .image:
+                    path.addRoundedRect(in: CGRect(x: 3, y: 3, width: 18, height: 18), cornerSize: CGSize(width: 2, height: 2))
+                    path.addEllipse(in: CGRect(x: 7, y: 7, width: 3, height: 3))
+                    path.move(to: CGPoint(x: 21, y: 15))
+                    path.addLine(to: CGPoint(x: 16, y: 10))
+                    path.addLine(to: CGPoint(x: 5, y: 21))
+                case .folder:
+                    path.move(to: CGPoint(x: 20, y: 20))
+                    path.addLine(to: CGPoint(x: 4, y: 20))
+                    path.addQuadCurve(to: CGPoint(x: 2, y: 18), control: CGPoint(x: 2, y: 20))
+                    path.addLine(to: CGPoint(x: 2, y: 6))
+                    path.addQuadCurve(to: CGPoint(x: 4, y: 4), control: CGPoint(x: 2, y: 4))
+                    path.addLine(to: CGPoint(x: 9, y: 4))
+                    path.addLine(to: CGPoint(x: 11, y: 7))
+                    path.addLine(to: CGPoint(x: 20, y: 7))
+                    path.addQuadCurve(to: CGPoint(x: 22, y: 9), control: CGPoint(x: 22, y: 7))
+                    path.addLine(to: CGPoint(x: 22, y: 18))
+                    path.addQuadCurve(to: CGPoint(x: 20, y: 20), control: CGPoint(x: 22, y: 20))
+                    path.closeSubpath()
+                }
+            }
+            .transform(CGAffineTransform(scaleX: geometry.size.width / 24, y: geometry.size.height / 24))
+            .stroke(style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct FileReferenceTypeIcon: View {
+    let file: ClipboardFileReference
+    var size: CGFloat = 28
+
+    var body: some View {
+        Group {
+            if file.isDirectory {
+                DeckNavigationIcon(kind: .folder)
+            } else {
+                GeometryReader { geometry in
+                    Path { path in
+                        path.move(to: CGPoint(x: 14, y: 2))
+                        path.addLine(to: CGPoint(x: 6, y: 2))
+                        path.addQuadCurve(to: CGPoint(x: 4, y: 4), control: CGPoint(x: 4, y: 2))
+                        path.addLine(to: CGPoint(x: 4, y: 20))
+                        path.addQuadCurve(to: CGPoint(x: 6, y: 22), control: CGPoint(x: 4, y: 22))
+                        path.addLine(to: CGPoint(x: 18, y: 22))
+                        path.addQuadCurve(to: CGPoint(x: 20, y: 20), control: CGPoint(x: 20, y: 22))
+                        path.addLine(to: CGPoint(x: 20, y: 8))
+                        path.closeSubpath()
+                        path.move(to: CGPoint(x: 14, y: 2))
+                        path.addLine(to: CGPoint(x: 14, y: 8))
+                        path.addLine(to: CGPoint(x: 20, y: 8))
+                        let isImage = UTType(file.typeIdentifier)?.conforms(to: .image) == true
+                            || UTType(filenameExtension: file.url.pathExtension)?.conforms(to: .image) == true
+                        if isImage {
+                            path.addEllipse(in: CGRect(x: 7, y: 11, width: 2, height: 2))
+                            path.move(to: CGPoint(x: 6, y: 20))
+                            path.addLine(to: CGPoint(x: 13, y: 14))
+                            path.addLine(to: CGPoint(x: 19, y: 19))
+                        } else if UTType(file.typeIdentifier)?.conforms(to: .sourceCode) == true
+                                    || ["py", "js", "ts", "swift", "java", "sh", "cpp", "c", "go", "rs"].contains(file.url.pathExtension.lowercased()) {
+                            path.move(to: CGPoint(x: 10, y: 12))
+                            path.addLine(to: CGPoint(x: 7, y: 15))
+                            path.addLine(to: CGPoint(x: 10, y: 18))
+                            path.move(to: CGPoint(x: 14, y: 12))
+                            path.addLine(to: CGPoint(x: 17, y: 15))
+                            path.addLine(to: CGPoint(x: 14, y: 18))
+                        } else {
+                            for y in [12.0, 16.0] {
+                                path.move(to: CGPoint(x: 8, y: y))
+                                path.addLine(to: CGPoint(x: 16, y: y))
+                            }
+                        }
+                    }
+                    .transform(CGAffineTransform(scaleX: geometry.size.width / 24, y: geometry.size.height / 24))
+                    .stroke(style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
+                }
+            }
+        }
+        .foregroundStyle(Color(red: 0.49, green: 0.73, blue: 1))
+        .frame(width: size, height: size)
+    }
+}
+
+private struct FileReferenceList: View {
+    let files: [ClipboardFileReference]
+    let compact: Bool
+    var feedback: FilePasteFeedback? = nil
+    @State private var visibleFileID: String?
+
+    private var commonDirectory: String? {
+        let parents = Set(files.map { ($0.path as NSString).deletingLastPathComponent })
+        return parents.count == 1 ? parents.first : nil
+    }
+
+    var body: some View {
+        Group {
+            if files.count == 1, let file = files.first {
+                singleFile(file)
+            } else if compact {
+                GeometryReader { geometry in
+                    let availableHeight = max(0, geometry.size.height - 24)
+                    let allRowsHeight = CGFloat(files.count * 26 + max(0, files.count - 1) * 4)
+                    let footerHeight: CGFloat = allRowsHeight <= availableHeight ? 0 : 22
+                    let count = min(files.count, max(0, Int((max(0, availableHeight - footerHeight) + 4) / 30)))
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(files.prefix(count))) { file in
+                            fileRow(file)
+                        }
+                        Spacer(minLength: 0)
+                        if files.count > count {
+                            HStack {
+                                Text("+\(files.count - count) 项")
+                                Spacer()
+                                Text("空格预览全部")
+                            }
+                            .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(12)
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+                    .clipped()
+                }
+            } else {
+                VStack(spacing: 0) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "folder").font(.system(size: 11))
+                        Text(commonDirectory.map { ($0 as NSString).abbreviatingWithTildeInPath }
+                             ?? "多个文件位置")
+                            .lineLimit(1).truncationMode(.middle)
+                            .help(commonDirectory ?? "完整路径可在文件名上悬停查看")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 20).padding(.vertical, 9)
+                    Divider()
+                    ScrollViewReader { proxy in
+                        ScrollView(.vertical, showsIndicators: true) {
+                            LazyVStack(alignment: .leading, spacing: 4) {
+                                ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
+                                    HStack(alignment: .center, spacing: 10) {
+                                        fileRow(file)
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .frame(height: commonDirectory == nil ? 48 : 36)
+                                    .background(.white.opacity(index.isMultiple(of: 2) ? 0.035 : 0),
+                                                in: RoundedRectangle(cornerRadius: 7))
+                                    .id(file.id)
+                                }
+                            }
+                            .scrollTargetLayout()
+                            .padding(.horizontal, 10).padding(.vertical, 8)
+                        }
+                        .scrollPosition(id: $visibleFileID, anchor: .top)
+                        .onReceive(NotificationCenter.default.publisher(for: .clipDeckPreviewScroll)) { notification in
+                            guard let direction = notification.userInfo?["direction"] as? Int,
+                                  !files.isEmpty else { return }
+                            let current = files.firstIndex { $0.id == visibleFileID } ?? 0
+                            let next = max(0, min(files.count - 1, current + direction))
+                            visibleFileID = files[next].id
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                proxy.scrollTo(files[next].id, anchor: .top)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func singleFile(_ file: ClipboardFileReference) -> some View {
+        GeometryReader { geometry in
+            let short = geometry.size.height < 170
+            let tiny = geometry.size.height < 120
+            let padding: CGFloat = compact ? (short ? 12 : 20) : 28
+            VStack(spacing: tiny ? 6 : (short ? 10 : 20)) {
+                FileReferenceTypeIcon(file: file, size: tiny ? 24 : (short ? 34 : 56))
+                Text(file.name)
+                    .font(.system(size: short ? 14 : 18, weight: .semibold))
+                    .multilineTextAlignment(.center).lineLimit(short ? 1 : 2)
+                    .truncationMode(.middle)
+                if geometry.size.height >= 100 {
+                    Text((file.path as NSString).abbreviatingWithTildeInPath)
+                        .font(.system(size: compact ? 12 : 13))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center).lineLimit(short ? 1 : (compact ? 2 : 4))
+                        .truncationMode(.middle)
+                }
+            }
+            .help(file.path)
+            .padding(padding)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+    }
+
+    private func fileRow(_ file: ClipboardFileReference) -> some View {
+        HStack(alignment: .center, spacing: compact ? 8 : 10) {
+            FileReferenceTypeIcon(file: file, size: compact ? 20 : 22)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(file.name).font(.system(size: compact ? 12.5 : 13, weight: .medium))
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !compact, commonDirectory == nil {
+                    Text(((file.path as NSString).deletingLastPathComponent as NSString).abbreviatingWithTildeInPath)
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                }
+            }
+            .help(file.path)
+            if !compact {
+                Text(file.isDirectory ? "文件夹" : file.url.pathExtension.uppercased())
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 4))
+            }
+            if let feedback, case let .partial(available, _) = feedback.phase {
+                Image(systemName: available.contains(where: { $0.path == file.path })
+                      ? "checkmark" : "exclamationmark.triangle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(available.contains(where: { $0.path == file.path })
+                                     ? Color.green : Color(red: 1, green: 0.69, blue: 0.54))
+            }
+        }
+        .frame(height: compact ? 26 : nil)
+    }
+}
+
+private struct FilePasteFeedbackView: View {
+    let feedback: FilePasteFeedback
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+    var isSingleFile = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            switch feedback.phase {
+            case .checking:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在检查源文件…").font(.system(size: 12))
+                }
+            case let .unavailable(message):
+                Label(message, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(Color(red: 1, green: 0.69, blue: 0.54))
+                Text("文件可能已移动或挂载已断开")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            case let .partial(available, unavailable):
+                Label("\(unavailable.count) 个文件不可访问", systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(Color(red: 1, green: 0.69, blue: 0.54))
+                Text("是否仅粘贴其余 \(available.count) 个文件？")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack(spacing: 7) {
+                    Button(action: onCancel) {
+                        Text("取消").padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    Button(action: onConfirm) {
+                        Text("粘贴可用文件").foregroundStyle(.white)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Color(red: 0.04, green: 0.48, blue: 1), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.plain)
+                .controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(isSingleFile ? Color(red: 0.31, green: 0.18, blue: 0.14)
+                    : Color(red: 0.09, green: 0.10, blue: 0.12).opacity(0.98))
+        .clipShape(UnevenRoundedRectangle(
+            topLeadingRadius: isSingleFile ? 0 : 10,
+            bottomLeadingRadius: isSingleFile ? 15 : 10,
+            bottomTrailingRadius: isSingleFile ? 15 : 10,
+            topTrailingRadius: isSingleFile ? 0 : 10
+        ))
     }
 }
 

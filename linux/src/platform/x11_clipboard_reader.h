@@ -44,6 +44,7 @@ private:
     xcb_atom_t html_ = XCB_NONE;
     xcb_atom_t png_ = XCB_NONE;
     xcb_atom_t uri_ = XCB_NONE;
+    xcb_atom_t copiedFiles_ = XCB_NONE;
     xcb_atom_t activeWindow_ = XCB_NONE;
     xcb_atom_t target_ = XCB_NONE;
     xcb_atom_t timestamp_ = XCB_NONE;

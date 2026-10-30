@@ -377,6 +377,11 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 table.add(column: "image_angle", .integer).notNull().defaults(to: 0)
             }
         }
+        migrator.registerMigration("addFileReferences") { database in
+            try database.alter(table: "content") { table in
+                table.add(column: "file_references", .blob)
+            }
+        }
         return migrator
     }
 }

@@ -26,6 +26,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var shortcutObserver: NSObjectProtocol?
     private var localKeyMonitor: Any?
     private var statusItemMouseMonitor: Any?
+    private lazy var filePasteController = FilePasteController(store: store) { [weak self] in
+        self?.panelController?.isVisible == true
+    }
 
     override init() {
         AppPreferences.registerDefaults()
@@ -194,6 +197,16 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func pasteSelection(_ item: ClipboardItem, forcePlainText: Bool = false) {
+        guard case .files = item.payload else {
+            pasteValidatedSelection(item, forcePlainText: forcePlainText)
+            return
+        }
+        filePasteController.prepare(item) { [weak self] validated in
+            self?.pasteValidatedSelection(validated, forcePlainText: forcePlainText)
+        }
+    }
+
+    private func pasteValidatedSelection(_ item: ClipboardItem, forcePlainText: Bool = false) {
         if panelController.targetsClipDeck,
            categorySettingsController?.isVisible == true {
             let didWrite = pasteService.write(

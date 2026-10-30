@@ -10,6 +10,7 @@ set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
 
 find_package(Qt5 5.11 REQUIRED COMPONENTS Core Gui Widgets Network Sql Qml X11Extras WebEngine WebEngineWidgets)
 find_package(X11 REQUIRED)
+find_package(Threads REQUIRED)
 find_library(XTST_LIBRARY Xtst)
 find_library(XCB_LIBRARY xcb)
 
@@ -24,6 +25,14 @@ add_executable(clipdeck-linux
   src/history/clipboard_pipeline.cpp
   src/history/clipboard_pipeline.h
   src/history/clipboard_snapshot.h
+  src/history/file_reference.cpp
+  src/history/file_reference.h
+  src/history/capture_payload.cpp
+  src/history/capture_payload.h
+  src/history/file_paste_controller.cpp
+  src/history/file_paste_controller.h
+  src/history/file_reference_tests.cpp
+  src/history/file_reference_tests.h
   src/history/clipboard_pipeline_tests.cpp
   src/history/clipboard_pipeline_tests.h
   src/platform/application_source.cpp
@@ -36,6 +45,12 @@ add_executable(clipdeck-linux
   src/platform/linux_application_icon.h
   src/ui/display_scale.cpp
   src/ui/display_scale.h
+  src/ui/eliding_label.cpp
+  src/ui/eliding_label.h
+  src/ui/deck_symbols.cpp
+  src/ui/deck_symbols.h
+  src/ui/file_card_view.cpp
+  src/ui/file_card_view.h
   src/ui/linux_icons.cpp
   src/ui/linux_icons.h
   src/ui/script_editor_widget.cpp
@@ -57,6 +72,7 @@ target_link_libraries(clipdeck-linux PRIVATE
   ${X11_LIBRARIES}
   ${XTST_LIBRARY}
   ${XCB_LIBRARY}
+  Threads::Threads
 )
 
 install(TARGETS clipdeck-linux

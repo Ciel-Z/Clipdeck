@@ -39,6 +39,7 @@ void X11ClipboardReader::start() {
     targets_ = atom("TARGETS"); incr_ = atom("INCR"); utf8_ = atom("UTF8_STRING");
     plainUtf8_ = atom("text/plain;charset=utf-8"); plain_ = atom("text/plain");
     html_ = atom("text/html"); png_ = atom("image/png"); uri_ = atom("text/uri-list");
+    copiedFiles_ = atom("x-special/gnome-copied-files");
     activeWindow_ = atom("_NET_ACTIVE_WINDOW");
     timestamp_ = atom("TIMESTAMP");
     notifier_ = new QSocketNotifier(xcb_get_file_descriptor(connection_), QSocketNotifier::Read, this);
@@ -215,9 +216,7 @@ void X11ClipboardReader::accept(QByteArray bytes, xcb_atom_t, quint8 format) {
         }
         if (part_ == Part::TimestampBefore) ownerTimestamp_ = timestamp;
     } else if (part_ == Part::Uri) {
-        for (const auto &line : bytes.split('\n')) {
-            if (QUrl::fromEncoded(line.trimmed()).isLocalFile()) { cancel(); return; }
-        }
+        snapshot_.uriList = std::move(bytes);
     } else if (part_ == Part::Text) {
         snapshot_.latin1 = target_ == XCB_ATOM_STRING;
         snapshot_.text = std::move(bytes);
@@ -229,6 +228,7 @@ void X11ClipboardReader::accept(QByteArray bytes, xcb_atom_t, quint8 format) {
 void X11ClipboardReader::next() {
     if (part_ == Part::Targets || part_ == Part::TimestampBefore) {
         if (offered_.contains(uri_)) { request(Part::Uri, uri_); return; }
+        if (offered_.contains(copiedFiles_)) { request(Part::Uri, copiedFiles_); return; }
         if (offered_.contains(png_)) { request(Part::Png, png_); return; }
         request(Part::Text, offered_.contains(utf8_) ? utf8_
             : offered_.contains(plainUtf8_) ? plainUtf8_
@@ -236,6 +236,11 @@ void X11ClipboardReader::next() {
         return;
     }
     if (part_ == Part::Uri) {
+        if (!snapshot_.uriList.isEmpty()) {
+            for (const auto &line : snapshot_.uriList.split('\n')) {
+                if (QUrl::fromEncoded(line.trimmed()).isLocalFile()) { finish(); return; }
+            }
+        }
         if (offered_.contains(png_)) { request(Part::Png, png_); return; }
         request(Part::Text, offered_.contains(utf8_) ? utf8_
             : offered_.contains(plainUtf8_) ? plainUtf8_
@@ -262,7 +267,7 @@ void X11ClipboardReader::finish() {
     std::free(owner);
     ClipboardSnapshot completed = std::move(snapshot_);
     cancel();
-    if (current && (!completed.text.isEmpty() || !completed.png.isEmpty())) {
+    if (current && (!completed.text.isEmpty() || !completed.png.isEmpty() || !completed.uriList.isEmpty())) {
         completed_(std::move(completed));
     }
 }

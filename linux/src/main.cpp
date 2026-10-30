@@ -1,9 +1,13 @@
 #include "history_repository.h"
 #include "history/clipboard_pipeline.h"
 #include "history/clipboard_pipeline_tests.h"
+#include "history/file_reference_tests.h"
 #include "platform/linux_application_icon.h"
 #include "platform/x11_global_shortcut.h"
 #include "ui/display_scale.h"
+#include "ui/eliding_label.h"
+#include "ui/deck_symbols.h"
+#include "ui/file_card_view.h"
 #include "ui/linux_icons.h"
 #include "ui/script_editor_widget.h"
 
@@ -33,6 +37,7 @@
 #include <QGroupBox>
 #include <QHash>
 #include <QHideEvent>
+#include <QHelpEvent>
 #include <QIcon>
 #include <QFontMetrics>
 #include <QKeyEvent>
@@ -89,6 +94,7 @@
 #include <QVariantAnimation>
 #include <QTextStream>
 #include <QTransform>
+#include <QToolTip>
 #include <QSet>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -1161,6 +1167,7 @@ class DeckWindow final : public QWidget {
         bool isImage = false;
         QString text;
         QImage image;
+        QVector<ClipboardFileReference> files;
     };
     using PasteRequestPtr = std::shared_ptr<PasteRequest>;
 
@@ -1177,8 +1184,12 @@ public:
         setAutoFillBackground(false);
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
+        filePaste_ = new FilePasteController(this);
+        filePaste_->changed = [this] { update(); };
         QObject::connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] {
             ++clipboardRevision_;
+            if (!writingHistoryClipboard_ && filePaste_->feedback().phase != FilePasteFeedback::Idle)
+                filePaste_->cancel();
         });
         searchEdit_ = new QLineEdit(this);
         searchEdit_->setPlaceholderText(QStringLiteral("搜索文本"));
@@ -1271,6 +1282,11 @@ public:
         QObject::connect(searchAnimation_, &QVariantAnimation::finished, this, [this] {
             if (!searchActive_ && searchExpansion_ <= 0.001) searchEdit_->hide();
         });
+        categoryAnimation_ = new QVariantAnimation(this);
+        categoryAnimation_->setDuration(180);
+        categoryAnimation_->setEasingCurve(QEasingCurve::OutCubic);
+        QObject::connect(categoryAnimation_, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) { categoryScrollOffset_ = value.toInt(); update(); });
         if (pipeline_) {
             QObject::connect(pipeline_, &ClipboardPipeline::recentChanged, this,
                              [this](quint64 sequence) { recentHistoryChanged(sequence); });
@@ -1342,15 +1358,35 @@ public:
                 pasteSelected(forcePlainText, quickPaste);
             }, true)) return;
         const ClipboardItem selectedItem = items_[selectedIndex_];
+        if (selectedItem.isFiles()) {
+            const auto &feedback = filePaste_->feedback();
+            if (feedback.itemID == selectedItem.databaseID && feedback.phase == FilePasteFeedback::Checking) return;
+            const quint64 revision = clipboardRevision_;
+            const quint64 generation = ++pasteRequestGeneration_;
+            const qint64 id = selectedItem.databaseID;
+            filePaste_->prepare(selectedItem,
+                [this, id, revision, generation] {
+                    return isVisible() && selectedDatabaseID() == id && clipboardRevision_ == revision
+                        && generation == pasteRequestGeneration_;
+                }, [this, forcePlainText, quickPaste](ClipboardItem item) { pasteItem(item, forcePlainText, quickPaste); });
+            return;
+        }
+        pasteItem(selectedItem, forcePlainText, quickPaste);
+    }
+
+    void pasteItem(const ClipboardItem &selectedItem, bool forcePlainText, bool quickPaste) {
         const auto request = std::make_shared<PasteRequest>();
         request->generation = ++pasteRequestGeneration_;
         request->isImage = selectedItem.isImage();
         request->text = selectedItem.text;
+        request->files = selectedItem.files;
         {
             // Only this explicit history action may replace CLIPBOARD. Do not
             // suppress external copies/cuts for an arbitrary time afterwards.
             QScopedValueRollback<bool> writing(writingHistoryClipboard_, true);
-            if (selectedItem.isImage()) {
+            if (selectedItem.isFiles()) {
+                QApplication::clipboard()->setMimeData(FileReferences::mimeData(selectedItem.files));
+            } else if (selectedItem.isImage()) {
                 request->image = imageAtAngle(selectedItem.image, selectedItem.imageAngle);
                 QApplication::clipboard()->setImage(request->image, QClipboard::Clipboard);
             } else {
@@ -1452,6 +1488,8 @@ public:
             selectedIndex_ = index;
             quickPasteOverlay_ = false;
             const qint64 itemID = items_[index].databaseID;
+            if (filePaste_->feedback().itemID == itemID
+                && filePaste_->feedback().phase == FilePasteFeedback::Checking) return true;
             const quint64 revision = clipboardRevision_;
             const quint64 generation = ++pasteRequestGeneration_;
             QTimer::singleShot(0, this, [this, itemID, revision, generation] {
@@ -1469,6 +1507,39 @@ public:
     }
 
 protected:
+    void enterEvent(QEvent *event) override {
+        setCursor(mapFromGlobal(QCursor::pos()).y() < 18 ? Qt::SizeVerCursor : Qt::ArrowCursor);
+        QWidget::enterEvent(event);
+    }
+    void leaveEvent(QEvent *event) override {
+        if (!resizing_) unsetCursor();
+        QWidget::leaveEvent(event);
+    }
+    bool event(QEvent *event) override {
+        if(event->type()==QEvent::ToolTip) {
+            auto *help=static_cast<QHelpEvent *>(event);
+            QString tooltip;
+            const QString labels[]={QStringLiteral("History"),QStringLiteral("文本"),QStringLiteral("图片"),QStringLiteral("文件")};
+            for(int index=0;index<4;++index) if(fixedTypeRect(index).contains(help->pos())) tooltip=labels[index];
+            if(customStripRect().contains(help->pos()))
+                for(int index=4;index<categoryValues().size();++index)
+                    if(categoryRect(index-4).contains(help->pos())) tooltip=categoryValues()[index];
+            const int index=cardIndexAt(help->pos());
+            if(index>=0 && items_[index].isFiles()) {
+                const auto &files=items_[index].files;
+                const QRect content=fileContentRect(index);
+                if(files.size()==1) tooltip=files.first().path;
+                else if(content.contains(help->pos())) {
+                    const int row=(help->pos().y()-content.y()-12)/30;
+                    if(row>=0 && row<files.size()) tooltip=files[row].path;
+                }
+            }
+            if(!tooltip.isEmpty()) QToolTip::showText(help->globalPos(),tooltip,this);
+            else QToolTip::hideText();
+            event->accept();return true;
+        }
+        return QWidget::event(event);
+    }
     void showEvent(QShowEvent *event) override {
         QWidget::showEvent(event);
         enableKWinBlur();
@@ -1514,6 +1585,8 @@ protected:
 
     void resizeEvent(QResizeEvent *event) override {
         QWidget::resizeEvent(event);
+        if(categoryAnimation_) categoryAnimation_->stop();
+        categoryScrollOffset_=qBound(0,categoryScrollOffset_,maximumCategoryScroll());
         updateSearchGeometry();
         // XShape + KWin blur property updates are synchronous X11 operations.
         // Coalesce ordinary resizes and never perform them for every live-drag
@@ -1605,6 +1678,8 @@ protected:
     }
 
     void hideEvent(QHideEvent *event) override {
+        filePaste_->cancel();
+        pendingFileConfirmID_=-1;
         if (pipeline_) {
             pipeline_->setDeckVisible(false);
             ++historyQueryGeneration_;
@@ -1630,6 +1705,7 @@ protected:
             return;
         }
         if (event->key() == Qt::Key_Escape) {
+            if (filePaste_->feedback().phase != FilePasteFeedback::Idle) { filePaste_->cancel(); return; }
             if (searchActive_) endSearch();
             else hide();
             return;
@@ -1743,6 +1819,7 @@ protected:
     }
 
     void mousePressEvent(QMouseEvent *event) override {
+        pendingFileConfirmID_=-1;
         pendingMousePasteID_ = -1;
         if (previewDialog_) previewDialog_->reject();
         if (event->button() != Qt::LeftButton) {
@@ -1750,7 +1827,7 @@ protected:
             return QWidget::mousePressEvent(event);
         }
         if (cardIndexAt(event->pos()) < 0) lastCardPressID_ = -1;
-        if (event->pos().y() <= 12) {
+        if (event->pos().y() < 18) {
             resizing_ = true;
             if (blurUpdateTimer_) blurUpdateTimer_->stop();
             suspendKWinBlur();
@@ -1765,15 +1842,11 @@ protected:
         }
         if (event->pos().y() < 60) {
             const QStringList &categories = categoryValues();
-            const int first = categoryPageStart_;
-            const int last = std::min(categories.size(), first + kCategoriesPerPage);
-            for (int index = first; index < last; ++index) {
-                if (categoryRect(index - first).contains(event->pos())) {
-                    selectedCategory_ = categories[index];
-                    reload();
-                    return;
-                }
-            }
+            for (int index = 0; index < 4; ++index)
+                if (fixedTypeRect(index).contains(event->pos())) { selectCategory(categories[index]); return; }
+            if (customStripRect().contains(event->pos()))
+                for (int index=4;index<categories.size();++index)
+                    if (categoryRect(index-4).contains(event->pos())) { selectCategory(categories[index]); return; }
             if (searchRect().contains(event->pos())) {
                 search();
                 return;
@@ -1791,6 +1864,19 @@ protected:
         }
         const int index = cardIndexAt(event->pos());
         if (index >= 0) {
+            if (selectedIndex_ != index) filePaste_->cancel();
+            const auto &feedback = filePaste_->feedback();
+            if (feedback.itemID == items_[index].databaseID && feedback.phase == FilePasteFeedback::Partial) {
+                const QRect area = fileFeedbackRect(fileContentRect(index), feedback);
+                const QRect cancel(area.x()+12, area.bottom()-42,52,30);
+                const QRect confirm(cancel.right()+8,cancel.y(),std::min(110,area.width()-84),30);
+                if (cancel.contains(event->pos())) { filePaste_->cancel(); lastCardPressID_=-1; return; }
+                if (confirm.contains(event->pos())) {
+                    pendingFileConfirmID_=items_[index].databaseID;
+                    pendingFileConfirmRevision_=clipboardRevision_;
+                    lastCardPressID_=-1; return;
+                }
+            }
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             const qint64 cardID = items_[index].databaseID >= 0
                 ? items_[index].databaseID : index;
@@ -1830,11 +1916,26 @@ protected:
             if (resizeFrameTimer_ && !resizeFrameTimer_->isActive()) resizeFrameTimer_->start();
             return;
         }
-        setCursor(event->pos().y() <= 12 ? Qt::SizeVerCursor : Qt::ArrowCursor);
+        setCursor(event->pos().y() < 18 ? Qt::SizeVerCursor : Qt::ArrowCursor);
         QWidget::mouseMoveEvent(event);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override {
+        if(event->button()==Qt::LeftButton && pendingFileConfirmID_>=0) {
+            const qint64 id=pendingFileConfirmID_;
+            const quint64 revision=pendingFileConfirmRevision_;
+            pendingFileConfirmID_=-1;
+            const auto &feedback=filePaste_->feedback();
+            if(selectedDatabaseID()==id && feedback.phase==FilePasteFeedback::Partial) {
+                const QRect area=fileFeedbackRect(fileContentRect(selectedIndex_),feedback);
+                const QRect confirm(area.x()+71,area.bottom()-42,std::min(110,area.width()-84),30);
+                if(confirm.contains(event->pos())) QTimer::singleShot(0,this,[this,id,revision] {
+                    if(isVisible() && selectedDatabaseID()==id && clipboardRevision_==revision
+                        && filePaste_->feedback().phase==FilePasteFeedback::Partial) pasteSelected();
+                });
+            }
+            event->accept();return;
+        }
         if (resizing_ && event->button() == Qt::LeftButton) {
             finishLiveResize();
             return;
@@ -1852,6 +1953,10 @@ protected:
                 // Keep Deck mapped through button-up, then paste on the next
                 // event-loop turn so neither the click nor Ctrl+V is rerouted
                 // while button 1 is still held.
+                if (filePaste_->feedback().itemID == itemID
+                    && filePaste_->feedback().phase == FilePasteFeedback::Checking) {
+                    event->accept(); return;
+                }
                 const quint64 revision = clipboardRevision_;
                 const quint64 generation = ++pasteRequestGeneration_;
                 QTimer::singleShot(0, this, [this, itemID, plainText, revision, generation] {
@@ -1898,6 +2003,11 @@ protected:
         const int delta = event->angleDelta().x() != 0
             ? event->angleDelta().x()
             : event->angleDelta().y();
+        if (customStripRect().contains(event->pos())) {
+            scrollCategoriesTo(categoryScrollOffset_-delta/2,false);
+            event->accept();
+            return;
+        }
         scrollOffset_ -= delta / 2;
         clampScrollOffset();
         update();
@@ -1933,6 +2043,7 @@ protected:
         menu.addSeparator();
         QAction *editAction = addShortcutAction(QStringLiteral("编辑"),
                                                QKeySequence(Qt::CTRL | Qt::Key_E));
+        editAction->setEnabled(!items_[index].isFiles());
         QAction *renameAction = addShortcutAction(QStringLiteral("重命名"),
                                                  QKeySequence(Qt::CTRL | Qt::Key_R));
         QAction *rotateLeftAction = nullptr;
@@ -2027,49 +2138,60 @@ private:
         return -1;
     }
 
+    QRect fileContentRect(int index) const {
+        const QRect card = cardRect(index);
+        const int header = card.height() >= 180 ? std::min(58,std::max(48,qRound(card.height()*0.20))) : 36;
+        return card.adjusted(0, header, 0, 0);
+    }
+
     void paintHeader(QPainter &painter) {
         QFont font = categoryFont();
         painter.setFont(font);
         const QStringList &categories = categoryValues();
-        const QColor dots[] = {QColor(160, 170, 180), QColor(255, 56, 71), QColor(255, 145, 48),
-                               QColor(175, 82, 222), QColor(50, 173, 230), QColor(52, 199, 89),
-                               QColor(255, 55, 95), QColor(88, 86, 214), QColor(100, 210, 190)};
-        const int first = categoryPageStart_;
-        const int last = std::min(categories.size(), first + kCategoriesPerPage);
-        for (int index = first; index < last; ++index) {
-            const QRect itemRect = categoryRect(index - first);
-            if (categories[index] == selectedCategory_) {
-                painter.setPen(Qt::NoPen);
-                // Give the pill enough local contrast that compositor blur
-                // does not soften its edge and label on bright backgrounds.
-                painter.setBrush(QColor(62, 62, 66, 205));
-                painter.drawRoundedRect(itemRect, 16, 16);
+        const DeckSymbol symbols[] = {DeckSymbol::History, DeckSymbol::Text, DeckSymbol::Image, DeckSymbol::Folder};
+        const QString labels[] = {QStringLiteral("History"),QStringLiteral("文本"),QStringLiteral("图片"),QStringLiteral("文件")};
+        for (int index=0; index<4; ++index) {
+            const QRect area=fixedTypeRect(index);
+            const bool selected=categories.value(index)==selectedCategory_;
+            if (selected) {
+                painter.setPen(Qt::NoPen); painter.setBrush(QColor(0,0,0,30));
+                painter.drawRoundedRect(area.translated(0,2).adjusted(-2,-1,2,2),11,11);
+                painter.setBrush(QColor(255,255,255,41)); painter.drawRoundedRect(area,9,9);
             }
-            if (index == 0) {
-                const QPoint center(itemRect.x() + 14, itemRect.center().y());
-                painter.setBrush(Qt::NoBrush);
-                painter.setPen(QPen(QColor(220, 225, 230), 1.5, Qt::SolidLine,
-                                    Qt::RoundCap, Qt::RoundJoin));
-                // Match SF Symbols' clock.arrow.circlepath used by macOS:
-                // one circular arrow around a small pair of clock hands.
-                painter.drawArc(QRect(center.x() - 8, center.y() - 8, 16, 16),
-                                28 * 16, 292 * 16);
-                QPainterPath arrowHead;
-                arrowHead.moveTo(center + QPoint(-7, -6));
-                arrowHead.lineTo(center + QPoint(-8, 0));
-                arrowHead.lineTo(center + QPoint(-2, -2));
-                painter.drawPath(arrowHead);
-                painter.drawLine(center, center + QPoint(0, -3));
-                painter.drawLine(center, center + QPoint(3, 1));
-            } else {
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(dots[index % 9]);
-                painter.drawEllipse(QPoint(itemRect.x() + 14, itemRect.center().y()), 5, 5);
+            drawDeckSymbol(painter,QRect(area.x()+10,area.y()+8,19,19),symbols[index],QColor(255,255,255,selected?255:166));
+            if (index==0 || selected) {
+                painter.setPen(QColor(255,255,255,selected?255:166));
+                painter.drawText(area.adjusted(35,0,-10,0),Qt::AlignLeft|Qt::AlignVCenter,labels[index]);
             }
-            painter.setPen(QColor(255, 255, 255, 225));
-            painter.drawText(itemRect.adjusted(25, 0, -6, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                             categories[index]);
         }
+        painter.setPen(QPen(QColor(255,255,255,46),1));
+        painter.drawLine(categoryStripX()-15,24,categoryStripX()-15,46);
+        painter.save(); painter.setClipRect(customStripRect());
+        const QColor dots[] = {QColor(175,82,222),QColor(50,173,230),QColor(52,199,89),QColor(255,55,95),QColor(88,86,214),QColor(100,210,190)};
+        for (int index=4;index<categories.size();++index) {
+            const QRect area=categoryRect(index-4);
+            if (!area.intersects(customStripRect())) continue;
+            const bool selected=categories[index]==selectedCategory_;
+            if (selected) {
+                painter.setPen(Qt::NoPen); painter.setBrush(QColor(0,0,0,25));
+                painter.drawRoundedRect(area.translated(0,2).adjusted(-1,0,1,1),16,16);
+                painter.setBrush(QColor(255,255,255,36)); painter.drawRoundedRect(area,16,16);
+            }
+            QFont labelFont=font;
+            const int natural=QFontMetrics(labelFont).horizontalAdvance(categories[index]);
+            const int available=area.width()-22;
+            if(natural>available && natural<=area.width())
+                labelFont.setPixelSize(std::max(11,13*available/std::max(1,natural)));
+            painter.setFont(labelFont);
+            const QString label=QFontMetrics(labelFont).elidedText(categories[index],Qt::ElideRight,available);
+            const int textWidth=QFontMetrics(labelFont).horizontalAdvance(label);
+            const int left=area.x()+(area.width()-18-textWidth)/2;
+            painter.setPen(Qt::NoPen); painter.setBrush(dots[(index-4)%6]);
+            painter.drawEllipse(QPointF(left+5.5,area.center().y()),5.5,5.5);
+            painter.setPen(QColor(255,255,255,235));
+            painter.drawText(QRect(left+18,area.y(),textWidth+1,area.height()),Qt::AlignLeft|Qt::AlignVCenter,label);
+        }
+        painter.restore();
 
         if (searchExpansion_ <= 0.001) {
             const QPoint center = searchRect().center() + QPoint(-1, -1);
@@ -2081,6 +2203,7 @@ private:
         }
         painter.setFont(font);
         auto drawChevron = [&painter](const QRect &rect, bool pointsRight, int alpha) {
+            if (rect.isEmpty()) return;
             const QPoint center = rect.center();
             QPainterPath path;
             path.moveTo(center + QPoint(pointsRight ? -2 : 2, -4));
@@ -2090,9 +2213,9 @@ private:
                                 Qt::RoundCap, Qt::RoundJoin));
             painter.drawPath(path);
         };
-        drawChevron(previousCategoryRect(), false, categoryPageStart_ > 0 ? 210 : 55);
+        drawChevron(previousCategoryRect(), false, categoryScrollOffset_ > 0 ? 210 : 55);
         drawChevron(nextCategoryRect(), true,
-                    categoryPageStart_ + kCategoriesPerPage < categories.size() ? 210 : 55);
+                    categoryScrollOffset_ < maximumCategoryScroll() ? 210 : 55);
         painter.setPen(QPen(QColor(255, 255, 255, 220), 2, Qt::SolidLine, Qt::RoundCap));
         painter.drawLine(addRect().center() + QPoint(-7, 0), addRect().center() + QPoint(7, 0));
         painter.drawLine(addRect().center() + QPoint(0, -7), addRect().center() + QPoint(0, 7));
@@ -2115,7 +2238,7 @@ private:
         painter.setFont(detail);
         painter.setPen(QColor(255, 255, 255, 135));
         painter.drawText(cardsViewport().adjusted(0, 34, 0, 0), Qt::AlignCenter,
-                         QStringLiteral("复制或剪切的文本和图片会出现在这里"));
+                         QStringLiteral("复制的文本、图片和文件会显示在这里"));
     }
 
     QImage cardThumbnail(const ClipboardItem &item) {
@@ -2248,7 +2371,11 @@ private:
                 : card;
             painter.save();
             painter.setClipPath(path);
-            if (item.isImage()) {
+            if (item.isFiles()) {
+                FilePasteFeedback feedback;
+                if (filePaste_->feedback().itemID == item.databaseID) feedback = filePaste_->feedback();
+                paintFileCard(painter, fileContentRect(index), item.files, true, feedback);
+            } else if (item.isImage()) {
                 const int checkerSize = 12;
                 painter.fillRect(contentArea, QColor(26, 26, 28));
                 for (int y = contentArea.y(); y < contentArea.bottom(); y += checkerSize) {
@@ -2384,7 +2511,8 @@ private:
             metaFont.setPointSizeF(expanded ? 12.0 : 10.0);
             metaFont.setBold(true);
             painter.setFont(metaFont);
-            const QString headerTitle = isLink ? QStringLiteral("链接") : item.title;
+            const QString headerTitle = item.isFiles() ? QStringLiteral("文件 · %1 项").arg(item.files.size())
+                : isLink ? QStringLiteral("链接") : item.title;
             QString categoryLabel = item.category;
             if (item.previewLanguage == QStringLiteral("code")) {
                 const QString detected = HistoryRepository::detectedCodeLanguage(item.text);
@@ -2433,7 +2561,11 @@ private:
             const QImage sourceIcon = clipDeckSource
                 ? shadowFreeClipDeckIcon()
                 : renderedSourceIcon(item, sourceSize);
-            if (!sourceIcon.isNull()) {
+            if (item.isFiles()) {
+                const int side = expanded ? 30 : 18;
+                const QRect fileBadge=expanded?QRect(card.right()-44,card.y()+(headerHeight-side)/2,side,side):sourceRect;
+                drawDeckSymbol(painter,fileBadge,DeckSymbol::Folder,Qt::white);
+            } else if (!sourceIcon.isNull()) {
                 painter.drawImage(sourceRect, sourceIcon);
             } else {
                 painter.setPen(QColor(255, 255, 255, 225));
@@ -2446,7 +2578,7 @@ private:
 
             painter.setFont(smallFont);
             painter.setPen(QColor(255, 255, 255, 115));
-            if (expanded && !isLink) {
+            if (expanded && !isLink && !item.isFiles()) {
                 const QSize displayedImageSize = imageSizeAtAngle(
                     item.imagePixelSize.isValid() ? item.imagePixelSize : item.image.size(), item.imageAngle);
                 const QString footer = item.isImage()
@@ -2492,6 +2624,7 @@ private:
     }
 
     void moveSelection(int direction) {
+        filePaste_->cancel();
         if (items_.empty()) {
             return;
         }
@@ -2560,20 +2693,35 @@ private:
         const QStringList &categories = categoryValues();
         const int current = std::max(0, categories.indexOf(selectedCategory_));
         const int next = (current + direction + categories.size()) % categories.size();
-        selectedCategory_ = categories[next];
-        if (next < categoryPageStart_) categoryPageStart_ = next;
-        else if (next >= categoryPageStart_ + kCategoriesPerPage) {
-            categoryPageStart_ = std::max(0, next - (kCategoriesPerPage - 1));
-        }
-        reload();
+        selectCategory(categories[next]);
     }
 
     void changeCategoryPage(int direction) {
-        const int maximum = std::max(0, categoryValues().size() - kCategoriesPerPage);
-        categoryPageStart_ = direction < 0
-            ? std::max(0, categoryPageStart_ - 5)
-            : std::min(maximum, categoryPageStart_ + 5);
-        update();
+        scrollCategoriesTo(categoryScrollOffset_+direction*5*108,true);
+    }
+
+    void scrollCategoriesTo(int offset, bool animated) {
+        offset=qBound(0,offset,maximumCategoryScroll());
+        categoryAnimation_->stop();
+        if (animated) {
+            categoryAnimation_->setStartValue(categoryScrollOffset_);
+            categoryAnimation_->setEndValue(offset); categoryAnimation_->start();
+        } else { categoryScrollOffset_=offset; update(); }
+    }
+
+    void selectCategory(const QString &category) {
+        filePaste_->cancel();
+        selectedCategory_=category;
+        selectedIndex_=-1;
+        scrollOffset_=0;
+        const int index=categoryValues().indexOf(category)-4;
+        if (index>=0) {
+            const int left=index*108;
+            if (left<categoryScrollOffset_) scrollCategoriesTo(left,true);
+            else if (left+96>categoryScrollOffset_+visibleCategoryStripWidth())
+                scrollCategoriesTo(left+96-visibleCategoryStripWidth(),true);
+        }
+        updateSearchGeometry(); update(); reload();
     }
 
     void deleteSelected() {
@@ -2598,55 +2746,51 @@ private:
 
     void refreshCategoryValues() {
         QStringList values{QStringLiteral("History"), QStringLiteral("Text"),
-                           QStringLiteral("Images")};
+                           QStringLiteral("Images"), QStringLiteral("Files")};
         for (const ClipboardCategory &category : repository_->categories()) {
             values.append(category.name);
         }
         categoryValuesCache_ = std::move(values);
-        categoryWidthsCache_.clear();
-        categoryWidthsCache_.reserve(categoryValuesCache_.size());
-        const QFontMetrics metrics(categoryFont());
-        for (const QString &category : categoryValuesCache_) {
-            categoryWidthsCache_.append(std::max(76, std::min(148,
-                metrics.horizontalAdvance(category) + 35)));
-        }
         if (!categoryValuesCache_.contains(selectedCategory_)) {
             selectedCategory_ = QStringLiteral("History");
         }
-        categoryPageStart_ = std::min(categoryPageStart_,
-            std::max(0, categoryValuesCache_.size() - kCategoriesPerPage));
     }
 
     QFont categoryFont() const {
         QFont value = font();
-        value.setPointSizeF(10.5);
+        value.setPixelSize(13);
         value.setWeight(QFont::DemiBold);
         return value;
     }
 
-    int categoryItemWidth(int categoryIndex) const {
-        if (categoryIndex < 0 || categoryIndex >= categoryWidthsCache_.size()) return 84;
-        return categoryWidthsCache_[categoryIndex];
+    int visibleCategoryStripWidth() const {
+        const int count=std::max(0,categoryValues().size()-4);
+        const int preferred=std::min(760,std::max(240,count*108-12));
+        return std::min(preferred,std::max(0,width()-searchControlWidth()-fixedTypesWidth()-20-29-42-54-(count>6?46:0)-48));
     }
 
-    int visibleCategoryStripWidth() const {
-        const QStringList &categories = categoryValues();
-        const int count = std::max(0, std::min(kCategoriesPerPage,
-            categories.size() - categoryPageStart_));
-        int result = 0;
-        for (int slot = 0; slot < count; ++slot) {
-            result += categoryItemWidth(categoryPageStart_ + slot);
-            if (slot + 1 < count) result += 8;
-        }
-        return result;
+    int fixedTypeWidth(int index) const {
+        const QString labels[]={QStringLiteral("History"),QStringLiteral("文本"),QStringLiteral("图片"),QStringLiteral("文件")};
+        return 39+((index==0 || categoryValues().value(index)==selectedCategory_)
+            ? 6+QFontMetrics(categoryFont()).horizontalAdvance(labels[index]) : 0);
+    }
+    int fixedTypesWidth() const {
+        int total=12;
+        for(int index=0;index<4;++index) total+=fixedTypeWidth(index);
+        return total;
+    }
+    QRect fixedTypeRect(int index) const {
+        int x=toolbarStartX()+searchControlWidth()+20;
+        for(int i=0;i<index;++i) x+=fixedTypeWidth(i)+4;
+        return QRect(x,18,fixedTypeWidth(index),35);
+    }
+    QRect customStripRect() const { return QRect(categoryStripX(),20,visibleCategoryStripWidth(),31); }
+    int maximumCategoryScroll() const {
+        return std::max(0,(categoryValues().size()-4)*108-12-visibleCategoryStripWidth());
     }
 
     QRect categoryRect(int index) const {
-        int x = categoryStripX();
-        for (int slot = 0; slot < index; ++slot) {
-            x += categoryItemWidth(categoryPageStart_ + slot) + 8;
-        }
-        return QRect(x, 18, categoryItemWidth(categoryPageStart_ + index), 35);
+        return QRect(categoryStripX()+index*108-qBound(0,categoryScrollOffset_,maximumCategoryScroll()),20,96,31);
     }
 
     QRect searchRect() const {
@@ -2659,15 +2803,16 @@ private:
 
     int toolbarStartX() const {
         const int searchWidth = searchControlWidth();
-        const int toolbarWidth = searchWidth + 20 + visibleCategoryStripWidth() + 3 * 38;
-        return std::max(62, (width() - toolbarWidth) / 2);
+        const int toolbarWidth=searchWidth+20+fixedTypesWidth()+29+visibleCategoryStripWidth()
+            +(categoryValues().size()>10?46:0)+42+54;
+        return std::max(24,(width()-toolbarWidth)/2);
     }
-    int categoryStripX() const { return toolbarStartX() + searchControlWidth() + 20; }
+    int categoryStripX() const { return toolbarStartX()+searchControlWidth()+20+fixedTypesWidth()+29; }
     QRect previousCategoryRect() const {
-        return QRect(categoryStripX() + visibleCategoryStripWidth() + 4, 18, 34, 35);
+        return categoryValues().size()>10 ? QRect(categoryStripX()+visibleCategoryStripWidth()+2,20,23,31) : QRect();
     }
-    QRect nextCategoryRect() const { return previousCategoryRect().translated(38, 0); }
-    QRect addRect() const { return previousCategoryRect().translated(76, 0); }
+    QRect nextCategoryRect() const { return previousCategoryRect().isEmpty()?QRect():previousCategoryRect().translated(23,0); }
+    QRect addRect() const { return QRect(categoryStripX()+visibleCategoryStripWidth()+(categoryValues().size()>10?48:2)+5,18,34,34); }
     QRect moreRect() const { return QRect(width() - 68, 18, 42, 35); }
 
     void search() {
@@ -2675,7 +2820,6 @@ private:
         if (starting) {
             searchActive_ = true;
             selectedCategory_ = QStringLiteral("History");
-            categoryPageStart_ = 0;
             reload();
         }
         updateSearchGeometry();
@@ -2700,7 +2844,6 @@ private:
         searchEdit_->clear();
         if (searchDebounce_) searchDebounce_->stop();
         selectedCategory_ = QStringLiteral("History");
-        categoryPageStart_ = 0;
         setFocus(Qt::ShortcutFocusReason);
         reload();
         if (searchAnimation_) {
@@ -2828,32 +2971,36 @@ private:
         layout->setSpacing(0);
         QWidget *header = new QWidget(&dialog);
         header->setObjectName(QStringLiteral("previewHeader"));
-        header->setFixedHeight(58);
+        header->setFixedHeight(item.isFiles()?52:58);
         QHBoxLayout *headerLayout = new QHBoxLayout(header);
         headerLayout->setContentsMargins(22, 0, 22, 0);
         headerLayout->setSpacing(12);
-        QLabel *category = new QLabel(item.category.isEmpty()
+        QLabel *category = new ElidingLabel(item.isFiles() ? QStringLiteral("文件 · %1 项").arg(item.files.size()) : item.category.isEmpty()
             ? (item.isImage() ? QStringLiteral("图片") : QStringLiteral("文本")) : item.category, header);
         category->setObjectName(QStringLiteral("previewCategory"));
-        QLabel *source = new QLabel(item.sourceName, header);
+        QLabel *source = new ElidingLabel(item.sourceName, header);
         source->setObjectName(QStringLiteral("previewSource"));
         // Narrow portrait previews must not be expanded by a long app name.
         source->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         source->setToolTip(item.sourceName);
-        category->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         category->setToolTip(category->text());
-        category->ensurePolished();
-        category->setFixedWidth(std::min(100,
-            category->fontMetrics().horizontalAdvance(category->text())));
-        QLabel *time = new QLabel(item.copiedAt.toString(QStringLiteral("yyyy-MM-dd  HH:mm")), header);
+        category->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        category->setMaximumWidth(item.isFiles()?160:100);
+        if (item.isFiles()) category->setStyleSheet(QStringLiteral("font-size:15px;"));
+        source->setMinimumWidth(24);
+        QLabel *time = new ElidingLabel(item.copiedAt.toString(QStringLiteral("yyyy-MM-dd  HH:mm")), header);
         time->setObjectName(QStringLiteral("previewTime"));
         headerLayout->addWidget(category);
         headerLayout->addWidget(source, 1);
         headerLayout->addWidget(time);
         layout->addWidget(header);
         QPlainTextEdit *previewText = nullptr;
+        FilePreviewWidget *filePreview = nullptr;
         ImagePreviewWidget *imagePreview = nullptr;
-        if (item.isImage()) {
+        if (item.isFiles()) {
+            filePreview = new FilePreviewWidget(item.files, &dialog);
+            layout->addWidget(filePreview, 1);
+        } else if (item.isImage()) {
             imagePreview = new ImagePreviewWidget(&dialog);
             imagePreview->setMinimumSize(0, 0);
             imagePreview->setImage(imageAtAngle(item.image, item.imageAngle));
@@ -2904,7 +3051,7 @@ private:
             } else if (modifiers == Qt::NoModifier
                     && (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Space)) {
                 dialog.reject();
-            } else if (modifiers == Qt::ControlModifier && event->key() == Qt::Key_E) {
+            } else if (!item.isFiles() && modifiers == Qt::ControlModifier && event->key() == Qt::Key_E) {
                 editRequested = true;
                 dialog.accept();
             } else if (rotatePreview && modifiers == Qt::ControlModifier
@@ -2916,6 +3063,9 @@ private:
                 QScrollBar *bar = previewText->verticalScrollBar();
                 bar->setValue(bar->value() + (event->key() == Qt::Key_Up ? -1 : 1)
                     * std::max(1, bar->singleStep()));
+            } else if (filePreview && modifiers == Qt::NoModifier
+                    && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+                filePreview->scrollBy(event->key() == Qt::Key_Up ? -1 : 1);
             }
             event->accept();
         };
@@ -2940,6 +3090,7 @@ private:
 
     void editSelected() {
         if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (items_[selectedIndex_].isFiles()) return;
         if (ensureSelectedPayload([this] { editSelected(); })) return;
         const ClipboardItem item = items_[selectedIndex_];
         QDialog dialog(this);
@@ -3370,7 +3521,16 @@ private:
         QClipboard *clipboard = QApplication::clipboard();
         const quint64 revisionBeforeRead = clipboardRevision_;
         bool sameContent = false;
-        if (request->isImage) {
+        if (!request->files.isEmpty()) {
+            const QMimeData *mime = clipboard->mimeData(QClipboard::Clipboard);
+            if (mime) {
+                QVector<ClipboardFileReference> files;
+                auto urls=mime->urls().toVector();
+                if(urls.isEmpty()) urls=FileReferences::urls(mime->data(QStringLiteral("x-special/gnome-copied-files")));
+                for (const auto &url : urls) if (url.isLocalFile()) files.append({url.toLocalFile(),{},{},false});
+                sameContent = FileReferences::identity(files) == FileReferences::identity(request->files);
+            }
+        } else if (request->isImage) {
             const QMimeData *mime = clipboard->mimeData(QClipboard::Clipboard);
             if (mime && mime->hasImage()) {
                 const QImage current = qvariant_cast<QImage>(mime->imageData());
@@ -3711,7 +3871,6 @@ private:
             searchEdit_->clear();
             searchEdit_->hide();
             selectedCategory_ = QStringLiteral("History");
-            categoryPageStart_ = 0;
             selectedIndex_ = -1;
             scrollOffset_ = 0;
             updateSearchGeometry();
@@ -3741,6 +3900,7 @@ private:
         QString repositoryCategory;
         if (selectedCategory_ == QStringLiteral("Text")) repositoryCategory = QStringLiteral("文本");
         else if (selectedCategory_ == QStringLiteral("Images")) repositoryCategory = QStringLiteral("图片");
+        else if (selectedCategory_ == QStringLiteral("Files")) repositoryCategory = QStringLiteral("文件");
         else if (selectedCategory_ != QStringLiteral("History")) repositoryCategory = selectedCategory_;
         const int fetchLimit = selectedCategory_ == QStringLiteral("Images")
             ? std::min(kHistoryCapacity, std::max(kInitialImageCapacity, imageLoadLimit_))
@@ -3794,6 +3954,7 @@ private:
 
     Display *display_ = nullptr;
     HistoryRepository *repository_ = nullptr;
+    FilePasteController *filePaste_ = nullptr;
     ClipboardPipeline *pipeline_ = nullptr;
     quint64 historyQueryGeneration_ = 0;
     quint64 payloadRequestGeneration_ = 0;
@@ -3807,7 +3968,6 @@ private:
     std::function<void(QKeyEvent *)> previewKeyHandler_;
     std::vector<ClipboardItem> items_;
     QStringList categoryValuesCache_;
-    QVector<int> categoryWidthsCache_;
     QString loadedCategory_;
     int imageLoadLimit_ = kInitialImageCapacity;
     int imageLoadGeneration_ = 0;
@@ -3825,14 +3985,16 @@ private:
     qint64 lastCardPressAt_ = 0;
     QPoint lastCardPressGlobalPos_;
     qint64 pendingMousePasteID_ = -1;
+    qint64 pendingFileConfirmID_ = -1;
+    quint64 pendingFileConfirmRevision_ = 0;
     Qt::KeyboardModifiers pendingMousePasteModifiers_ = Qt::NoModifier;
     QPoint pendingMousePastePosition_;
     unsigned int lastPointerButtonMask_ = 0;
     bool resizing_ = false;
     int resizeStartGlobalY_ = 0;
     QRect resizeStartGeometry_;
-    int categoryPageStart_ = 0;
-    static constexpr int kCategoriesPerPage = 6;
+    int categoryScrollOffset_ = 0;
+    QVariantAnimation *categoryAnimation_ = nullptr;
     QLineEdit *searchEdit_ = nullptr;
     SearchFieldGlyph *searchLeadingGlyph_ = nullptr;
     SearchFieldGlyph *searchCloseGlyph_ = nullptr;
@@ -4711,7 +4873,8 @@ int main(int argc, char *argv[]) {
     QApplication::setApplicationName(QStringLiteral("ClipDeck"));
     QApplication::setOrganizationName(QStringLiteral("ClipDeck"));
     QApplication::setQuitOnLastWindowClosed(false);
-    if (!app.arguments().contains(QStringLiteral("--self-test"))) {
+    if (!app.arguments().contains(QStringLiteral("--self-test"))
+        && app.arguments().filter(QStringLiteral("--render-check=")).isEmpty()) {
         ScriptEditorWidget::prewarm();
     }
     app.setStyleSheet(QStringLiteral(
@@ -5095,6 +5258,52 @@ int main(int argc, char *argv[]) {
                 QStringLiteral("link-title"));
         require(linked != stored.cend() && linked->hasFetchedLinkPreview,
                 QStringLiteral("link-preview-state"));
+        for (int headerWidth : {260, 320, 560}) {
+            QWidget header;
+            header.setObjectName(QStringLiteral("headerLayoutTest"));
+            header.setStyleSheet(QStringLiteral(
+                "QWidget#headerLayoutTest{background:#2b2b2e;}"
+                "QLabel{color:#ffffff;font-size:13px;}"
+                "QLabel#previewCategory{font-size:18px;font-weight:700;}"));
+            QHBoxLayout *row = new QHBoxLayout(&header);
+            row->setContentsMargins(22, 0, 22, 0);
+            row->setSpacing(12);
+            const QString type = QStringLiteral("超长类型名称 Markdown / JavaScript");
+            const QString appName = QStringLiteral("Very long application source name with 中文文字");
+            auto *typeLabel = new ElidingLabel(type, &header);
+            typeLabel->setObjectName(QStringLiteral("previewCategory"));
+            typeLabel->setMaximumWidth(100);
+            auto *appLabel = new ElidingLabel(appName, &header);
+            appLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            appLabel->setMinimumWidth(24);
+            auto *timeLabel = new ElidingLabel(QStringLiteral("2026-10-29  14:35"), &header);
+            row->addWidget(typeLabel);
+            row->addWidget(appLabel, 1);
+            row->addWidget(timeLabel);
+            header.resize(headerWidth, 58);
+            header.show();
+            app.processEvents();
+            require(header.width() == headerWidth
+                && typeLabel->geometry().right() + 12 <= appLabel->geometry().left()
+                && appLabel->geometry().right() + 12 <= timeLabel->geometry().left()
+                && timeLabel->geometry().right() < headerWidth - 21,
+                QStringLiteral("preview-header-fields-keep-separate-layout-allocations"));
+            require(typeLabel->text() == type && appLabel->text() == appName
+                && appLabel->toolTip() == appName,
+                QStringLiteral("preview-header-retains-full-text-for-tooltip"));
+            // Text may be elided but must never paint into the inter-field gap.
+            const QImage pixels = header.grab().toImage();
+            const qreal ratio = pixels.devicePixelRatio();
+            bool gapClear = true;
+            for (int x = typeLabel->geometry().right() + 2; x < appLabel->x() - 1; ++x) {
+                for (int y = 8; y < 50; ++y) {
+                    if (QColor::fromRgba(pixels.pixel(qRound(x * ratio), qRound(y * ratio))).red() > 100)
+                        gapClear = false;
+                }
+            }
+            require(gapClear, QStringLiteral("preview-header-text-does-not-bleed-into-neighbor"));
+            header.hide();
+        }
         const QSize previewScreen(1920, 1080);
         for (const QSize imageSize : {QSize(3000, 2000), QSize(2000, 3000), QSize(2000, 2000)}) {
             const QSize window = imagePreviewWindowSize(imageSize, previewScreen);
@@ -5418,7 +5627,101 @@ int main(int argc, char *argv[]) {
                     QStringLiteral("async-deck-new-capture-selects-history-first"));
             asyncDeck.hide();
         }
+        {
+            QTemporaryDir filesDirectory;
+            const QString livePath=filesDirectory.filePath(QStringLiteral("live.pdf"));
+            const QString missingPath=filesDirectory.filePath(QStringLiteral("missing.epub"));
+            QFile live(livePath);live.open(QIODevice::WriteOnly);live.write("%PDF-1.4");live.close();
+            HistoryRepository fileRepository(filesDirectory.filePath(QStringLiteral("deck-files.sqlite")));
+            ClipboardItem item;item.type=ClipboardPayloadType::Files;item.title=QStringLiteral("文件 · 2 项");item.copiedAt=now;
+            item.files={{livePath,QStringLiteral("live.pdf"),QStringLiteral("application/pdf"),false},
+                        {missingPath,QStringLiteral("missing.epub"),QStringLiteral("application/epub+zip"),false}};
+            fileRepository.save(item);
+            DeckWindow fileDeck(nullptr,&fileRepository);
+            FilePasteController *controller=nullptr;
+            for(QObject *child:fileDeck.children()) if(auto *found=dynamic_cast<FilePasteController *>(child)) controller=found;
+            const auto waitUntil=[&](const std::function<bool()> &done) {
+                QElapsedTimer elapsed;elapsed.start();
+                while(!done() && elapsed.elapsed()<3000) {app.processEvents(QEventLoop::AllEvents,5);QThread::msleep(1);}
+                return done();
+            };
+            const auto key=[&](int value,Qt::KeyboardModifiers modifiers=Qt::NoModifier) {
+                QKeyEvent press(QEvent::KeyPress,value,modifiers);QApplication::sendEvent(&fileDeck,&press);
+            };
+            QApplication::clipboard()->setText(QStringLiteral("before-file-paste"));
+            fileDeck.showNearPointer();
+            bool sawFilePreview=false;
+            QTimer::singleShot(0,&fileDeck,[&] {
+                for(QDialog *dialog:fileDeck.findChildren<QDialog *>()) {
+                    if(!dialog->isVisible()) continue;
+                    sawFilePreview=true;
+                    const auto *label=dialog->findChild<QLabel *>(QStringLiteral("previewCategory"));
+                    require(label && label->text()==QStringLiteral("文件 · 2 项"),QStringLiteral("file-preview-type-count-heading"));
+                    const QString directory=qEnvironmentVariable("CLIPDECK_RENDER_DIRECTORY");
+                    if(!directory.isEmpty()) {QDir().mkpath(directory);dialog->grab().save(QDir(directory).filePath(QStringLiteral("file-popover.png")));}
+                    key(Qt::Key_Down);key(Qt::Key_Up);dialog->reject();break;
+                }
+            });
+            key(Qt::Key_Space);
+            require(sawFilePreview && fileDeck.isVisible(),QStringLiteral("file-preview-navigation-keeps-deck-open"));
+            key(Qt::Key_Return);
+            require(controller && waitUntil([&]{return controller->feedback().phase==FilePasteFeedback::Partial;}),
+                    QStringLiteral("deck-file-enter-shows-partial-confirmation"));
+            require(fileDeck.isVisible() && QApplication::clipboard()->text()==QStringLiteral("before-file-paste"),
+                    QStringLiteral("deck-file-feedback-preserves-clipboard-and-visibility"));
+            key(Qt::Key_Escape);
+            require(fileDeck.isVisible() && controller && controller->feedback().phase==FilePasteFeedback::Idle,
+                    QStringLiteral("deck-file-escape-dismisses-feedback-not-deck"));
+            key(Qt::Key_Return);
+            require(controller && waitUntil([&]{return controller->feedback().phase==FilePasteFeedback::Partial;}),
+                    QStringLiteral("deck-file-retry-rechecks-original-set"));
+            key(Qt::Key_Return);
+            require(waitUntil([&]{return !fileDeck.isVisible();})
+                && QApplication::clipboard()->mimeData()->urls()==QList<QUrl>{QUrl::fromLocalFile(livePath)},
+                QStringLiteral("deck-file-confirmation-pastes-only-available-native-references"));
+            QFile restored(missingPath);restored.open(QIODevice::WriteOnly);restored.write("PK\003\004document");restored.close();
+            fileDeck.showNearPointer();
+            QMouseEvent doubleClick(QEvent::MouseButtonDblClick,QPointF(60,90),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QMouseEvent release(QEvent::MouseButtonRelease,QPointF(60,90),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(&fileDeck,&doubleClick);QApplication::sendEvent(&fileDeck,&release);
+            require(waitUntil([&]{return !fileDeck.isVisible();}) && QApplication::clipboard()->mimeData()->urls().size()==2,
+                    QStringLiteral("deck-file-double-click-pastes-original-file-set"));
+            fileDeck.showNearPointer();key(Qt::Key_1,Qt::ControlModifier);
+            require(waitUntil([&]{return !fileDeck.isVisible();}) && QApplication::clipboard()->mimeData()->urls().size()==2,
+                    QStringLiteral("deck-file-quick-paste-shares-file-preflight"));
+            QFile::remove(missingPath);
+            fileDeck.showNearPointer();key(Qt::Key_Return);
+            require(controller && waitUntil([&]{return controller->feedback().phase==FilePasteFeedback::Partial;}),
+                    QStringLiteral("deck-file-feedback-before-confirm-button"));
+            if(controller && controller->feedback().phase==FilePasteFeedback::Partial) {
+                const int side=std::max(166,fileDeck.height()-89);
+                const int top=59+(fileDeck.height()-65-side)/2;
+                const int heading=side>=180?std::min(58,std::max(48,qRound(side*0.20))):36;
+                const QRect content(22,top+heading,side,side-heading);
+                const QRect area=fileFeedbackRect(content,controller->feedback());
+                const QPoint point=QRect(area.x()+71,area.bottom()-42,std::min(110,area.width()-84),30).center();
+                const QString directory=qEnvironmentVariable("CLIPDECK_RENDER_DIRECTORY");
+                if(!directory.isEmpty()) fileDeck.grab().save(QDir(directory).filePath(QStringLiteral("deck-files-partial.png")));
+                QMouseEvent press(QEvent::MouseButtonPress,QPointF(point),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                QApplication::sendEvent(&fileDeck,&press);
+                QElapsedTimer hold;hold.start();waitUntil([&]{return hold.elapsed()>60;});
+                require(fileDeck.isVisible() && QApplication::clipboard()->mimeData()->urls().size()==2,
+                        QStringLiteral("file-confirm-button-never-pastes-before-mouse-release"));
+                QMouseEvent releaseConfirm(QEvent::MouseButtonRelease,QPointF(point),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                QApplication::sendEvent(&fileDeck,&releaseConfirm);
+                require(waitUntil([&]{return !fileDeck.isVisible();}) && QApplication::clipboard()->mimeData()->urls().size()==1,
+                        QStringLiteral("file-confirm-button-pastes-after-release"));
+            }
+            fileDeck.showNearPointer();
+            for(int x:{10,fileDeck.width()/2,fileDeck.width()-10}) {
+                QMouseEvent move(QEvent::MouseMove,QPointF(x,9),Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+                QApplication::sendEvent(&fileDeck,&move);
+                require(fileDeck.cursor().shape()==Qt::SizeVerCursor,QStringLiteral("deck-top-resize-cursor-covers-left-middle-right"));
+            }
+            fileDeck.hide();
+        }
         failures.append(clipboardPipelineSelfTestFailures());
+        failures.append(fileReferenceSelfTestFailures());
         const bool passed = failures.isEmpty();
         QTextStream(stdout) << (passed ? QStringLiteral("self-test: ok\n")
                                       : QStringLiteral("self-test: failed: ") + failures.join(QStringLiteral(", "))
@@ -5484,6 +5787,15 @@ int main(int argc, char *argv[]) {
                  QStringLiteral("{\n  \"platform\": \"UOS\",\n  \"parity\": true,\n  \"shortcut\": \"Alt+Shift+V\"\n}"),
                  QStringLiteral("JSON"), 160);
         saveText(QStringLiteral("色彩"), QStringLiteral("#21C46B"), QStringLiteral("色彩"), 240);
+        ClipboardItem fileSample;
+        fileSample.type=ClipboardPayloadType::Files;
+        fileSample.title=QStringLiteral("文件 · 12 项");
+        fileSample.sourceName=QStringLiteral("文件管理器");
+        fileSample.copiedAt=copiedAt;
+        for(int index=0;index<12;++index) fileSample.files.append({
+            QStringLiteral("/example/季度报告-%1.pdf").arg(index+1),QStringLiteral("季度报告-%1.pdf").arg(index+1),
+            QStringLiteral("application/pdf"),false});
+        repository.save(fileSample);
 
         QImage preview(720, 360, QImage::Format_ARGB32_Premultiplied);
         preview.fill(QColor(23, 93, 171));

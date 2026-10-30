@@ -342,7 +342,10 @@ final class ClipboardMonitor {
         let sourceApplication = Self.frontmostApplication()
         readerQueue.async { [reader] in
             autoreleasepool {
-                guard let payload = reader.read() else { return }
+                guard let payload = reader.read(
+                    preferImageFileURLs: sourceApplication.bundleIdentifier?.lowercased().contains("xinwechat") == true
+                        || sourceApplication.bundleIdentifier?.lowercased().contains("wechat") == true
+                ) else { return }
                 let capturedItem = ClipboardItem(payload: payload, sourceApplication: sourceApplication)
                 // Make capture feedback independent from disk and JavaScript
                 // classification latency. The persisted form keeps this UUID and

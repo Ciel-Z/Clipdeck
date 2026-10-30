@@ -307,6 +307,12 @@ bool HistoryRepository::initialize() {
                     return false;
                 }
             }
+            QSqlQuery fileColumn(database_);
+            if (!fileColumn.exec(QStringLiteral("PRAGMA table_info(content)"))) return false;
+            bool hasFiles = false;
+            while (fileColumn.next()) hasFiles = hasFiles || fileColumn.value(1).toString() == QStringLiteral("files_json");
+            fileColumn.finish();
+            if (!hasFiles && !execute(QStringLiteral("ALTER TABLE content ADD COLUMN files_json BLOB"))) return false;
             QSqlQuery categoryColumns(database_);
             if (!categoryColumns.exec(QStringLiteral("PRAGMA table_info(category)"))) return false;
             QSet<QString> categoryNames;
@@ -524,13 +530,15 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
         "INSERT INTO content(title,content_type,plain_text,rich_text_html,link_icon_data,link_preview_data,"
         "link_preview_fetched,image_data,image_width,image_height,image_angle,"
         "content_hash,source_id,source_name,source_icon,source_icon_variants,category,"
-        "copied_at,last_copied_at,copy_count,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        "copied_at,last_copied_at,copy_count,updated_at,files_json) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
     insert.addBindValue(item.title.isEmpty()
         ? (item.isImage() ? QStringLiteral("图片") : QStringLiteral("文本"))
         : item.title);
-    insert.addBindValue(item.isImage() ? QStringLiteral("image") : QStringLiteral("text"));
-    insert.addBindValue(item.isText() ? item.text : QVariant());
+    insert.addBindValue(item.isFiles() ? QStringLiteral("files")
+        : item.isImage() ? QStringLiteral("image") : QStringLiteral("text"));
+    insert.addBindValue(item.isFiles() ? FileReferences::searchableText(item.files)
+        : item.isText() ? QVariant(item.text) : QVariant());
     insert.addBindValue(item.isText() ? item.richTextHtml : QVariant());
     insert.addBindValue(item.linkIconData);
     insert.addBindValue(item.linkPreviewData);
@@ -549,6 +557,7 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
     insert.addBindValue(now);
     insert.addBindValue(1);
     insert.addBindValue(now);
+    insert.addBindValue(item.isFiles() ? QVariant(FileReferences::encode(item.files)) : QVariant());
     if (!insert.exec()) {
         lastError_ = insert.lastError().text();
         return item;
@@ -580,7 +589,7 @@ QVector<ClipboardItem> HistoryRepository::fetch(
         "COALESCE(application_icon.source_icon,content.source_icon),"
         "COALESCE(application_icon.source_icon_variants,content.source_icon_variants),"
         "content.category,content.last_copied_at,content.copy_count,"
-        "category.preview_language,category.icon,content.image_angle FROM content "
+        "category.preview_language,category.icon,content.image_angle,content.files_json FROM content "
         "LEFT JOIN application_icon ON application_icon.source_id=content.source_id "
         "LEFT JOIN category ON category.name=content.category WHERE 1=1");
     if (!category.isEmpty()) {
@@ -588,6 +597,7 @@ QVector<ClipboardItem> HistoryRepository::fetch(
             ? QStringLiteral(" AND content.content_type='text'")
             : category == QStringLiteral("图片")
                 ? QStringLiteral(" AND content.content_type='image'")
+                : category == QStringLiteral("文件") ? QStringLiteral(" AND content.content_type='files'")
                 : QStringLiteral(" AND content.category=?");
     }
     if (!search.trimmed().isEmpty()) {
@@ -598,7 +608,8 @@ QVector<ClipboardItem> HistoryRepository::fetch(
 
     QSqlQuery query(database_);
     query.prepare(sql);
-    if (!category.isEmpty() && category != QStringLiteral("文本") && category != QStringLiteral("图片")) {
+    if (!category.isEmpty() && category != QStringLiteral("文本") && category != QStringLiteral("图片")
+        && category != QStringLiteral("文件")) {
         query.addBindValue(category);
     }
     if (!search.trimmed().isEmpty()) {
@@ -623,11 +634,19 @@ QVector<ClipboardItem> HistoryRepository::fetch(
 
 bool HistoryRepository::updateTitle(qint64 id, const QString &title) {
     QSqlQuery query(database_);
-    query.prepare(title.trimmed().isEmpty()
-        ? QStringLiteral(
-            "UPDATE content SET title=CASE content_type WHEN 'image' THEN '图片' ELSE '文本' END,updated_at=? WHERE id=?")
-        : QStringLiteral("UPDATE content SET title=?,updated_at=? WHERE id=?"));
-    if (!title.trimmed().isEmpty()) query.addBindValue(title.trimmed());
+    QString value=title.trimmed();
+    if(value.isEmpty()) {
+        QSqlQuery original(database_);
+        original.prepare(QStringLiteral("SELECT content_type,files_json FROM content WHERE id=?"));
+        original.addBindValue(id);
+        if(!original.exec() || !original.next()) return false;
+        if(original.value(0).toString()==QStringLiteral("files")) {
+            const auto files=FileReferences::decode(original.value(1).toByteArray());
+            value=files.size()==1?files.first().name:QStringLiteral("文件 · %1 项").arg(files.size());
+        } else value=original.value(0).toString()==QStringLiteral("image")?QStringLiteral("图片"):QStringLiteral("文本");
+    }
+    query.prepare(QStringLiteral("UPDATE content SET title=?,updated_at=? WHERE id=?"));
+    query.addBindValue(value);
     query.addBindValue(QDateTime::currentMSecsSinceEpoch());
     query.addBindValue(id);
     return query.exec();
@@ -1132,8 +1151,10 @@ QStringList HistoryRepository::presetCategories() {
 
 QByteArray HistoryRepository::contentHash(const ClipboardItem &item) {
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(item.isImage() ? QByteArrayLiteral("image:") : QByteArrayLiteral("text:"));
-    hash.addData(item.isImage() ? item.imageData : item.text.toUtf8());
+    hash.addData(item.isFiles() ? QByteArrayLiteral("files:")
+        : item.isImage() ? QByteArrayLiteral("image:") : QByteArrayLiteral("text:"));
+    hash.addData(item.isFiles() ? FileReferences::identity(item.files)
+        : item.isImage() ? item.imageData : item.text.toUtf8());
     return hash.result();
 }
 
@@ -1141,7 +1162,8 @@ ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query, bool deco
     ClipboardItem item;
     item.databaseID = query.value(0).toLongLong();
     item.title = query.value(1).toString();
-    item.type = query.value(2).toString() == QStringLiteral("image")
+    item.type = query.value(2).toString() == QStringLiteral("files") ? ClipboardPayloadType::Files
+        : query.value(2).toString() == QStringLiteral("image")
         ? ClipboardPayloadType::Image : ClipboardPayloadType::Text;
     item.text = query.value(3).toString();
     item.richTextHtml = query.value(4).toString();
@@ -1165,6 +1187,10 @@ ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query, bool deco
     item.previewLanguage = query.value(18).toString();
     item.categoryIcon = query.value(19).toString();
     item.imageAngle = ((query.value(20).toInt() % 360) + 360) % 360;
+    if (item.isFiles()) {
+        item.files = FileReferences::decode(query.value(21).toByteArray());
+        item.text.clear();
+    }
     return item;
 }
 

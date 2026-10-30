@@ -203,15 +203,15 @@ final class HistoryRepository: @unchecked Sendable {
                 sql: """
                     INSERT INTO content (
                         title, link_icon_data, link_preview_data, link_preview_fetched, content_type, plain_text, rich_text, rich_text_type,
-                        image_data, image_width, image_height, image_format, image_angle,
+                        image_data, image_width, image_height, image_format, image_angle, file_references,
                         content_hash, content_size, application_id,
                         copied_at, last_copied_at, copy_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
                 arguments: [
                     item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
                     values.type, values.plainText, values.richText, values.richTextType,
-                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle,
+                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle, values.files,
                     hash, values.size, applicationID, now, now, now, now,
                 ]
             )
@@ -280,14 +280,14 @@ final class HistoryRepository: @unchecked Sendable {
                 sql: """
                     UPDATE content SET
                         title = ?, link_icon_data = ?, link_preview_data = ?, link_preview_fetched = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
-                        image_data = ?, image_width = ?, image_height = ?, image_format = ?, image_angle = ?,
+                        image_data = ?, image_width = ?, image_height = ?, image_format = ?, image_angle = ?, file_references = ?,
                         content_hash = ?, content_size = ?, updated_at = ?
                     WHERE id = ?
                     """,
                 arguments: [
                     item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
                     values.type, values.plainText, values.richText, values.richTextType,
-                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle,
+                    values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle, values.files,
                     Self.hash(item.payload), values.size, Self.milliseconds(Date()), databaseID,
                 ]
             )
@@ -386,6 +386,10 @@ final class HistoryRepository: @unchecked Sendable {
         if (row["content_type"] as String) == "text" {
             guard let text: String = row["plain_text"] else { return nil }
             payload = .text(plainText: text, rtfData: row["rich_text"])
+        } else if (row["content_type"] as String) == "files" {
+            guard let data: Data = row["file_references"],
+                  let files = ClipboardFileReference.decoded(data) else { return nil }
+            payload = .files(files)
         } else {
             guard let data: Data = row["image_data"],
                   let width: Int = row["image_width"],
@@ -437,6 +441,7 @@ final class HistoryRepository: @unchecked Sendable {
         switch payload {
         case let .text(text, _): data = Data("text:\(text)".utf8)
         case let .image(imageData, _, _, _): data = Data("image:".utf8) + imageData
+        case let .files(files): data = Data("files:".utf8) + ClipboardFileReference.identityData(files)
         }
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
@@ -457,13 +462,17 @@ final class HistoryRepository: @unchecked Sendable {
 
     private static func databaseValues(_ payload: ClipboardPayload) -> (
         type: String, plainText: String?, richText: Data?, richTextType: String?,
-        imageData: Data?, imageWidth: Int?, imageHeight: Int?, imageFormat: String?, size: Int
+        imageData: Data?, imageWidth: Int?, imageHeight: Int?, imageFormat: String?, size: Int, files: Data?
     ) {
         switch payload {
         case let .text(text, rtf):
-            return ("text", text, rtf, rtf == nil ? nil : "rtf", nil, nil, nil, nil, text.utf8.count + (rtf?.count ?? 0))
+            return ("text", text, rtf, rtf == nil ? nil : "rtf", nil, nil, nil, nil, text.utf8.count + (rtf?.count ?? 0), nil)
         case let .image(data, width, height, format):
-            return ("image", nil, nil, nil, data, width, height, format.rawValue, data.count)
+            return ("image", nil, nil, nil, data, width, height, format.rawValue, data.count, nil)
+        case let .files(files):
+            let data = ClipboardFileReference.encoded(files)
+            let searchable = files.map { "\($0.name)\n\($0.path)" }.joined(separator: "\n")
+            return ("files", searchable, nil, nil, nil, nil, nil, nil, data.count, data)
         }
     }
 }

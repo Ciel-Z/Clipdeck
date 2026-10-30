@@ -4,6 +4,7 @@ enum HistoryCategory: Hashable {
     case all
     case text
     case images
+    case files
     case automatic(Int64)
 }
 
@@ -20,6 +21,7 @@ final class InMemoryHistoryStore: ObservableObject {
         didSet {
             if oldValue != selectedItemID {
                 previewedItemID = nil
+                filePasteFeedback = nil
             }
         }
     }
@@ -42,6 +44,7 @@ final class InMemoryHistoryStore: ObservableObject {
     @Published private(set) var editingItemID: ClipboardItem.ID?
     @Published private(set) var renamingItemID: ClipboardItem.ID?
     @Published private(set) var isQuickPasteOverlayVisible = false
+    @Published var filePasteFeedback: FilePasteFeedback?
     var onDelete: ((ClipboardItem) -> Void)?
     var onUpdate: ((ClipboardItem) -> Void)?
 
@@ -109,7 +112,7 @@ final class InMemoryHistoryStore: ObservableObject {
             : items
         return source.filter { item in
             switch (selectedCategory, item.payload) {
-            case (.all, _), (.text, .text), (.images, .image): true
+            case (.all, _), (.text, .text), (.images, .image), (.files, .files): true
             case let (.automatic(categoryID), _): item.category?.id == categoryID
             default: false
             }
@@ -117,7 +120,7 @@ final class InMemoryHistoryStore: ObservableObject {
     }
 
     func insert(_ item: ClipboardItem) {
-        items.removeAll { $0.payload == item.payload }
+        items.removeAll { $0.payload.hasSameContent(as: item.payload) }
         items.insert(item, at: 0)
         if items.count > capacity {
             items.removeLast(items.count - capacity)
@@ -132,7 +135,7 @@ final class InMemoryHistoryStore: ObservableObject {
     /// persistence cleanup cannot delete the newer duplicate's shared row.
     func reconcileCapturedItem(_ item: ClipboardItem) -> CaptureReconciliation {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else {
-            return items.contains(where: { $0.payload == item.payload })
+            return items.contains(where: { $0.payload.hasSameContent(as: item.payload) })
                 ? .superseded
                 : .removed
         }
@@ -245,8 +248,13 @@ final class InMemoryHistoryStore: ObservableObject {
         }
         let matches = items.filter { item in
             if item.title.localizedCaseInsensitiveContains(trimmed) { return true }
-            guard case let .text(text, _) = item.payload else { return false }
-            return text.localizedCaseInsensitiveContains(trimmed)
+            switch item.payload {
+            case let .text(text, _): return text.localizedCaseInsensitiveContains(trimmed)
+            case let .files(files):
+                return files.contains { $0.name.localizedCaseInsensitiveContains(trimmed)
+                    || $0.path.localizedCaseInsensitiveContains(trimmed) }
+            case .image: return false
+            }
         }
         replaceSearchResults(matches)
         return matches
@@ -271,6 +279,7 @@ final class InMemoryHistoryStore: ObservableObject {
     }
 
     func beginEditing(_ item: ClipboardItem) {
+        if case .files = item.payload { return }
         previewedItemID = nil
         renamingItemID = nil
         editingItemID = item.id
@@ -405,7 +414,7 @@ final class InMemoryHistoryStore: ObservableObject {
     }
 
     private func moveCategory(by offset: Int) {
-        let categories: [HistoryCategory] = [.all, .text, .images]
+        let categories: [HistoryCategory] = [.all, .text, .images, .files]
             + automaticCategories.map { .automatic($0.id) }
         guard let currentIndex = categories.firstIndex(of: selectedCategory) else { return }
         let nextIndex = (currentIndex + offset + categories.count) % categories.count

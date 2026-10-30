@@ -1,4 +1,5 @@
 #include "clipboard_pipeline.h"
+#include "capture_payload.h"
 #include "../platform/x11_clipboard_reader.h"
 #include "../ui/display_scale.h"
 
@@ -144,25 +145,10 @@ protected:
             }
             if (refresh) { publishRecent(0); continue; }
             if (!snapshot.sequence) continue;
-            ClipboardItem item;
-            item.copiedAt = snapshot.copiedAt;
-            item.type = snapshot.png.isEmpty() ? ClipboardPayloadType::Text : ClipboardPayloadType::Image;
-            if (item.isImage()) {
-                QSettings settings;
-                if (!settings.value(QStringLiteral("clipboard/recordsImages"), true).toBool()) continue;
-                if (snapshot.png.size() > settings.value(QStringLiteral("clipboard/maximumImageMegabytes"), 10).toInt()
-                        * 1024 * 1024) continue;
-                item.imageData = std::move(snapshot.png);
-                item.title = QStringLiteral("图片");
-            } else {
-                item.text = snapshot.latin1 ? QString::fromLatin1(snapshot.text) : QString::fromUtf8(snapshot.text);
-                item.richTextHtml = QString::fromUtf8(snapshot.html);
-                item.title = QStringLiteral("文本");
-                if (item.text.isEmpty()) continue;
-            }
-            const QByteArray fingerprint = QCryptographicHash::hash(item.isImage()
-                ? QByteArrayLiteral("image:") + item.imageData
-                : QByteArrayLiteral("text:") + item.text.toUtf8() + '\0' + item.richTextHtml.toUtf8(),
+            const QByteArray fingerprint = QCryptographicHash::hash(!snapshot.uriList.isEmpty()
+                ? QByteArrayLiteral("files:") + snapshot.uriList
+                : !snapshot.png.isEmpty() ? QByteArrayLiteral("image:") + snapshot.png
+                : QByteArrayLiteral("text:") + snapshot.text + '\0' + snapshot.html,
                 QCryptographicHash::Sha256);
             if (snapshot.baseline) {
                 if (snapshot.sequence >= lastObservedSequence) {
@@ -176,17 +162,9 @@ protected:
                 lastFingerprint = fingerprint;
                 lastObservedSequence = snapshot.sequence;
             }
-            if (item.isImage()) {
-                // Polling an unchanged image only hashes the encoded bytes;
-                // decoding, icon lookup and SQL work are needed for new data.
-                QBuffer buffer(&item.imageData); buffer.open(QIODevice::ReadOnly);
-                QImageReader reader(&buffer, "PNG");
-                const QSize size = reader.size();
-                if (!size.isValid() || qint64(size.width()) * size.height() > 60000000) continue;
-                item.image = reader.read();
-                if (item.image.isNull()) continue;
-                item.imagePixelSize = size;
-            }
+            auto payload = payloadFromSnapshot(snapshot);
+            if (!payload) continue;
+            ClipboardItem item = std::move(*payload);
             const SourceApplicationInfo source = resolver_ ? resolver_(snapshot.sourceWindow, snapshot.ownerWindow)
                                                            : SourceApplicationInfo{};
             item.sourceID = source.identifier; item.sourceName = source.name;

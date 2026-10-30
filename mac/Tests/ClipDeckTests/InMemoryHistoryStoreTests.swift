@@ -166,7 +166,7 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertTrue(pasteboard.setData(tiff, forType: .tiff))
 
         let payload = try withImageRecordingEnabled {
-            try XCTUnwrap(ClipboardReader().read(from: pasteboard))
+            try XCTUnwrap(ClipboardReader().read(from: pasteboard, preferImageFileURLs: true))
         }
 
         guard case let .image(_, width, height, format) = payload else {
@@ -189,7 +189,7 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertTrue(pasteboard.writeObjects([fileURL as NSURL]))
 
         let payload = try withImageRecordingEnabled {
-            try XCTUnwrap(ClipboardReader().read(from: pasteboard))
+            try XCTUnwrap(ClipboardReader().read(from: pasteboard, preferImageFileURLs: true))
         }
 
         guard case let .image(_, width, height, format) = payload else {
@@ -243,6 +243,10 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedCategory, .images)
         XCTAssertEqual(store.displayedItems.map(\.id), [image.id])
         XCTAssertEqual(store.selectedItemID, image.id)
+
+        store.selectNextCategory()
+        XCTAssertEqual(store.selectedCategory, .files)
+        XCTAssertTrue(store.displayedItems.isEmpty)
 
         store.selectNextCategory()
         XCTAssertEqual(store.selectedCategory, .all)

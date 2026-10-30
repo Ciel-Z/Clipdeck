@@ -7,6 +7,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QMimeData>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <atomic>
@@ -190,6 +191,29 @@ QStringList clipboardPipelineSelfTestFailures() {
         require(until([&] { return !x11.recentItems().isEmpty() && x11.recentItems().first().isImage(); }),
                 "x11-asynchronous-png-snapshot");
         require(QApplication::clipboard()->image().size() == original.size(), "x11-reader-preserves-native-image-clipboard");
+        const QString documentPath=temporary.filePath(QStringLiteral("document.epub"));
+        QFile document(documentPath); document.open(QIODevice::WriteOnly); document.write("PK\003\004not an image"); document.close();
+        auto *fileMime=new QMimeData;
+        fileMime->setUrls({QUrl::fromLocalFile(documentPath)});
+        fileMime->setImageData(original); // source application's incidental icon
+        QApplication::clipboard()->setMimeData(fileMime);
+        x11.captureChanged();
+        require(until([&]{return !x11.recentItems().isEmpty() && x11.recentItems().first().isFiles();})
+            && x11.recentItems().first().files.first().path==documentPath,"x11-file-uri-is-not-co-published-application-icon");
+        const QString picturePath=temporary.filePath(QStringLiteral("actual-image.png"));
+        QImage picture(140,90,QImage::Format_ARGB32);picture.fill(QColor(240,160,30));picture.save(picturePath,"PNG");
+        auto *pictureMime=new QMimeData;
+        pictureMime->setUrls({QUrl::fromLocalFile(picturePath)});pictureMime->setImageData(original);
+        QApplication::clipboard()->setMimeData(pictureMime);x11.captureChanged();
+        const bool imageReady=until([&]{return !x11.recentItems().isEmpty() && x11.recentItems().first().isImage();});
+        require(imageReady && x11.recentItems().first().imagePixelSize==picture.size(),"x11-local-image-uses-actual-file-type-and-pixels");
+        auto *gnomeMime=new QMimeData;
+        const QByteArray gnomeData="copy\n"+QUrl::fromLocalFile(documentPath).toEncoded();
+        gnomeMime->setData(QStringLiteral("x-special/gnome-copied-files"),gnomeData);
+        QApplication::clipboard()->setMimeData(gnomeMime);x11.captureChanged();
+        require(until([&]{return !x11.recentItems().isEmpty() && x11.recentItems().first().isFiles();}),"x11-native-file-manager-target-without-uri-target");
+        require(QApplication::clipboard()->mimeData()->data(QStringLiteral("x-special/gnome-copied-files"))==gnomeData,
+            "x11-file-capture-never-replaces-native-clipboard");
     }
     return failures;
 }

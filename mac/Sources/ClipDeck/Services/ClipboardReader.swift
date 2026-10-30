@@ -5,17 +5,33 @@ import UniformTypeIdentifiers
 struct ClipboardReader: Sendable {
     static let maximumPixelCount = 60_000_000
 
-    func read(from pasteboard: NSPasteboard = .general) -> ClipboardPayload? {
-        // Apps such as WeChat publish copied photos as both image data and a
-        // temporary file URL. Prefer the image before filtering ordinary files.
-        if let imagePayload = readImage(from: pasteboard) {
-            return imagePayload
+    func read(
+        from pasteboard: NSPasteboard = .general,
+        preferImageFileURLs: Bool = false
+    ) -> ClipboardPayload? {
+        // File managers also publish PNG/TIFF representations of the file's
+        // application icon. A native file URL takes precedence over that image.
+        if pasteboard.availableType(from: [.fileURL]) != nil {
+            let urls = Self.fileURLs(from: pasteboard)
+            // WeChat's Copy Photo can publish only a temporary image URL.
+            // Restrict this exception to a single image, never a document,
+            // folder or mixed file selection (which may also carry icon data).
+            if preferImageFileURLs, urls.count == 1,
+               UTType(filenameExtension: urls[0].pathExtension)?.conforms(to: .image) == true {
+                guard AppPreferences.recordsImages else { return nil }
+                if let image = Self.readImageFileURL(
+                    from: pasteboard,
+                    maximumByteCount: AppPreferences.maximumImageByteCount
+                ) ?? readImage(from: pasteboard) {
+                    return image
+                }
+            }
+            let files = Self.readFileReferences(from: pasteboard)
+            return files.isEmpty ? nil : .files(files)
         }
 
-        // Non-image file copies often also publish a string representation.
-        // Keep those outside clipboard history instead of recording their path.
-        if pasteboard.availableType(from: [.fileURL]) != nil {
-            return nil
+        if let imagePayload = readImage(from: pasteboard) {
+            return imagePayload
         }
 
         guard let plainText = pasteboard.string(forType: .string), !plainText.isEmpty else {
@@ -42,6 +58,9 @@ struct ClipboardReader: Sendable {
             }
         }
 
+        // File copies must stay references rather than AppKit-rendered icons.
+        guard pasteboard.availableType(from: [.fileURL]) == nil else { return nil }
+
         // Some applications expose only a custom pasteboard representation
         // understood by AppKit rather than a registered public image UTI.
         if let image = NSImage(pasteboard: pasteboard),
@@ -54,10 +73,35 @@ struct ClipboardReader: Sendable {
             return payload
         }
 
-        return Self.readImageFileURL(
-            from: pasteboard,
-            maximumByteCount: maximumByteCount
-        )
+        return nil
+    }
+
+    private static func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        (pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] ?? []).filter(\.isFileURL)
+    }
+
+    private static func readFileReferences(from pasteboard: NSPasteboard) -> [ClipboardFileReference] {
+        let urls = fileURLs(from: pasteboard)
+        var seen = Set<String>()
+        return urls.filter { $0.isFileURL && seen.insert($0.standardizedFileURL.path).inserted }.map { url in
+            let url = url.standardizedFileURL
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentTypeKey, .nameKey])
+            let directory = values?.isDirectory ?? url.hasDirectoryPath
+            let type = values?.contentType ?? (directory ? .folder : UTType(filenameExtension: url.pathExtension))
+            // Generic type icons avoid reading file contents or generating thumbnails.
+            let icon = NSWorkspace.shared.icon(for: type ?? .data)
+            icon.size = NSSize(width: 32, height: 32)
+            return ClipboardFileReference(
+                path: url.path,
+                name: values?.name ?? url.lastPathComponent,
+                typeIdentifier: type?.identifier ?? UTType.data.identifier,
+                isDirectory: directory,
+                iconData: icon.tiffRepresentation
+            )
+        }
     }
 
     private static func imageTypes(in pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {

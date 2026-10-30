@@ -1,4 +1,5 @@
 #pragma once
+#include "history/file_reference.h"
 
 #include <QByteArray>
 #include <QDateTime>
@@ -13,6 +14,7 @@
 enum class ClipboardPayloadType {
     Text,
     Image,
+    Files,
 };
 
 struct ClipboardItem {
@@ -26,6 +28,7 @@ struct ClipboardItem {
     bool hasFetchedLinkPreview = false;
     QByteArray imageData;
     QImage image;
+    QVector<ClipboardFileReference> files;
     QSize imagePixelSize;
     bool payloadComplete = true;
     qint64 textLength = 0;
@@ -43,6 +46,7 @@ struct ClipboardItem {
 
     bool isText() const { return type == ClipboardPayloadType::Text; }
     bool isImage() const { return type == ClipboardPayloadType::Image; }
+    bool isFiles() const { return type == ClipboardPayloadType::Files; }
 };
 
 struct ClipboardCategory {

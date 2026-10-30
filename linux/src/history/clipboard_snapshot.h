@@ -13,9 +13,10 @@ struct ClipboardSnapshot {
     QByteArray text;
     QByteArray html;
     QByteArray png;
+    QByteArray uriList;
     bool latin1 = false;
     bool explicitChange = true;
     bool baseline = false;
 
-    qint64 byteCount() const { return qint64(text.size()) + html.size() + png.size(); }
+    qint64 byteCount() const { return qint64(text.size()) + html.size() + png.size() + uriList.size(); }
 };

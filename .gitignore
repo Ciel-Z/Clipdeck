@@ -7,3 +7,4 @@ DerivedData/
 /script-editor/node_modules/
 /linux/build/
 /mac/dist/
+/windows/.build/
