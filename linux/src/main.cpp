@@ -1344,10 +1344,16 @@ public:
             // misclassifies clicks near the search action at 125% scaling.
             // QCursor performs the platform scale conversion for us.
             const QPoint localPointer = mapFromGlobal(QCursor::pos());
-            const bool inPreview = previewDialog_ && previewDialog_->isVisible()
-                && previewDialog_->rect().contains(
-                    previewDialog_->mapFromGlobal(QCursor::pos()));
-            if (newlyPressed && !rect().contains(localPointer) && !inPreview) hide();
+            if (!newlyPressed || rect().contains(localPointer)) return;
+            // Clicks in the Deck's own popovers (preview, editor, rename,
+            // alerts, menus) are not outside clicks; hiding here would also
+            // close those child windows before their buttons fire.
+            if (QApplication::activeModalWidget() || QApplication::activePopupWidget()) return;
+            for (QWidget *window : QApplication::topLevelWidgets()) {
+                if (window != this && window->isVisible()
+                        && window->frameGeometry().contains(QCursor::pos())) return;
+            }
+            hide();
         });
         searchLeadingGlyph_ = new SearchFieldGlyph(false, searchEdit_);
         searchLeadingGlyph_->setTriggered([this] {
