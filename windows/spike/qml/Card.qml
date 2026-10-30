@@ -133,7 +133,7 @@ Item {
                 Text {
                     text: card.entry.time
                     color: Qt.rgba(1, 1, 1, 0.78)
-                    font { family: card.uiFont; pixelSize: 11.5; weight: Font.DemiBold }
+                    font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.DemiBold }
                 }
             }
 
@@ -160,19 +160,19 @@ Item {
             Text {
                 text: card.entry.title
                 color: Qt.rgba(1, 1, 1, 0.90)
-                font { family: card.uiFont; pixelSize: 11.5; weight: Font.Bold }
+                font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.Bold }
                 elide: Text.ElideRight
                 width: Math.min(implicitWidth, compactHeader.width * 0.4)
             }
             Text {
                 text: card.entry.category
                 color: Qt.rgba(1, 1, 1, 0.70)
-                font { family: card.uiFont; pixelSize: 11.5; weight: Font.DemiBold }
+                font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.DemiBold }
             }
             Text {
                 text: card.entry.time
                 color: Qt.rgba(1, 1, 1, 0.62)
-                font { family: card.uiFont; pixelSize: 11.5; weight: Font.DemiBold }
+                font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.DemiBold }
             }
         }
         SourceBadge {
@@ -225,7 +225,7 @@ Item {
                 text: card.entry.styled
                 textFormat: card.entry.mono ? Text.StyledText : Text.PlainText
                 color: Qt.rgba(1, 1, 1, 0.90)
-                font { family: card.entry.mono ? card.monoFont : card.uiFont; pixelSize: 13.5 }
+                font { family: card.entry.mono ? card.monoFont : card.uiFont; pointSize: 13.5 * 0.75 }
                 lineHeightMode: Text.FixedHeight
                 lineHeight: 20
                 wrapMode: Text.WrapAnywhere
@@ -333,7 +333,7 @@ Item {
                         width: parent.width
                         text: card.entry.title
                         color: Qt.rgba(1, 1, 1, 0.92)
-                        font { family: card.uiFont; pixelSize: 13.5; weight: Font.DemiBold }
+                        font { family: card.uiFont; pointSize: 13.5 * 0.75; weight: Font.DemiBold }
                         maximumLineCount: 2
                         wrapMode: Text.Wrap
                         elide: Text.ElideRight
@@ -341,7 +341,7 @@ Item {
                     Text {
                         text: card.entry.host
                         color: Qt.rgba(1, 1, 1, 0.50)
-                        font { family: card.uiFont; pixelSize: 11.5; weight: Font.Medium }
+                        font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.Medium }
                     }
                 }
             }

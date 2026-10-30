@@ -28,6 +28,10 @@ int main(int argc, char *argv[]) {
     if (rhi == QLatin1String("opengl")) QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
     if (rhi == QLatin1String("software")) QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     QQuickWindow::setDefaultAlphaBuffer(true);
+    // Qt 6.12 + D3D11 + an alpha-buffer window: the threaded render loop stalls after the first
+    // frames (observed on Win 11 25H2, RTX 5080 + AMD iGPU). The basic loop renders normally.
+    if ((rhi.isEmpty() || rhi == QLatin1String("d3d11")) && !qEnvironmentVariableIsSet("QSG_RENDER_LOOP"))
+        qputenv("QSG_RENDER_LOOP", "basic");
 
     QApplication application(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("ClipDeck"));
