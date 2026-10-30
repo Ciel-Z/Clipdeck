@@ -2,8 +2,10 @@
 
 #include "deck_image_provider.h"
 #include "deck_presentation.h"
+#include "win_source_application.h"
 
 #include <QCryptographicHash>
+#include <QFileInfo>
 #include <QSet>
 #include <QVariantMap>
 
@@ -112,8 +114,15 @@ void DeckItemModel::registerImages(const ClipboardItem &item) {
         if (!item.image.isNull()) images_->insert(QStringLiteral("thumb/") + id, item.image);
         else images_->insertEncoded(QStringLiteral("thumb/") + id, item.imageData);
     }
-    if (!item.sourceIconData.isEmpty()) images_->insertEncoded(sourceIconKey(item), item.sourceIconData);
-    else if (!item.sourceIcon.isNull()) images_->insert(sourceIconKey(item), item.sourceIcon);
+    // Icons depend only on the application; resolve each one once. The
+    // executable is asked first because older builds stored 32 px icons.
+    const QString iconKey = sourceIconKey(item);
+    if (!images_->contains(iconKey)) {
+        const QImage fresh = QFileInfo(item.sourceID).isFile() ? windowsApplicationIcon(item.sourceID) : QImage();
+        if (!fresh.isNull()) images_->insert(iconKey, fresh);
+        else if (!item.sourceIconData.isEmpty()) images_->insertEncoded(iconKey, item.sourceIconData);
+        else if (!item.sourceIcon.isNull()) images_->insert(iconKey, item.sourceIcon);
+    }
     images_->insertEncoded(QStringLiteral("linkicon/") + id, item.linkIconData);
     images_->insertEncoded(QStringLiteral("linkpreview/") + id, item.linkPreviewData);
 }

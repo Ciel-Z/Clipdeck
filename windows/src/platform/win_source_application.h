@@ -8,5 +8,9 @@
 // window is the fallback. identifier is the executable path (mac: bundle id).
 SourceApplicationInfo windowsSourceApplication(quint32 sourceWindow, quint32 ownerWindow);
 
+// High resolution icon of an executable; used to refresh icons stored by
+// older builds at 32 px.
+QImage windowsApplicationIcon(const QString &path);
+
 // Exposed for tests.
 QString windowsExecutableDescription(const QString &path);

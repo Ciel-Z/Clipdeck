@@ -126,6 +126,21 @@ void sourceTests() {
         check(shell.identifier.endsWith(QStringLiteral("explorer.exe"), Qt::CaseInsensitive), "source-resolves-explorer-path");
         check(!shell.name.isEmpty() && shell.name != QStringLiteral("Unknown"), "source-has-a-name");
         check(!shell.iconData.isEmpty(), "source-has-icon-png");
+        const QImage stored = QImage::fromData(shell.iconData);
+        check(stored.width() >= 96, "source-icon-is-high-resolution");
+        check(stored.hasAlphaChannel() && qAlpha(stored.pixel(0, 0)) == 0, "source-icon-keeps-transparent-margin");
+        // A light rim means straight alpha was read as premultiplied.
+        const QImage premultiplied = windowsApplicationIcon(shell.identifier).convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        bool validPremultiplied = true;
+        for (int y = 0; y < premultiplied.height(); ++y) {
+            const auto *line = reinterpret_cast<const QRgb *>(premultiplied.constScanLine(y));
+            for (int x = 0; x < premultiplied.width(); ++x) {
+                const QRgb p = line[x];
+                if (qRed(p) > qAlpha(p) || qGreen(p) > qAlpha(p) || qBlue(p) > qAlpha(p)) validPremultiplied = false;
+            }
+        }
+        check(validPremultiplied, "source-icon-edges-have-no-light-rim");
+        check(windowsApplicationIcon(shell.identifier).width() >= 96, "application-icon-refresh-is-high-resolution");
     }
     Q_UNUSED(self)
 }

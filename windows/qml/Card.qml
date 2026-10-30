@@ -167,7 +167,9 @@ Item {
 
             Item {
                 id: headerIcon
-                width: card.kind === "files" ? 30 : card.headerHeight - 8
+                // One box for both, so the folder glyph and the app icon
+                // read at the same size (both keep a small inner margin).
+                width: card.headerHeight - 8
                 height: width
                 anchors.right: parent.right
                 anchors.rightMargin: 10

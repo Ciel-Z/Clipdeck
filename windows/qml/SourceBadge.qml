@@ -10,18 +10,24 @@ Item {
     width: size
     height: size
 
+    // Windows icons fill their whole canvas while macOS icons keep the icon
+    // grid margin (824 of 1024); inset to the same visible size.
     Image {
-        anchors.fill: parent
+        anchors.centerIn: parent
+        width: Math.round(badge.size * 0.84)
+        height: width
         visible: badge.iconUrl !== ""
         source: badge.iconUrl
-        sourceSize: Qt.size(badge.size * 2, badge.size * 2)
         fillMode: Image.PreserveAspectFit
         smooth: true
+        mipmap: true
         asynchronous: true
     }
 
     Rectangle {
-        anchors.fill: parent
+        anchors.centerIn: parent
+        width: Math.round(badge.size * 0.84)
+        height: width
         visible: badge.iconUrl === ""
         radius: Math.max(4, badge.size * 0.20)
         gradient: Gradient {
