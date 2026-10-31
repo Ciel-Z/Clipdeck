@@ -9,6 +9,7 @@ struct HistoryPanelView: View {
     let onManageCategories: () -> Void
     let onSearch: (String) -> Void
     @FocusState private var searchFieldFocused: Bool
+    @AppStorage(AppPreferences.deckBackgroundBlurKey) private var backgroundBlur = true
     @State private var categoryPageStart = 0
     @State private var isResizing = false
 
@@ -19,8 +20,14 @@ struct HistoryPanelView: View {
         }
         .background {
             ZStack {
-                DeckMaterialView()
-                Color.black.opacity(0.20)
+                // 背景模糊 off shows the live desktop through black 37 %, the
+                // Linux default; the panel itself is clear and non-opaque.
+                if backgroundBlur {
+                    DeckMaterialView()
+                    Color.black.opacity(0.20)
+                } else {
+                    Color.black.opacity(0.37)
+                }
                 LinearGradient(
                     colors: [.white.opacity(0.06), .clear, .black.opacity(0.06)],
                     startPoint: .top,
@@ -352,9 +359,9 @@ struct HistoryPanelView: View {
                     .padding(.horizontal, 7)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
-                        ForEach(store.automaticCategories) { item in
+                        ForEach(Array(store.automaticCategories.enumerated()), id: \.element.id) { position, item in
                             category(
-                                color: automaticCategoryColor(item.sortOrder),
+                                color: CategoryColor.color(icon: item.icon, position: position),
                                 label: item.name,
                                 value: .automatic(item.id)
                             )
@@ -484,11 +491,6 @@ struct HistoryPanelView: View {
         .onTapGesture { store.selectCategory(value) }
         .help(label)
         .id(value)
-    }
-
-    private func automaticCategoryColor(_ order: Int) -> Color {
-        let colors: [Color] = [.purple, .cyan, .green, .pink, .indigo, .mint]
-        return colors[abs(order) % colors.count]
     }
 
     private var emptyState: some View {

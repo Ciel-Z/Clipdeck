@@ -45,6 +45,52 @@ final class ClassificationServiceTests: XCTestCase {
         }
     }
 
+    /// Same samples as the Linux/Windows core tests: the rules are shared text.
+    func testDefaultRulesBalanceCoverageAgainstProse() throws {
+        let repository = try makeRepository()
+        try repository.ensureDefaultCategories()
+        let service = ClassificationService(repository: repository)
+        func category(_ text: String) throws -> String? {
+            try service.classify(repository.save(ClipboardItem(
+                payload: .text(plainText: text, rtfData: nil),
+                sourceApplication: source
+            ))).category?.name
+        }
+
+        let matches: [(String, String)] = [
+            ("{\"level\":\"info\"}\n{\"level\":\"warn\"}", "JSON"),
+            ("http://localhost:8080", "URL"),
+            ("select name from users", "SQL"),
+            ("-- latest\nSELECT id FROM orders LIMIT 10", "SQL"),
+            ("WITH r AS (SELECT * FROM t) SELECT * FROM r", "SQL"),
+            ("CREATE TABLE IF NOT EXISTS t (id int)", "SQL"),
+            ("## Install\nRun the script.", "Markdown"),
+            ("| a | b |\n|---|---|\n| 1 | 2 |", "Markdown"),
+            ("See [the docs](https://example.com/docs).", "Markdown"),
+            ("1. 打开设置\n2. 点击 **关于**", "Markdown"),
+        ]
+        for (text, expected) in matches {
+            XCTAssertEqual(try category(text), expected, text)
+        }
+
+        let lookAlikes: [(String, String)] = [
+            ("{}", "JSON"),
+            ("[1]", "JSON"),
+            ("https://", "URL"),
+            ("Select the files you want to upload.", "SQL"),
+            ("Update: the new release is out", "SQL"),
+            ("Delete from the list", "SQL"),
+            ("Create a new account", "SQL"),
+            ("Describe yourself", "SQL"),
+            ("# install deps\nnpm install", "Markdown"),
+            ("- a\n- b", "Markdown"),
+            ("def __init__(self):\n    # set up\n    pass", "Markdown"),
+        ]
+        for (text, unexpected) in lookAlikes {
+            XCTAssertNotEqual(try category(text), unexpected, text)
+        }
+    }
+
     func testScriptErrorIsRecordedAndLaterCategoryStillMatches() throws {
         let repository = try makeRepository()
         let broken = try repository.createCategory(

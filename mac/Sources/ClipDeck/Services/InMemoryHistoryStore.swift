@@ -47,6 +47,9 @@ final class InMemoryHistoryStore: ObservableObject {
     @Published var filePasteFeedback: FilePasteFeedback?
     var onDelete: ((ClipboardItem) -> Void)?
     var onUpdate: ((ClipboardItem) -> Void)?
+    /// Classifies edited text again, so a card whose content no longer fits its
+    /// category does not keep that label. A thrown error keeps the old category.
+    var classifyEditedItem: ((ClipboardItem) throws -> ClipboardCategory?)?
 
     private let capacity: Int
 
@@ -334,6 +337,22 @@ final class InMemoryHistoryStore: ObservableObject {
 
     func updateEditingItem(payload: ClipboardPayload, imageAngle: Int? = nil) {
         guard let current = editingItem else { return }
+        var category = current.category
+        if case .text = payload, payload != current.payload, let classifyEditedItem {
+            let edited = ClipboardItem(
+                id: current.id,
+                databaseID: current.databaseID,
+                title: current.title,
+                payload: payload,
+                sourceApplication: current.sourceApplication,
+                copiedAt: current.copiedAt
+            )
+            do {
+                category = try classifyEditedItem(edited)
+            } catch {
+                NSLog("ClipDeck failed to classify edited item: %@", String(describing: error))
+            }
+        }
         let updated = ClipboardItem(
             id: current.id,
             databaseID: current.databaseID,
@@ -344,7 +363,7 @@ final class InMemoryHistoryStore: ObservableObject {
             imageAngle: imageAngle ?? current.imageAngle,
             payload: payload,
             sourceApplication: current.sourceApplication,
-            category: current.category,
+            category: category,
             copiedAt: current.copiedAt
         )
         replace(current, with: updated, in: &items)

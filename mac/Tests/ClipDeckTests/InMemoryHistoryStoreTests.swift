@@ -421,6 +421,51 @@ final class InMemoryHistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedItemID, store.items.first?.id)
     }
 
+    func testEditingTextClassifiesItAgain() {
+        let store = InMemoryHistoryStore()
+        let json = ClipboardCategory(id: 1, name: "JSON", icon: nil, script: "", previewLanguage: "json", sortOrder: 0)
+        let original = ClipboardItem(
+            payload: .text(plainText: #"{"a": 1}"#, rtfData: nil),
+            sourceApplication: source,
+            category: json
+        )
+        var classifiedText: String?
+        store.classifyEditedItem = { item in
+            if case let .text(text, _) = item.payload { classifiedText = text }
+            return nil
+        }
+        store.insert(original)
+        store.beginEditing(original)
+
+        store.updateEditingItem(payload: .text(plainText: "plain prose now", rtfData: nil))
+
+        XCTAssertEqual(classifiedText, "plain prose now")
+        XCTAssertNil(store.items.first?.category)
+    }
+
+    func testEditingKeepsCategoryWhenClassificationFailsOrContentIsUnchanged() {
+        struct Failure: Error {}
+        let store = InMemoryHistoryStore()
+        let json = ClipboardCategory(id: 1, name: "JSON", icon: nil, script: "", previewLanguage: "json", sortOrder: 0)
+        let original = ClipboardItem(
+            payload: .text(plainText: #"{"a": 1}"#, rtfData: nil),
+            sourceApplication: source,
+            category: json
+        )
+        var calls = 0
+        store.classifyEditedItem = { _ in calls += 1; throw Failure() }
+        store.insert(original)
+
+        store.beginEditing(original)
+        store.updateEditingItem(payload: original.payload)
+        XCTAssertEqual(calls, 0)
+
+        store.beginEditing(original)
+        store.updateEditingItem(payload: .text(plainText: #"{"a": 2}"#, rtfData: nil))
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(store.items.first?.category, json)
+    }
+
     func testImageEditingStoresAngleWithoutChangingImagePayload() {
         let store = InMemoryHistoryStore()
         let original = ClipboardItem(

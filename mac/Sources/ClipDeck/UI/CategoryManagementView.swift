@@ -8,7 +8,8 @@ final class CategoryManager: ObservableObject {
     @Published var categories: [ClipboardCategory] = []
     @Published var selectedID: Int64?
     @Published var name = ""
-    @Published var icon = "curlybraces"
+    /// The category's colour ("#RRGGBB"), saved in its icon field.
+    @Published var icon = CategoryColor.palette[0]
     @Published var script = "function classify(item) {\n    return false;\n}"
     @Published var previewLanguage = "text"
     @Published var testText = ""
@@ -48,9 +49,10 @@ final class CategoryManager: ObservableObject {
 
     func select(_ id: Int64?) {
         selectedID = id
-        guard let item = categories.first(where: { $0.id == id }) else { return }
+        guard let position = categories.firstIndex(where: { $0.id == id }) else { return }
+        let item = categories[position]
         name = item.name
-        icon = item.icon ?? ""
+        icon = CategoryColor.hex(icon: item.icon, position: position)
         script = item.script
         previewLanguage = item.previewLanguage ?? "text"
         testResult = nil
@@ -64,7 +66,7 @@ final class CategoryManager: ObservableObject {
                 let newItem = try await Task.detached { [repository, categories] in
                     try repository.createCategory(
                         name: "新分类",
-                        icon: "curlybraces",
+                        icon: CategoryColor.palette[categories.count % CategoryColor.palette.count],
                         script: "function classify(item) {\n    return false;\n}",
                         previewLanguage: "text",
                         sortOrder: categories.count
@@ -396,7 +398,7 @@ private struct CategoryManagementView: View {
             Button("取消", role: .cancel) {}
             Button("还原预制分类") { manager.restorePresets() }
         } message: {
-            Text("缺失的预制分类会被重新创建，同名预制分类的图标、规则和预览语言会恢复默认；其他自建分类会保留。")
+            Text("缺失的预制分类会被重新创建，同名预制分类的颜色、规则和卡片显示方式会恢复默认；其他自建分类会保留。")
         }
         .sheet(isPresented: $isScriptEditorExpanded) {
             ExpandedJavaScriptEditor(manager: manager)
@@ -943,14 +945,20 @@ private struct CategoryManagementView: View {
         }
     }
 
+    private func categoryPosition(_ category: ClipboardCategory) -> Int {
+        manager.categories.firstIndex { $0.id == category.id } ?? 0
+    }
+
     private func categoryRow(_ category: ClipboardCategory) -> some View {
         HStack(spacing: 4) {
             Button {
                 manager.select(category.id)
             } label: {
                 HStack(spacing: 9) {
-                    Image(systemName: category.icon ?? "tag")
-                        .font(.system(size: 15, weight: .medium))
+                    // The same dot the category's capsule shows in the Deck.
+                    Circle()
+                        .fill(CategoryColor.color(icon: category.icon, position: categoryPosition(category)))
+                        .frame(width: 11, height: 11)
                         .frame(width: 20)
                     Text(category.name)
                         .font(.system(size: 14, weight: .semibold))
@@ -1019,7 +1027,7 @@ private struct CategoryManagementView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("编辑分类")
                         .font(.system(size: 25, weight: .bold, design: .rounded))
-                    Text("调整名称、内容预览方式和自动分类规则")
+                    Text("调整名称、颜色、卡片显示方式和自动分类规则")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
@@ -1032,12 +1040,70 @@ private struct CategoryManagementView: View {
                                 .frame(width: 270)
                         }
                         Divider().padding(.leading, 16)
-                        settingsRow("预览语言") {
-                            Picker("", selection: $manager.previewLanguage) {
-                                ForEach(["text", "code", "json", "sql", "java", "javascript", "color", "shell", "markdown", "xml", "yaml"], id: \.self) { Text($0) }
+                        settingsRow("颜色", detail: "列表和 Deck 分类栏中显示的圆点颜色") {
+                            HStack(spacing: 10) {
+                                ForEach(CategoryColor.palette, id: \.self) { hex in
+                                    Button {
+                                        manager.icon = hex
+                                    } label: {
+                                        Circle()
+                                            .fill(CategoryColor.color(hex))
+                                            .frame(width: 16, height: 16)
+                                            .padding(4)
+                                            .overlay {
+                                                Circle().stroke(
+                                                    manager.icon.caseInsensitiveCompare(hex) == .orderedSame
+                                                        ? Color.white : .clear,
+                                                    lineWidth: 2
+                                                )
+                                            }
+                                            .contentShape(Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .focusEffectDisabled()
+                                }
+                                // Any other colour, from the system colour panel.
+                                ColorPicker(
+                                    "自定义颜色",
+                                    selection: Binding(
+                                        get: { CategoryColor.color(manager.icon) },
+                                        set: { manager.icon = CategoryColor.hex($0) }
+                                    ),
+                                    supportsOpacity: false
+                                )
+                                .labelsHidden()
+                                .help("自定义颜色")
+                                .padding(2)
+                                .overlay {
+                                    Circle().stroke(
+                                        CategoryColor.isPreset(manager.icon) ? Color.clear : .white,
+                                        lineWidth: 2
+                                    )
+                                    .allowsHitTesting(false)
+                                }
                             }
+                        }
+                    }
+                }
+
+                settingsSection("卡片显示") {
+                    let cardType = CardDisplayChoice.cardType(of: manager.previewLanguage)
+                    VStack(spacing: 0) {
+                        settingsRow("卡片类型", detail: CardDisplayChoice.cardTypes.first { $0.value == cardType }?.detail) {
+                            Picker("", selection: Binding(
+                                get: { cardType },
+                                set: {
+                                    manager.previewLanguage = CardDisplayChoice.previewLanguage(
+                                        forCardType: $0,
+                                        current: manager.previewLanguage
+                                    )
+                                }
+                            )) {
+                                ForEach(CardDisplayChoice.cardTypes) { Text($0.label).tag($0.value) }
+                            }
+                            .pickerStyle(.segmented)
                             .labelsHidden()
-                            .frame(width: 170)
+                            .frame(width: 290)
                         }
                     }
                 }
@@ -1168,16 +1234,25 @@ private struct CategoryManagementView: View {
 
     private func settingsRow<Content: View>(
         _ title: String,
+        detail: String? = nil,
         @ViewBuilder content: () -> Content
     ) -> some View {
         HStack {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
             Spacer()
             content()
         }
         .padding(.horizontal, 16)
-        .frame(height: 52)
+        .frame(height: detail == nil ? 52 : 62)
     }
 }
 
@@ -2090,6 +2165,86 @@ final class CategorySettingsController: NSWindowController {
                 return
             }
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+        }
+    }
+}
+
+
+/// A category's colour is stored as "#RRGGBB" in its icon field. Older rows
+/// still hold an SF Symbol there; they take one of the six defaults by
+/// position, which is how the Deck has always coloured them. Same rule and
+/// palette as HistoryRepository::categoryColor on Linux and Windows.
+enum CategoryColor {
+    static let palette = ["#BF5AF2", "#64D2FF", "#30D158", "#FF375F", "#5E5CE6", "#66D4CF"]
+
+    static func hex(icon: String?, position: Int) -> String {
+        if let icon, icon.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil {
+            return icon.uppercased()
+        }
+        return palette[abs(position) % palette.count]
+    }
+
+    static func color(_ hex: String) -> Color {
+        let value = UInt32(hex.dropFirst(), radix: 16) ?? 0
+        return Color(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+    }
+
+    static func color(icon: String?, position: Int) -> Color {
+        color(hex(icon: icon, position: position))
+    }
+
+    /// "#RRGGBB" for a colour from the system colour panel (sRGB, opaque).
+    static func hex(_ color: Color) -> String {
+        guard let rgb = NSColor(color).usingColorSpace(.sRGB) else { return palette[0] }
+        let channel = { (value: CGFloat) in Int((min(max(value, 0), 1) * 255).rounded()) }
+        return String(
+            format: "#%02X%02X%02X",
+            channel(rgb.redComponent), channel(rgb.greenComponent), channel(rgb.blueComponent)
+        )
+    }
+
+    static func isPreset(_ hex: String) -> Bool {
+        palette.contains { $0.caseInsensitiveCompare(hex) == .orderedSame }
+    }
+}
+
+/// How a category's cards are shown (the stored preview_language value), with
+/// the label and one-line explanation the settings page uses.
+struct CardDisplayChoice: Identifiable {
+    let value: String
+    let label: String
+    let detail: String?
+    var id: String { value }
+
+    /// Text cards come in four types, stored as preview_language; code always
+    /// detects its language. Older rows naming a language ("json", "sql", …)
+    /// count as code and keep it. Same list and rules as
+    /// HistoryRepository::cardTypeChoices on Linux and Windows.
+    static let cardTypes: [CardDisplayChoice] = [
+        CardDisplayChoice(value: "text", label: "纯文本", detail: "按原样显示文字"),
+        CardDisplayChoice(value: "code", label: "代码", detail: "自动识别语言并着色"),
+        CardDisplayChoice(value: "url", label: "链接", detail: "显示网页标题和缩略图"),
+        CardDisplayChoice(value: "color", label: "色彩", detail: "显示为对应颜色的色块"),
+    ]
+
+    /// "text", "code", "url" or "color" for a stored preview_language value.
+    static func cardType(of previewLanguage: String?) -> String {
+        let value = (previewLanguage ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        if value.isEmpty || value == "text" { return "text" }
+        if value == "url" || value == "color" { return value }
+        return "code"
+    }
+
+    /// A category that already is code keeps its value.
+    static func previewLanguage(forCardType cardType: String, current: String) -> String {
+        switch cardType {
+        case "code": return Self.cardType(of: current) == "code" ? current : "code"
+        case "url", "color": return cardType
+        default: return "text"
         }
     }
 }

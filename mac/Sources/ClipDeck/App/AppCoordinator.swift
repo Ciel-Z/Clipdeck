@@ -68,6 +68,21 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        // As on Linux and Windows, edited text is classified again; the card shows
+        // the new category at once and the row's category is written behind it.
+        if let classifier {
+            store.classifyEditedItem = { [historyRepository] item in
+                let category = try classifier.matchingCategory(for: item)
+                DispatchQueue.global(qos: .utility).async {
+                    do {
+                        _ = try historyRepository?.assignCategory(category, to: item)
+                    } catch {
+                        NSLog("ClipDeck failed to persist edited item's category: %@", String(describing: error))
+                    }
+                }
+                return category
+            }
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -428,6 +443,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         let settingsItem = menu.addItem(withTitle: "设置…", action: #selector(openCategorySettings), keyEquivalent: ",")
         settingsItem.target = self
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")
+        let blurItem = menu.addItem(withTitle: "背景模糊", action: #selector(toggleDeckBackgroundBlur), keyEquivalent: "")
+        blurItem.target = self
+        blurItem.state = UserDefaults.standard.bool(forKey: AppPreferences.deckBackgroundBlurKey) ? .on : .off
         menu.addItem(.separator())
         let quitItem = menu.addItem(withTitle: "退出 ClipDeck", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quitItem.target = NSApp
@@ -437,6 +455,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     @objc private func openCategorySettings() {
         showCategorySettings()
+    }
+
+    /// The Deck reads the key through @AppStorage, so an open Deck switches at once.
+    @objc private func toggleDeckBackgroundBlur() {
+        let defaults = UserDefaults.standard
+        defaults.set(!defaults.bool(forKey: AppPreferences.deckBackgroundBlurKey),
+                     forKey: AppPreferences.deckBackgroundBlurKey)
     }
 
     private func reloadGlobalShortcut() {

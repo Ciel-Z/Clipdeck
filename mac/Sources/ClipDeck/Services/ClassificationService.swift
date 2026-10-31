@@ -28,9 +28,13 @@ final class ClassificationService: @unchecked Sendable {
     }
 
     func classify(_ item: ClipboardItem) throws -> ClipboardItem {
-        guard case let .text(text, _) = item.payload else {
-            return try repository.assignCategory(nil, to: item)
-        }
+        try repository.assignCategory(matchingCategory(for: item), to: item)
+    }
+
+    /// Runs the category scripts in order and returns the first match, without
+    /// writing the item's category. Script errors are still recorded.
+    func matchingCategory(for item: ClipboardItem) throws -> ClipboardCategory? {
+        guard case let .text(text, _) = item.payload else { return nil }
         let input = Self.makeInput(
             text: text,
             sourceBundleIdentifier: item.sourceApplication.bundleIdentifier ?? "",
@@ -54,7 +58,7 @@ final class ClassificationService: @unchecked Sendable {
             }
         }
         try repository.recordCategoryErrors(categoryErrors)
-        return try repository.assignCategory(matchedCategory, to: item)
+        return matchedCategory
     }
 
     static func test(script: String, text: String, previewLanguage: String? = nil) -> EvaluationResult {

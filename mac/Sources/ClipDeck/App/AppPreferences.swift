@@ -13,6 +13,9 @@ enum AppPreferences {
     static let previousCategoryModifiersKey = "shortcuts.previousCategory.modifiers"
     static let quickPasteModifierKey = "shortcuts.quickPaste.modifier"
     static let plainTextModifierKey = "shortcuts.plainText.modifier"
+    /// Status menu "背景模糊" (as on Linux and Windows): the frosted material
+    /// behind the Deck, or the live desktop under a plain black tint.
+    static let deckBackgroundBlurKey = "deck.backgroundBlur"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -27,6 +30,7 @@ enum AppPreferences {
             previousCategoryModifiersKey: Int(cmdKey),
             quickPasteModifierKey: Int(cmdKey),
             plainTextModifierKey: Int(shiftKey),
+            deckBackgroundBlurKey: true,
         ])
 
     }

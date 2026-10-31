@@ -382,6 +382,22 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 table.add(column: "file_references", .blob)
             }
         }
+        // Broader SQL/Markdown/JSON coverage with guards against prose, shared
+        // with Linux and Windows. Only untouched defaults are replaced.
+        migrator.registerMigration("balanceDefaultCategoryRules") { database in
+            let now = Int64(Date().timeIntervalSince1970 * 1_000)
+            for (name, previous, current) in [
+                ("JSON", DefaultCategoryScripts.previousJSON, DefaultCategoryScripts.json),
+                ("URL", DefaultCategoryScripts.previousURL, DefaultCategoryScripts.url),
+                ("SQL", DefaultCategoryScripts.previousSQL, DefaultCategoryScripts.sql),
+                ("Markdown", DefaultCategoryScripts.previousMarkdown, DefaultCategoryScripts.markdown),
+            ] {
+                try database.execute(
+                    sql: "UPDATE category SET script = ?, updated_at = ? WHERE name = ? AND script = ?",
+                    arguments: [current, now, name, previous]
+                )
+            }
+        }
         return migrator
     }
 }
