@@ -9,6 +9,8 @@
   --editor-caret: #0057d9;
   --editor-tooltip: #ffffff;
   --editor-border: #d2d2d7;
+  --editor-scrollbar: rgba(0, 0, 0, 0.30);
+  --editor-scrollbar-active: rgba(0, 0, 0, 0.48);
 }
 
 :root[data-theme="dark"] {
@@ -21,6 +23,8 @@
   --editor-caret: #ffd60a;
   --editor-tooltip: #29292c;
   --editor-border: #454549;
+  --editor-scrollbar: rgba(255, 255, 255, 0.32);
+  --editor-scrollbar-active: rgba(255, 255, 255, 0.50);
 }
 
 html, body, #editor {
@@ -33,3 +37,20 @@ html, body, #editor {
 
 body { font-size: 13px; }
 *:focus { outline: none; }
+
+/* The wheel scrolls the code only; at its ends it does not carry on into the
+   host's settings page around the editor. */
+.cm-scroller { overscroll-behavior: contain; }
+
+/* Overlay-style scrollbars: transparent until the code scrolls (editor.ts
+   toggles .is-scrolling), or while the pointer is on a thumb. */
+.cm-scroller::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+.cm-scroller::-webkit-scrollbar-corner { background: transparent; }
+.cm-scroller::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-clip: padding-box;
+  background-color: transparent;
+}
+.cm-scroller.is-scrolling::-webkit-scrollbar-thumb { background-color: var(--editor-scrollbar); }
+.cm-scroller::-webkit-scrollbar-thumb:hover { background-color: var(--editor-scrollbar-active); }

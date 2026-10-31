@@ -2,7 +2,7 @@
   "version": "0.1.0",
   "hashes": {
     "index.html": "3d110caa66cd8dcf490721cfcbed1ca5008d46fb6f3b785b238327821dd1dacd",
-    "editor.js": "7387e3e4705e599c0a38d128727120da76612251c63f728e7afb55f427bdec4d",
-    "editor.css": "096c6f203fdc82a8c34d70ec97ce6a9fbfb1962f6319b1fa8ccb03c04b8763a7"
+    "editor.js": "0fe7646e8a605718a919911cab83ad814e91592bdbad30f0be8f4b3d482b4cfa",
+    "editor.css": "e6a24006347c20f30879c828527fd4b4f0e9712e20fb7bfbdcd81f24b8513fd3"
   }
 }

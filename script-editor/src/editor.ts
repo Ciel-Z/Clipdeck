@@ -50,6 +50,15 @@ const view = new EditorView({
   })
 });
 
+// Overlay-style scrollbars: both thumbs show while the code scrolls (wheel,
+// thumb drag, keyboard) and hide shortly after; see .is-scrolling in editor.css.
+let scrollbarTimer: number | undefined;
+view.scrollDOM.addEventListener("scroll", () => {
+  view.scrollDOM.classList.add("is-scrolling");
+  window.clearTimeout(scrollbarTimer);
+  scrollbarTimer = window.setTimeout(() => view.scrollDOM.classList.remove("is-scrolling"), 900);
+}, { passive: true });
+
 function sendShortcut(command: "save" | "run" | "format"): true {
   postToHost({ type: "shortcut", command });
   return true;
