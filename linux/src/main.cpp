@@ -17,6 +17,8 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QButtonGroup>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QCryptographicHash>
@@ -383,9 +385,13 @@ public:
         painter->setFont(textFont);
         painter->setPen((option.state & QStyle::State_Selected)
             ? QColor(255, 255, 255, 240) : QColor(215, 215, 220));
-        const QString icon = index.data(Qt::UserRole + 1).toString();
-        painter->drawText(QRect(row.x() + 10, row.y(), 28, row.height()),
-                          Qt::AlignCenter, icon.isEmpty() ? QStringLiteral("●") : icon);
+        // The same dot the category's capsule shows in the Deck.
+        painter->save();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(HistoryRepository::categoryColor(
+            index.data(Qt::UserRole + 1).toString(), index.row())));
+        painter->drawEllipse(QPointF(row.x() + 24, row.center().y()), 5.5, 5.5);
+        painter->restore();
         const QRect nameRect(row.x() + 43, row.y(), std::max(20, row.width() - 112), row.height());
         painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
                           QFontMetrics(textFont).elidedText(index.data(Qt::DisplayRole).toString(),
@@ -797,10 +803,29 @@ Window activeTopLevelWindow(Display *display) {
     return window;
 }
 
+// Calls back with a widget's new size whenever it is resized.
+class ResizeWatcher final : public QObject {
+public:
+    ResizeWatcher(QWidget *target, std::function<void(const QSize &)> callback)
+        : QObject(target), callback_(std::move(callback)) {
+        target->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::Resize)
+            callback_(static_cast<QResizeEvent *>(event)->size());
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    std::function<void(const QSize &)> callback_;
+};
+
 class CardSyntaxHighlighter final : public QSyntaxHighlighter {
 public:
     CardSyntaxHighlighter(QTextDocument *document, QString language)
-        : QSyntaxHighlighter(document), language_(std::move(language)) {}
+        : QSyntaxHighlighter(document), language_(std::move(language)), rules_(rulesFor(language_)) {}
 
 protected:
     void highlightBlock(const QString &text) override {
@@ -810,60 +835,88 @@ protected:
         QTextCharFormat baseFormat;
         baseFormat.setForeground(QColor(238, 238, 239));
         setFormat(0, text.size(), baseFormat);
-        auto apply = [this, &text](const QString &pattern, const QColor &color,
-                                  QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption) {
-            QRegularExpression expression(pattern, options);
-            auto matches = expression.globalMatch(text);
-            QTextCharFormat format;
-            format.setForeground(color);
+        // Very long lines (minified JSON, logs) would stall typing and
+        // scrolling; they keep the base colour only.
+        if (text.size() > kMaximumHighlightedLine) return;
+        for (const Rule &rule : *rules_) {
+            auto matches = rule.expression.globalMatch(text);
             while (matches.hasNext()) {
                 const auto match = matches.next();
-                setFormat(match.capturedStart(), match.capturedLength(), format);
+                setFormat(match.capturedStart(), match.capturedLength(), rule.format);
             }
-        };
-
-        QStringList keywords;
-        if (language_ == QStringLiteral("sql")) {
-            keywords = QStringList{QStringLiteral("select"), QStringLiteral("from"), QStringLiteral("where"),
-                        QStringLiteral("join"), QStringLiteral("insert"), QStringLiteral("update"),
-                        QStringLiteral("delete"), QStringLiteral("create"), QStringLiteral("alter"),
-                        QStringLiteral("drop"), QStringLiteral("group"), QStringLiteral("order"),
-                        QStringLiteral("by"), QStringLiteral("limit"), QStringLiteral("as"),
-                        QStringLiteral("and"), QStringLiteral("or"), QStringLiteral("not"),
-                        QStringLiteral("into"), QStringLiteral("values"), QStringLiteral("set")};
-        } else if (language_ == QStringLiteral("shell")) {
-            keywords = QStringList{QStringLiteral("if"), QStringLiteral("then"), QStringLiteral("else"),
-                        QStringLiteral("fi"), QStringLiteral("for"), QStringLiteral("while"),
-                        QStringLiteral("do"), QStringLiteral("done"), QStringLiteral("case"),
-                        QStringLiteral("esac"), QStringLiteral("function"), QStringLiteral("export"),
-                        QStringLiteral("local"), QStringLiteral("return")};
-        } else if (language_ != QStringLiteral("text") && !language_.isEmpty()) {
-            keywords = QStringList{QStringLiteral("function"), QStringLiteral("return"), QStringLiteral("const"),
-                        QStringLiteral("let"), QStringLiteral("var"), QStringLiteral("if"),
-                        QStringLiteral("else"), QStringLiteral("for"), QStringLiteral("while"),
-                        QStringLiteral("class"), QStringLiteral("new"), QStringLiteral("try"),
-                        QStringLiteral("catch"), QStringLiteral("throw"), QStringLiteral("import"),
-                        QStringLiteral("export"), QStringLiteral("async"), QStringLiteral("await"),
-                        QStringLiteral("public"), QStringLiteral("private"), QStringLiteral("static")};
-        }
-        if (!keywords.isEmpty()) {
-            apply(QStringLiteral("\\b(?:%1)\\b").arg(keywords.join(QLatin1Char('|'))),
-                  QColor(191, 132, 255), QRegularExpression::CaseInsensitiveOption);
-        }
-        apply(QStringLiteral("\\b(?:true|false|null|undefined|nil|NULL)\\b"), QColor(191, 132, 255));
-        apply(QStringLiteral("\\b\\d+(?:\\.\\d+)?\\b"), QColor(75, 208, 190));
-        apply(QStringLiteral("(['\"])(?:\\\\.|(?!\\1).)*\\1"), QColor(255, 159, 67));
-        apply(QStringLiteral("//.*|--.*|#(?![# ]).*"), QColor(135, 135, 140));
-        if (language_ == QStringLiteral("json")) {
-            apply(QStringLiteral("\"(?:\\\\.|[^\"])*\"(?=\\s*:)") , QColor(82, 168, 255));
-        } else if (language_ == QStringLiteral("markdown")) {
-            apply(QStringLiteral("^#{1,6}\\s+.*$"), QColor(82, 168, 255));
-            apply(QStringLiteral("`[^`]+`|\\*\\*[^*]+\\*\\*"), QColor(255, 159, 67));
         }
     }
 
 private:
+    struct Rule {
+        QRegularExpression expression;
+        QTextCharFormat format;
+    };
+    using Rules = QVector<Rule>;
+    static constexpr int kMaximumHighlightedLine = 4000;
+
+    // Compiled once per language and shared: highlightBlock runs for every
+    // block of every preview and editor, and compiling the patterns there made
+    // opening a long text noticeably slow.
+    static std::shared_ptr<const Rules> rulesFor(const QString &language) {
+        static QHash<QString, std::shared_ptr<const Rules>> cache;
+        const auto cached = cache.constFind(language);
+        if (cached != cache.constEnd()) return cached.value();
+        auto rules = std::make_shared<Rules>();
+        auto add = [&rules](const QString &pattern, const QColor &color,
+                            QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption) {
+            QRegularExpression expression(pattern, options);
+            expression.optimize();
+            QTextCharFormat format;
+            format.setForeground(color);
+            rules->append({expression, format});
+        };
+        // Plain text is not coloured (as on macOS); only languages are.
+        if (!language.isEmpty() && language != QStringLiteral("text")) {
+            QStringList keywords;
+            if (language == QStringLiteral("sql")) {
+                keywords = QStringList{QStringLiteral("select"), QStringLiteral("from"), QStringLiteral("where"),
+                            QStringLiteral("join"), QStringLiteral("insert"), QStringLiteral("update"),
+                            QStringLiteral("delete"), QStringLiteral("create"), QStringLiteral("alter"),
+                            QStringLiteral("drop"), QStringLiteral("group"), QStringLiteral("order"),
+                            QStringLiteral("by"), QStringLiteral("limit"), QStringLiteral("as"),
+                            QStringLiteral("and"), QStringLiteral("or"), QStringLiteral("not"),
+                            QStringLiteral("into"), QStringLiteral("values"), QStringLiteral("set")};
+            } else if (language == QStringLiteral("shell")) {
+                keywords = QStringList{QStringLiteral("if"), QStringLiteral("then"), QStringLiteral("else"),
+                            QStringLiteral("fi"), QStringLiteral("for"), QStringLiteral("while"),
+                            QStringLiteral("do"), QStringLiteral("done"), QStringLiteral("case"),
+                            QStringLiteral("esac"), QStringLiteral("function"), QStringLiteral("export"),
+                            QStringLiteral("local"), QStringLiteral("return")};
+            } else {
+                keywords = QStringList{QStringLiteral("function"), QStringLiteral("return"), QStringLiteral("const"),
+                            QStringLiteral("let"), QStringLiteral("var"), QStringLiteral("if"),
+                            QStringLiteral("else"), QStringLiteral("for"), QStringLiteral("while"),
+                            QStringLiteral("class"), QStringLiteral("new"), QStringLiteral("try"),
+                            QStringLiteral("catch"), QStringLiteral("throw"), QStringLiteral("import"),
+                            QStringLiteral("export"), QStringLiteral("async"), QStringLiteral("await"),
+                            QStringLiteral("public"), QStringLiteral("private"), QStringLiteral("static")};
+            }
+            add(QStringLiteral("\b(?:%1)\b").arg(keywords.join(QLatin1Char('|'))),
+                QColor(191, 132, 255), QRegularExpression::CaseInsensitiveOption);
+            add(QStringLiteral("\b(?:true|false|null|undefined|nil|NULL)\b"), QColor(191, 132, 255));
+            add(QStringLiteral("\b\d+(?:\.\d+)?\b"), QColor(75, 208, 190));
+            add(QStringLiteral("(['\"])(?:\\.|(?!\1).)*\1"), QColor(255, 159, 67));
+            add(QStringLiteral("//.*|--.*|#(?![# ]).*"), QColor(135, 135, 140));
+            if (language == QStringLiteral("json")) {
+                add(QStringLiteral("\"(?:\\.|[^\"])*\"(?=\s*:)"), QColor(82, 168, 255));
+            } else if (language == QStringLiteral("markdown")) {
+                add(QStringLiteral("^#{1,6}\s+.*$"), QColor(82, 168, 255));
+                add(QStringLiteral("`[^`]+`|\*\*[^*]+\*\*"), QColor(255, 159, 67));
+            }
+        }
+        std::shared_ptr<const Rules> shared = std::move(rules);
+        cache.insert(language, shared);
+        return shared;
+    }
+
     QString language_;
+    std::shared_ptr<const Rules> rules_;
 };
 
 void paintHighlightedText(QPainter &painter, const QRect &rect, const QString &text,
@@ -2180,7 +2233,10 @@ protected:
         menu.addSeparator();
         QAction *deleteAction = addShortcutAction(QStringLiteral("删除"),
                                                  QKeySequence(Qt::CTRL | Qt::Key_Delete));
+        popoverOpen_ = true;
         const QAction *chosen = menu.exec(event->globalPos());
+        popoverOpen_ = false;
+        restoreDeckKeyboard();
         if (chosen == pasteAction) pasteSelected();
         else if (chosen == previewAction) previewSelected();
         else if (chosen == openAction) QDesktopServices::openUrl(QUrl(items_[index].text.trimmed()));
@@ -2301,7 +2357,6 @@ private:
         painter.setPen(QPen(QColor(255,255,255,46),1));
         painter.drawLine(categoryStripX()-15,24,categoryStripX()-15,46);
         painter.save(); painter.setClipRect(customStripRect());
-        const QColor dots[] = {QColor(175,82,222),QColor(50,173,230),QColor(52,199,89),QColor(255,55,95),QColor(88,86,214),QColor(100,210,190)};
         for (int index=4;index<categories.size();++index) {
             const QRect area=categoryRect(index-4);
             if (!area.intersects(customStripRect())) continue;
@@ -2316,7 +2371,9 @@ private:
             const QString label=QFontMetrics(labelFont).elidedText(categories[index],Qt::ElideRight,available);
             const int textWidth=QFontMetrics(labelFont).horizontalAdvance(label);
             const int left=area.x()+(area.width()-18-textWidth)/2;
-            painter.setPen(Qt::NoPen); painter.setBrush(dots[(index-4)%6]);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(categoryColorsCache_.value(index-4,
+                QColor(HistoryRepository::categoryColor(QString(), index-4))));
             painter.drawEllipse(QPointF(left+5.5,area.center().y()),5.5,5.5);
             painter.setPen(QColor(255,255,255,235));
             painter.drawText(QRect(left+18,area.y(),textWidth+1,area.height()),Qt::AlignLeft|Qt::AlignVCenter,label);
@@ -2877,10 +2934,14 @@ private:
     void refreshCategoryValues() {
         QStringList values{QStringLiteral("History"), QStringLiteral("Text"),
                            QStringLiteral("Images"), QStringLiteral("Files")};
-        for (const ClipboardCategory &category : repository_->categories()) {
-            values.append(category.name);
+        QVector<QColor> colors;
+        const QVector<ClipboardCategory> categories = repository_->categories();
+        for (int position = 0; position < categories.size(); ++position) {
+            values.append(categories[position].name);
+            colors.append(QColor(HistoryRepository::categoryColor(categories[position].icon, position)));
         }
         categoryValuesCache_ = std::move(values);
+        categoryColorsCache_ = std::move(colors);
         if (!categoryValuesCache_.contains(selectedCategory_)) {
             selectedCategory_ = QStringLiteral("History");
         }
@@ -3082,7 +3143,7 @@ private:
     }
 
     void previewSelected() {
-        if (previewDialog_ || selectedIndex_ < 0
+        if (previewDialog_ || popoverOpen_ || selectedIndex_ < 0
                 || selectedIndex_ >= static_cast<int>(items_.size())) return;
         if (ensureSelectedPayload([this] { previewSelected(); })) return;
         ClipboardItem item = items_[selectedIndex_];
@@ -3212,14 +3273,13 @@ private:
         if (imageAngleChanged) reload();
         if (moveDirection != 0) moveSelection(moveDirection);
         if (isVisible()) {
-            setFocus(Qt::OtherFocusReason);
-            grabDeckKeyboard(0);
+            restoreDeckKeyboard();
             if (editRequested) editSelected();
         }
     }
 
     void editSelected() {
-        if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (popoverOpen_ || selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
         if (items_[selectedIndex_].isFiles()) return;
         if (ensureSelectedPayload([this] { editSelected(); })) return;
         const ClipboardItem item = items_[selectedIndex_];
@@ -3332,24 +3392,40 @@ private:
             new CardSyntaxHighlighter(editor->document(), item.previewLanguage);
             bodyLayout->addWidget(editor, 1);
             auto updateStatistics = [editor, statistics] {
+                // One pass over the text; splitting it with a regex on every
+                // keystroke made long texts lag while typing.
                 const QString text = editor->toPlainText();
+                int words = 0;
+                int lines = 1;
+                bool inWord = false;
+                for (const QChar character : text) {
+                    if (character == QLatin1Char('\n')) ++lines;
+                    const bool space = character.isSpace();
+                    if (!space && !inWord) ++words;
+                    inWord = !space;
+                }
+                statistics->setStyleSheet(QString());
                 statistics->setText(QStringLiteral("%1 个字符  ·  %2 个单词  ·  %3 行")
-                    .arg(text.size())
-                    .arg(text.split(QRegularExpression(QStringLiteral("\\s+")), QString::SkipEmptyParts).size())
-                    .arg(std::max(1, text.count(QLatin1Char('\n')) + 1)));
+                    .arg(text.size()).arg(words).arg(lines));
             };
-            QObject::connect(editor, &QPlainTextEdit::textChanged, updateStatistics);
+            QTimer *statisticsTimer = new QTimer(&dialog);
+            statisticsTimer->setSingleShot(true);
+            statisticsTimer->setInterval(150);
+            QObject::connect(statisticsTimer, &QTimer::timeout, &dialog, updateStatistics);
+            QObject::connect(editor, &QPlainTextEdit::textChanged, statisticsTimer,
+                             qOverload<>(&QTimer::start));
             if (formatJSON) {
                 QObject::connect(formatJSON, &QPushButton::clicked, &dialog,
-                                 [editor, &dialog] {
+                                 [editor, statistics] {
                     QJsonParseError error;
                     const QJsonDocument document = QJsonDocument::fromJson(
                         editor->toPlainText().toUtf8(), &error);
                     if (error.error != QJsonParseError::NoError || document.isNull()) {
-                        showClipDeckAlert(&dialog, QStringLiteral("无法格式化 JSON"),
-                            QStringLiteral("第 %1 字节附近存在语法错误：%2")
-                                .arg(error.offset).arg(error.errorString()),
-                            QStringLiteral("知道了"), QString(), AlertTone::Warning);
+                        // Shown in the toolbar, not in an alert window: opening
+                        // another window closes this Qt::Popup and loses the edit.
+                        statistics->setStyleSheet(QStringLiteral("color:#ff7373;"));
+                        statistics->setText(QStringLiteral("JSON 第 %1 字节附近有语法错误")
+                            .arg(error.offset));
                         return;
                     }
                     editor->setPlainText(QString::fromUtf8(document.toJson(QJsonDocument::Indented)));
@@ -3361,7 +3437,7 @@ private:
         layout->addWidget(body, 1);
         QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
         QObject::connect(save, &QPushButton::clicked, &dialog, &QDialog::accept);
-        if (dialog.exec() != QDialog::Accepted) return;
+        if (!execPopover(dialog)) return;
         if (item.isImage()) {
             repository_->updateImageAngle(item.databaseID, editedImageAngle);
             imageThumbnailCache_.remove(item.databaseID);
@@ -3374,7 +3450,7 @@ private:
     }
 
     void renameSelected() {
-        if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (popoverOpen_ || selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
         const ClipboardItem item = items_[selectedIndex_];
         QDialog dialog(this);
         preparePopover(dialog, QSize(380, 160));
@@ -3395,7 +3471,7 @@ private:
         QObject::connect(save, &QPushButton::clicked, &dialog, &QDialog::accept);
         QObject::connect(title, &QLineEdit::returnPressed, &dialog, &QDialog::accept);
         title->setFocus(); title->selectAll();
-        if (dialog.exec() == QDialog::Accepted) {
+        if (execPopover(dialog)) {
             repository_->updateTitle(item.databaseID, title->text());
             if (pipeline_) pipeline_->refreshRecent();
             reload();
@@ -3891,6 +3967,24 @@ private:
         requestDeckFocus();
     }
 
+    // The editor, rename box and context menu are Qt::Popup windows: while
+    // open they own the X keyboard grab, and closing them ungrabs it, which
+    // also dropped the Deck's own grab. Keys then went to the application
+    // underneath and the Deck stopped answering arrows, Space and Esc.
+    bool execPopover(QDialog &dialog) {
+        popoverOpen_ = true;
+        const bool accepted = dialog.exec() == QDialog::Accepted;
+        popoverOpen_ = false;
+        restoreDeckKeyboard();
+        return accepted;
+    }
+
+    void restoreDeckKeyboard() {
+        if (!isVisible()) return;
+        setFocus(Qt::OtherFocusReason);
+        grabDeckKeyboard(0);
+    }
+
     void releaseDeckKeyboard() {
         if (!display_ || !keyboardGrabbed_) return;
         XUngrabKeyboard(display_, CurrentTime);
@@ -4121,9 +4215,12 @@ private:
     Window pasteTargetInputWindow_ = None;
     QPointer<QWidget> pasteTargetWidget_;
     QPointer<QDialog> previewDialog_;
+    // An editor, rename box or context menu is open (each runs its own loop).
+    bool popoverOpen_ = false;
     std::function<void(QKeyEvent *)> previewKeyHandler_;
     std::vector<ClipboardItem> items_;
     QStringList categoryValuesCache_;
+    QVector<QColor> categoryColorsCache_; // Automatic categories only, in Deck order.
     QString loadedCategory_;
     int imageLoadLimit_ = kInitialImageCapacity;
     int imageLoadGeneration_ = 0;
@@ -4213,7 +4310,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         "QListWidget#categoryList::item{background:transparent;padding:0;}"
         "QListWidget#categoryList::item:selected{background:transparent;}"
         "QFrame#categoryDivider{color:#343437;background:#343437;max-width:1px;border:0;}"
-        "QScrollArea#categoryEditorScroll,QWidget#categoryEditor{background:#1d1d1f;border:0;}"
+        "QScrollArea#categoryEditorScroll,QWidget#categoryEditor,QScrollArea#settingsScroll{background:#1d1d1f;border:0;}"
         "QWidget#categoryEditor,QWidget#categoryEditor QLabel,QWidget#categoryEditor QPushButton{color:#dedee1;}"
         "QLabel#categoryEditorTitle{font-size:25px;font-weight:700;color:#eeeeef;}"
         "QLabel#categorySectionTitle{font-size:18px;font-weight:700;color:#e8e8ea;}"
@@ -4265,33 +4362,108 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     root->addWidget(sidebar);
     root->addWidget(pages, 1);
 
+    // A settings pane as on macOS and Windows: title and subtitle, then
+    // sections (bold title above a rounded group of 52 px rows, control on the
+    // right). At most 760 wide, centred once the window is wider, scrolls.
+    struct SettingsPage {
+        QWidget *body;
+        QVBoxLayout *layout;
+    };
     auto makePage = [&](const QString &title, const QString &subtitle) {
-        QWidget *page = new QWidget(pages);
-        page->setObjectName(QStringLiteral("page"));
-        QVBoxLayout *layout = new QVBoxLayout(page);
-        layout->setContentsMargins(38, 26, 38, 26);
-        layout->setSpacing(20);
-        QLabel *heading = new QLabel(title, page);
-        heading->setObjectName(QStringLiteral("title"));
-        QLabel *detail = new QLabel(subtitle, page);
+        QScrollArea *scroll = new QScrollArea(pages);
+        scroll->setObjectName(QStringLiteral("settingsScroll"));
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        QWidget *canvas = new QWidget(scroll);
+        canvas->setObjectName(QStringLiteral("page"));
+        QHBoxLayout *centring = new QHBoxLayout(canvas);
+        centring->setContentsMargins(38, 26, 38, 26);
+        QWidget *body = new QWidget(canvas);
+        body->setObjectName(QStringLiteral("page"));
+        body->setMaximumWidth(760 - 76);
+        centring->addStretch(0);
+        centring->addWidget(body, 1);
+        centring->addStretch(0);
+        QVBoxLayout *layout = new QVBoxLayout(body);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(10);
+        QLabel *heading = new QLabel(title, body);
+        heading->setObjectName(QStringLiteral("categoryEditorTitle"));
+        QLabel *detail = new QLabel(subtitle, body);
         detail->setObjectName(QStringLiteral("subtitle"));
+        detail->setStyleSheet(QStringLiteral("font-size:13px;"));
         layout->addWidget(heading);
         layout->addWidget(detail);
-        return qMakePair(page, layout);
+        layout->addSpacing(14);
+        scroll->setWidget(canvas);
+        pages->addWidget(scroll);
+        return SettingsPage{body, layout};
+    };
+    // A section title and its rounded group; rows go into the returned layout.
+    auto addSettingsSection = [](const SettingsPage &page, const QString &title) {
+        QLabel *label = new QLabel(title, page.body);
+        label->setObjectName(QStringLiteral("categorySectionTitle"));
+        page.layout->addWidget(label);
+        QFrame *section = new QFrame(page.body);
+        section->setObjectName(QStringLiteral("categorySection"));
+        QVBoxLayout *rows = new QVBoxLayout(section);
+        rows->setContentsMargins(16, 0, 16, 0);
+        rows->setSpacing(0);
+        page.layout->addWidget(section);
+        page.layout->addSpacing(14);
+        return rows;
+    };
+    // A row: title (and optional secondary line) on the left, control on the
+    // right, and an inset divider above every row but the first.
+    auto addSettingsRow = [](QVBoxLayout *rows, const QString &title, QWidget *control,
+                             const QString &detail = QString()) {
+        QWidget *section = rows->parentWidget();
+        if (rows->count() > 0) {
+            QFrame *divider = new QFrame(section);
+            divider->setFrameShape(QFrame::HLine);
+            rows->addWidget(divider);
+        }
+        QHBoxLayout *row = new QHBoxLayout;
+        row->setContentsMargins(0, 8, 0, 8);
+        QVBoxLayout *labels = new QVBoxLayout;
+        labels->setSpacing(2);
+        QLabel *label = new QLabel(title, section);
+        label->setObjectName(QStringLiteral("categoryRowLabel"));
+        labels->addWidget(label);
+        if (!detail.isEmpty()) {
+            QLabel *secondary = new QLabel(detail, section);
+            secondary->setObjectName(QStringLiteral("subtitle"));
+            secondary->setStyleSheet(QStringLiteral("color:#9a9aa0;font-size:12px;"));
+            secondary->setWordWrap(true);
+            labels->addWidget(secondary);
+        }
+        row->addLayout(labels, 1);
+        if (control) {
+            control->setParent(section);
+            row->addWidget(control, 0, Qt::AlignRight | Qt::AlignVCenter);
+        }
+        rows->addLayout(row);
+        return row;
+    };
+    // A secondary note under a section, outside its rounded group.
+    auto addSettingsNote = [](const SettingsPage &page, const QString &text) {
+        QLabel *note = new QLabel(text, page.body);
+        note->setObjectName(QStringLiteral("subtitle"));
+        note->setStyleSheet(QStringLiteral("color:#8f8f94;font-size:12px;"));
+        note->setWordWrap(true);
+        page.layout->insertWidget(page.layout->count() - 1, note);
     };
 
-    auto generalPage = makePage(QStringLiteral("通用"), QStringLiteral("设置 ClipDeck 的默认行为"));
-    QGroupBox *pasteBox = new QGroupBox(QStringLiteral("粘贴"), generalPage.first);
-    QFormLayout *pasteForm = new QFormLayout(pasteBox);
-    QComboBox *pasteFormat = new StyledComboBox(pasteBox);
-    pasteFormat->addItems({QStringLiteral("纯文本"), QStringLiteral("保留格式")});
+    SettingsPage generalPage = makePage(QStringLiteral("通用"), QStringLiteral("设置 ClipDeck 的默认行为"));
+    QVBoxLayout *pasteRows = addSettingsSection(generalPage, QStringLiteral("粘贴"));
+    QComboBox *pasteFormat = new StyledComboBox(generalPage.body);
+    pasteFormat->addItems({QStringLiteral("纯文本"), QStringLiteral("保留原格式")});
     pasteFormat->setCurrentIndex(settings.value(QStringLiteral("paste/preserveFormatting"), false).toBool() ? 1 : 0);
-    pasteForm->addRow(QStringLiteral("默认粘贴格式"), pasteFormat);
-    pasteForm->addRow(new QLabel(QStringLiteral("纯文本会移除字体、颜色和段落样式。"), pasteBox));
-    generalPage.second->addWidget(pasteBox);
-    QGroupBox *startupBox = new QGroupBox(QStringLiteral("启动"), generalPage.first);
-    QVBoxLayout *startupLayout = new QVBoxLayout(startupBox);
-    QCheckBox *launchAtLogin = new QCheckBox(QStringLiteral("登录 UOS 时自动启动"), startupBox);
+    addSettingsRow(pasteRows, QStringLiteral("默认粘贴格式"), pasteFormat,
+                   QStringLiteral("纯文本会移除字体、颜色和段落样式"));
+    QVBoxLayout *startupRows = addSettingsSection(generalPage, QStringLiteral("启动"));
+    QCheckBox *launchAtLogin = new QCheckBox(generalPage.body);
     launchAtLogin->setChecked(QFile::exists(QDir::home().filePath(QStringLiteral(".config/autostart/clipdeck.desktop"))));
     QObject::connect(launchAtLogin, &QCheckBox::toggled, &dialog,
                      [launchAtLogin, &dialog](bool enabled) {
@@ -4303,16 +4475,13 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
                                   : QStringLiteral("无法移除 UOS 开机启动项。"),
                           QStringLiteral("知道了"), QString(), AlertTone::Warning);
     });
-    startupLayout->addWidget(launchAtLogin);
-    generalPage.second->addWidget(startupBox);
-    QGroupBox *historyBox = new QGroupBox(QStringLiteral("保留历史"), generalPage.first);
-    QVBoxLayout *historyLayout = new QVBoxLayout(historyBox);
-    QLabel *retentionValue = new QLabel(historyBox);
-    retentionValue->setAlignment(Qt::AlignCenter);
+    addSettingsRow(startupRows, QStringLiteral("登录时自动启动"), launchAtLogin);
+    QVBoxLayout *historyRows = addSettingsSection(generalPage, QStringLiteral("保留历史"));
     const int savedRetention = settings.value(QStringLiteral("history/retentionDays"), 30).toInt();
-    retentionValue->hide();
-    RetentionControl *retention = new RetentionControl(savedRetention, historyBox);
-    historyLayout->addWidget(retention);
+    RetentionControl *retention = new RetentionControl(savedRetention, generalPage.body);
+    historyRows->setContentsMargins(16, 12, 16, 12);
+    historyRows->addWidget(retention);
+    addSettingsNote(generalPage, QStringLiteral("期限以项目最近一次复制时间为起点"));
     auto selectedRetentionDays = [retention] { return retention->value(); };
     int currentRetentionDays = savedRetention;
     retention->setChangeCallback([&, retention](int days) {
@@ -4338,28 +4507,23 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         settings.setValue(QStringLiteral("history/retentionDays"), days);
         settings.sync();
     });
-    generalPage.second->addWidget(historyBox);
-    generalPage.second->addStretch();
-    pages->addWidget(generalPage.first);
+    generalPage.layout->addStretch();
 
-    auto imagePage = makePage(QStringLiteral("图片"), QStringLiteral("设置图片剪贴板历史"));
-    QGroupBox *imageBox = new QGroupBox(QStringLiteral("图片记录"), imagePage.first);
-    QFormLayout *imageForm = new QFormLayout(imageBox);
-    QCheckBox *recordImages = new QCheckBox(QStringLiteral("记录图片剪贴板内容"), imageBox);
+    SettingsPage imagePage = makePage(QStringLiteral("图片"), QStringLiteral("控制图片剪贴板内容的记录方式"));
+    QVBoxLayout *imageRows = addSettingsSection(imagePage, QStringLiteral("图片历史"));
+    QCheckBox *recordImages = new QCheckBox(imagePage.body);
     recordImages->setChecked(settings.value(QStringLiteral("clipboard/recordsImages"), true).toBool());
-    QComboBox *maximumImage = new StyledComboBox(imageBox);
+    QComboBox *maximumImage = new StyledComboBox(imagePage.body);
     for (const int size : {1, 2, 5, 10, 20}) maximumImage->addItem(QStringLiteral("%1 MB").arg(size), size);
     maximumImage->setCurrentIndex(std::max(0, maximumImage->findData(
         settings.value(QStringLiteral("clipboard/maximumImageMegabytes"), 10).toInt())));
-    imageForm->addRow(recordImages);
-    imageForm->addRow(QStringLiteral("最大图片大小"), maximumImage);
-    imagePage.second->addWidget(imageBox);
-    imagePage.second->addStretch();
-    pages->addWidget(imagePage.first);
+    addSettingsRow(imageRows, QStringLiteral("记录图片"), recordImages);
+    addSettingsRow(imageRows, QStringLiteral("最大图片大小"), maximumImage);
+    addSettingsNote(imagePage, QStringLiteral("超过大小限制的图片不会被记录。"));
+    imagePage.layout->addStretch();
 
-    auto keyboardPage = makePage(QStringLiteral("键盘快捷键"), QStringLiteral("点击快捷键区域，然后按下新的组合键"));
-    QGroupBox *keyBox = new QGroupBox(QStringLiteral("全局与 Deck · Esc 取消录制"), keyboardPage.first);
-    QFormLayout *keyForm = new QFormLayout(keyBox);
+    SettingsPage keyboardPage = makePage(QStringLiteral("键盘快捷键"), QStringLiteral("点击快捷键区域，然后按下新的组合键 · Esc 取消录制"));
+    QWidget *keyBox = keyboardPage.body;
     ShortcutCaptureButton *showDeckShortcut = new ShortcutCaptureButton(
         configuredShortcut(QStringLiteral("shortcuts/showDeck"), defaultShowDeckShortcut()), keyBox);
     ShortcutCaptureButton *previousCategoryShortcut = new ShortcutCaptureButton(
@@ -4412,16 +4576,24 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
                           plainTextModifier->currentData().toInt());
         settings.sync();
     });
-    keyForm->addRow(QStringLiteral("显示 / 隐藏 Deck"), showDeckShortcut);
-    keyForm->addRow(QStringLiteral("显示上一个类型"), previousCategoryShortcut);
-    keyForm->addRow(QStringLiteral("显示下一个类型"), nextCategoryShortcut);
-    keyForm->addRow(QStringLiteral("快速粘贴"), quickPasteModifier);
-    keyForm->addRow(QStringLiteral("纯文本模式"), plainTextModifier);
-    keyForm->addRow(QStringLiteral("选择内容"), new QLabel(QStringLiteral("← / →"), keyBox));
-    keyForm->addRow(QStringLiteral("粘贴"), new QLabel(QStringLiteral("Enter / 快速粘贴修饰键 + 1…9"), keyBox));
-    keyForm->addRow(QStringLiteral("搜索"), new QLabel(QStringLiteral("Ctrl + F"), keyBox));
-    QPushButton *resetShortcuts = new QPushButton(QStringLiteral("恢复默认快捷键"), keyBox);
-    keyForm->addRow(QString(), resetShortcuts);
+    QVBoxLayout *globalRows = addSettingsSection(keyboardPage, QStringLiteral("全局"));
+    addSettingsRow(globalRows, QStringLiteral("启动 ClipDeck"), showDeckShortcut);
+    QVBoxLayout *deckRows = addSettingsSection(keyboardPage, QStringLiteral("Deck"));
+    addSettingsRow(deckRows, QStringLiteral("显示下一个类型"), nextCategoryShortcut);
+    addSettingsRow(deckRows, QStringLiteral("显示上一个类型"), previousCategoryShortcut);
+    addSettingsRow(deckRows, QStringLiteral("快速粘贴"), quickPasteModifier,
+                   QStringLiteral("按住修饰键再按 1…9"));
+    addSettingsRow(deckRows, QStringLiteral("纯文本模式"), plainTextModifier,
+                   QStringLiteral("按住修饰键再粘贴"));
+    QVBoxLayout *navigationRows = addSettingsSection(keyboardPage, QStringLiteral("固定按键"));
+    addSettingsRow(navigationRows, QStringLiteral("选择内容"), new QLabel(QStringLiteral("← / →"), keyBox));
+    addSettingsRow(navigationRows, QStringLiteral("粘贴"), new QLabel(QStringLiteral("Enter"), keyBox));
+    addSettingsRow(navigationRows, QStringLiteral("搜索"), new QLabel(QStringLiteral("Ctrl + F"), keyBox));
+    QPushButton *resetShortcuts = new QPushButton(QStringLiteral("将快捷方式重置为默认"), keyBox);
+    QHBoxLayout *resetRow = new QHBoxLayout;
+    resetRow->addStretch();
+    resetRow->addWidget(resetShortcuts);
+    keyboardPage.layout->addLayout(resetRow);
     QObject::connect(resetShortcuts, &QPushButton::clicked, [&] {
         showDeckShortcut->setKeySequence(defaultShowDeckShortcut());
         previousCategoryShortcut->setKeySequence(QKeySequence(Qt::CTRL | Qt::Key_Left));
@@ -4431,9 +4603,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         plainTextModifier->setCurrentIndex(plainTextModifier->findData(
             static_cast<int>(Qt::ShiftModifier)));
     });
-    keyboardPage.second->addWidget(keyBox);
-    keyboardPage.second->addStretch();
-    pages->addWidget(keyboardPage.first);
+    keyboardPage.layout->addStretch();
 
     QWidget *categoryPageWidget = new QWidget(pages);
     categoryPageWidget->setObjectName(QStringLiteral("page"));
@@ -4499,7 +4669,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QLabel *editorTitle = new QLabel(QStringLiteral("编辑分类"), categoryEditorWidget);
     editorTitle->setObjectName(QStringLiteral("categoryEditorTitle"));
     QLabel *editorSubtitle = new QLabel(
-        QStringLiteral("调整名称、内容预览方式和自动分类规则"), categoryEditorWidget);
+        QStringLiteral("调整名称、颜色、卡片显示方式和自动分类规则"), categoryEditorWidget);
     editorSubtitle->setObjectName(QStringLiteral("subtitle"));
     categoryEditor->addWidget(editorTitle);
     categoryEditor->addWidget(editorSubtitle);
@@ -4536,27 +4706,169 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QFrame *basicDivider = new QFrame(basicSection);
     basicDivider->setFrameShape(QFrame::HLine);
     basicLayout->addWidget(basicDivider);
-    QHBoxLayout *languageRow = new QHBoxLayout;
-    QLabel *languageLabel = new QLabel(QStringLiteral("预览语言"), basicSection);
-    languageLabel->setObjectName(QStringLiteral("categoryRowLabel"));
-    languageLabel->setStyleSheet(QStringLiteral("color:#e6e6e8;"));
-    QComboBox *previewLanguage = new StyledComboBox(basicSection);
-    previewLanguage->setFixedWidth(170);
-    previewLanguage->addItems({QStringLiteral("text"), QStringLiteral("code"),
-        QStringLiteral("json"), QStringLiteral("sql"), QStringLiteral("shell"),
-        QStringLiteral("markdown"), QStringLiteral("url"), QStringLiteral("color"),
-        QStringLiteral("javascript"), QStringLiteral("java"), QStringLiteral("xml"),
-        QStringLiteral("yaml")});
-    languageRow->addWidget(languageLabel);
-    languageRow->addStretch();
-    languageRow->addWidget(previewLanguage);
-    languageRow->setContentsMargins(0, 8, 0, 8);
-    basicLayout->addLayout(languageRow);
+    // A row title with a secondary line under it.
+    auto makeRowTitle = [](const QString &title, QLabel *detail, QWidget *parent) {
+        QVBoxLayout *column = new QVBoxLayout;
+        column->setSpacing(2);
+        QLabel *label = new QLabel(title, parent);
+        label->setObjectName(QStringLiteral("categoryRowLabel"));
+        label->setStyleSheet(QStringLiteral("color:#e6e6e8;"));
+        detail->setObjectName(QStringLiteral("subtitle"));
+        detail->setStyleSheet(QStringLiteral("color:#9a9aa0;"));
+        column->addWidget(label);
+        column->addWidget(detail);
+        return column;
+    };
+
+    // The category's colour is kept in its icon field as "#RRGGBB".
+    QLineEdit *categoryIcon = new QLineEdit(categoryEditorWidget);
+    categoryIcon->hide();
+    QHBoxLayout *colorRow = new QHBoxLayout;
+    colorRow->addLayout(makeRowTitle(QStringLiteral("颜色"),
+        new QLabel(QStringLiteral("列表和 Deck 分类栏中显示的圆点颜色"), basicSection), basicSection));
+    colorRow->addStretch();
+    QButtonGroup *colorButtons = new QButtonGroup(basicSection);
+    colorButtons->setExclusive(true);
+    for (const QString &color : HistoryRepository::categoryColorPalette()) {
+        QPushButton *swatch = new QPushButton(basicSection);
+        swatch->setCheckable(true);
+        swatch->setFixedSize(24, 24);
+        swatch->setCursor(Qt::PointingHandCursor);
+        swatch->setProperty("categoryColor", color);
+        swatch->setStyleSheet(QStringLiteral(
+            "QPushButton{background:%1;border:4px solid #2b2b2e;border-radius:12px;padding:0;min-width:0;}"
+            "QPushButton:checked{border:2px solid white;}").arg(color));
+        colorButtons->addButton(swatch);
+        colorRow->addWidget(swatch);
+        colorRow->addSpacing(4);
+    }
+    // Custom colour: a hue wheel until a colour outside the presets is chosen,
+    // then that colour.
+    QPushButton *customColor = new QPushButton(basicSection);
+    customColor->setCheckable(true);
+    customColor->setFixedSize(24, 24);
+    customColor->setCursor(Qt::PointingHandCursor);
+    customColor->setToolTip(QStringLiteral("自定义颜色"));
+    colorRow->addWidget(customColor);
+    auto showCategoryColor = [colorButtons, categoryIcon, customColor](const QString &color) {
+        categoryIcon->setText(color);
+        bool preset = false;
+        // An exclusive group refuses to uncheck its checked button.
+        colorButtons->setExclusive(false);
+        for (QAbstractButton *button : colorButtons->buttons()) {
+            const bool chosen = button->property("categoryColor").toString().compare(color, Qt::CaseInsensitive) == 0;
+            button->setChecked(chosen);
+            preset = preset || chosen;
+        }
+        colorButtons->setExclusive(true);
+        const bool custom = !preset && !color.isEmpty();
+        customColor->setChecked(custom);
+        customColor->setStyleSheet(QStringLiteral(
+            "QPushButton{background:%1;border:4px solid #2b2b2e;border-radius:12px;padding:0;min-width:0;}"
+            "QPushButton:checked{border:2px solid white;}")
+            .arg(custom ? color : QStringLiteral(
+                "qconicalgradient(cx:0.5,cy:0.5,angle:0,stop:0 #ff0000,stop:0.17 #ff00ff,stop:0.33 #0000ff,"
+                "stop:0.5 #00ffff,stop:0.67 #00ff00,stop:0.83 #ffff00,stop:1 #ff0000)")));
+    };
+    QObject::connect(colorButtons, qOverload<QAbstractButton *>(&QButtonGroup::buttonClicked),
+                     [showCategoryColor](QAbstractButton *button) {
+        showCategoryColor(button->property("categoryColor").toString());
+    });
+    // Qt's colour panel (saturation/brightness field, hue strip, hex field)
+    // embedded in a popover under the swatch, not a separate dialog window.
+    QObject::connect(customColor, &QPushButton::clicked, [customColor, categoryIcon, showCategoryColor] {
+        showCategoryColor(categoryIcon->text());
+        QFrame *popover = new QFrame(customColor, Qt::Popup | Qt::FramelessWindowHint);
+        popover->setAttribute(Qt::WA_DeleteOnClose);
+        popover->setObjectName(QStringLiteral("colorPopover"));
+        popover->setStyleSheet(QStringLiteral(
+            "QFrame#colorPopover{background:#2e2e32;border:1px solid rgba(255,255,255,30);border-radius:10px;}"
+            "QWidget{color:#eeeeef;}"
+            "QLineEdit,QSpinBox{background:rgba(0,0,0,64);border:1px solid rgba(255,255,255,30);"
+            "border-radius:5px;padding:2px 4px;}"));
+        QVBoxLayout *layout = new QVBoxLayout(popover);
+        layout->setContentsMargins(10, 10, 10, 10);
+        QColorDialog *panel = new QColorDialog(QColor(categoryIcon->text()), popover);
+        panel->setWindowFlags(Qt::Widget);
+        panel->setOptions(QColorDialog::NoButtons | QColorDialog::DontUseNativeDialog);
+        layout->addWidget(panel);
+        QObject::connect(panel, &QColorDialog::currentColorChanged, [showCategoryColor](const QColor &color) {
+            showCategoryColor(color.name(QColor::HexRgb).toUpper());
+        });
+        popover->adjustSize();
+        QPoint origin = customColor->mapToGlobal(QPoint(customColor->width(), customColor->height() + 8))
+            - QPoint(popover->width(), 0);
+        // QWidget::screen() needs Qt 5.14 and screenAt() can be null on 5.11/X11.
+        QScreen *target = QGuiApplication::primaryScreen();
+        for (QScreen *candidate : QGuiApplication::screens()) {
+            if (candidate->geometry().contains(customColor->mapToGlobal(QPoint()))) target = candidate;
+        }
+        const QRect screen = target ? target->availableGeometry() : QRect(origin, popover->size());
+        origin.setX(std::clamp(origin.x(), screen.left() + 8, screen.right() - popover->width() - 8));
+        if (origin.y() + popover->height() > screen.bottom())
+            origin.setY(customColor->mapToGlobal(QPoint(0, 0)).y() - popover->height() - 8);
+        popover->move(origin);
+        popover->show();
+    });
+    colorRow->setContentsMargins(0, 8, 0, 8);
+    basicLayout->addLayout(colorRow);
     categoryEditor->addWidget(basicSection);
     categoryEditor->addSpacing(14);
 
-    QLineEdit *categoryIcon = new QLineEdit(categoryEditorWidget);
-    categoryIcon->hide();
+    addSectionTitle(QStringLiteral("卡片显示"));
+    QFrame *displaySection = makeSection();
+    QVBoxLayout *displayLayout = new QVBoxLayout(displaySection);
+    displayLayout->setContentsMargins(16, 0, 16, 0);
+    // Text cards come in four types, stored as the category's preview_language;
+    // code always detects its language.
+    auto previewLanguageState = std::make_shared<QString>(QStringLiteral("text"));
+    QHBoxLayout *cardTypeRow = new QHBoxLayout;
+    QLabel *cardTypeDetail = new QLabel(displaySection);
+    cardTypeRow->addLayout(makeRowTitle(QStringLiteral("卡片类型"), cardTypeDetail, displaySection));
+    cardTypeRow->addStretch();
+    QFrame *cardTypeTrack = new QFrame(displaySection);
+    cardTypeTrack->setObjectName(QStringLiteral("cardTypeTrack"));
+    cardTypeTrack->setStyleSheet(QStringLiteral(
+        "QFrame#cardTypeTrack{background:rgba(255,255,255,20);border-radius:7px;}"
+        "QFrame#cardTypeTrack QPushButton{background:transparent;color:rgba(255,255,255,180);border:0;"
+        "border-radius:5px;min-width:72px;min-height:24px;padding:0;}"
+        "QFrame#cardTypeTrack QPushButton:checked{background:rgba(255,255,255,51);color:white;font-weight:600;}"));
+    QHBoxLayout *cardTypeLayout = new QHBoxLayout(cardTypeTrack);
+    cardTypeLayout->setContentsMargins(2, 2, 2, 2);
+    cardTypeLayout->setSpacing(0);
+    QButtonGroup *cardTypeButtons = new QButtonGroup(cardTypeTrack);
+    cardTypeButtons->setExclusive(true);
+    for (const auto &choice : HistoryRepository::cardTypeChoices()) {
+        QPushButton *segment = new QPushButton(choice.label, cardTypeTrack);
+        segment->setCheckable(true);
+        segment->setCursor(Qt::PointingHandCursor);
+        segment->setProperty("cardType", choice.value);
+        segment->setProperty("detail", choice.detail);
+        cardTypeButtons->addButton(segment);
+        cardTypeLayout->addWidget(segment);
+    }
+    cardTypeRow->addWidget(cardTypeTrack);
+    cardTypeRow->setContentsMargins(0, 8, 0, 8);
+    displayLayout->addLayout(cardTypeRow);
+
+    auto showPreviewLanguage = [=](const QString &language) {
+        *previewLanguageState = language.isEmpty() ? QStringLiteral("text") : language;
+        const QString cardType = HistoryRepository::cardTypeOf(*previewLanguageState);
+        for (QAbstractButton *button : cardTypeButtons->buttons()) {
+            if (button->property("cardType").toString() != cardType) continue;
+            button->setChecked(true);
+            cardTypeDetail->setText(button->property("detail").toString());
+        }
+    };
+    QObject::connect(cardTypeButtons, qOverload<QAbstractButton *>(&QButtonGroup::buttonClicked),
+                     [=](QAbstractButton *button) {
+        showPreviewLanguage(HistoryRepository::previewLanguageForCardType(
+            button->property("cardType").toString(), *previewLanguageState));
+    });
+    auto previewLanguageValue = [previewLanguageState] { return *previewLanguageState; };
+    showPreviewLanguage(QStringLiteral("text"));
+    categoryEditor->addWidget(displaySection);
+    categoryEditor->addSpacing(14);
 
     addSectionTitle(QStringLiteral("JavaScript 分类规则"));
     QFrame *scriptSection = makeSection();
@@ -4630,7 +4942,21 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     categoryEditor->addLayout(categoryButtons);
     categoryEditor->addStretch();
     categoryEditorWidget->setMinimumWidth(620);
-    categoryScroll->setWidget(categoryEditorWidget);
+    // Centred and at most 1120 wide in a wide (maximised) window; the script
+    // editor grows with the window height, 280 at the default size.
+    categoryEditorWidget->setMaximumWidth(1120);
+    QWidget *categoryEditorCanvas = new QWidget(categoryScroll);
+    categoryEditorCanvas->setObjectName(QStringLiteral("categoryEditor"));
+    QHBoxLayout *categoryEditorCentring = new QHBoxLayout(categoryEditorCanvas);
+    categoryEditorCentring->setContentsMargins(0, 0, 0, 0);
+    categoryEditorCentring->addStretch(0);
+    categoryEditorCentring->addWidget(categoryEditorWidget, 1);
+    categoryEditorCentring->addStretch(0);
+    categoryScroll->setWidget(categoryEditorCanvas);
+    auto *scriptHeightWatcher = new ResizeWatcher(categoryScroll->viewport(), [categoryScript](const QSize &size) {
+        categoryScript->setMinimumHeight(std::max(280, std::min(760, size.height() - 420)));
+    });
+    Q_UNUSED(scriptHeightWatcher);
     categoryLayout->addWidget(categorySidebar);
     categoryLayout->addWidget(categoryDivider);
     categoryLayout->addWidget(categoryScroll, 1);
@@ -4657,9 +4983,8 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QObject::connect(categoryList, &QListWidget::currentRowChanged, [&](int row) {
         if (row < 0 || row >= editableCategories.size()) return;
         categoryName->setText(editableCategories[row].name);
-        categoryIcon->setText(editableCategories[row].icon);
-        const int languageIndex = previewLanguage->findText(editableCategories[row].previewLanguage);
-        previewLanguage->setCurrentIndex(std::max(0, languageIndex));
+        showCategoryColor(HistoryRepository::categoryColor(editableCategories[row].icon, row));
+        showPreviewLanguage(editableCategories[row].previewLanguage);
         categoryScript->setText(editableCategories[row].script);
         updateCategoryScriptMetrics(categoryScript->text());
     });
@@ -4667,8 +4992,9 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         categoryList->clearSelection();
         categoryList->setCurrentRow(-1);
         categoryName->setText(QStringLiteral("新分类"));
-        categoryIcon->setText(QStringLiteral("●"));
-        previewLanguage->setCurrentText(QStringLiteral("text"));
+        const QStringList palette = HistoryRepository::categoryColorPalette();
+        showCategoryColor(palette.at(editableCategories.size() % palette.size()));
+        showPreviewLanguage(QStringLiteral("text"));
         categoryScript->setText(QStringLiteral("function classify(item) {\n\n}"));
         updateCategoryScriptMetrics(categoryScript->text());
         categoryName->setFocus();
@@ -4678,7 +5004,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         QString error;
         const bool matches = repository->categoryScriptMatches(
             categoryScript->text(), categoryTestText->toPlainText(),
-            previewLanguage->currentText(), &error);
+            previewLanguageValue(), &error);
         categoryTestResult->setText(error.isEmpty()
             ? (matches ? QStringLiteral("匹配：true") : QStringLiteral("匹配：false"))
             : QStringLiteral("错误：%1").arg(error));
@@ -4815,7 +5141,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
             QStringList consoleOutput;
             const bool matches = repository->categoryScriptMatches(
                 expandedScript->text(), expandedTestText->toPlainText(),
-                previewLanguage->currentText(), &error, &consoleOutput);
+                previewLanguageValue(), &error, &consoleOutput);
             expandedConsole->setPlainText(consoleOutput.join(QLatin1Char('\n')));
             expandedTestResult->setText(error.isEmpty()
                 ? (matches ? QStringLiteral("匹配：true") : QStringLiteral("匹配：false"))
@@ -4884,9 +5210,9 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         const int row = categoryList->currentRow();
         const bool ok = row >= 0 && row < editableCategories.size()
             ? repository->updateCategory(editableCategories[row].databaseID, name,
-                                         categoryIcon->text(), script, previewLanguage->currentText())
+                                         categoryIcon->text(), script, previewLanguageValue())
             : repository->createCategory(name, categoryIcon->text(), script,
-                                         previewLanguage->currentText());
+                                         previewLanguageValue());
         if (!ok) {
             showClipDeckAlert(&dialog, QStringLiteral("无法保存"), repository->lastError(),
                               QStringLiteral("知道了"), QString(), AlertTone::Warning);
@@ -4908,7 +5234,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         repository->removeCategory(editableCategories[row].databaseID);
         reloadCategories();
         categoryName->clear();
-        categoryIcon->clear();
+        showCategoryColor(QString());
         categoryScript->clear();
     });
     if (!editableCategories.isEmpty()) categoryList->setCurrentRow(0);
@@ -4917,17 +5243,18 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     }
     pages->addWidget(categoryPageWidget);
 
-    auto dataPage = makePage(QStringLiteral("数据"), QStringLiteral("管理 ClipDeck 历史数据"));
-    QGroupBox *dataBox = new QGroupBox(QStringLiteral("存储"), dataPage.first);
-    QFormLayout *dataForm = new QFormLayout(dataBox);
-    QLabel *size = new QLabel(QStringLiteral("%1 MB").arg(repository->databaseByteCount() / 1048576.0, 0, 'f', 2), dataBox);
-    QPushButton *clearExpired = new QPushButton(QStringLiteral("清理过期内容"), dataBox);
-    QPushButton *clearAll = new QPushButton(QStringLiteral("删除历史…"), dataBox);
-    dataForm->addRow(QStringLiteral("当前占用"), size);
-    dataForm->addRow(clearExpired, clearAll);
-    dataPage.second->addWidget(dataBox);
-    dataPage.second->addStretch();
-    pages->addWidget(dataPage.first);
+    SettingsPage dataPage = makePage(QStringLiteral("数据"), QStringLiteral("查看数据库占用并管理本地历史"));
+    QVBoxLayout *dataRows = addSettingsSection(dataPage, QStringLiteral("数据库"));
+    QLabel *size = new QLabel(QStringLiteral("%1 MB").arg(repository->databaseByteCount() / 1048576.0, 0, 'f', 2), dataPage.body);
+    size->setStyleSheet(QStringLiteral("color:#9a9aa0;"));
+    QPushButton *clearExpired = new QPushButton(QStringLiteral("清理过期内容…"), dataPage.body);
+    QPushButton *clearAll = new QPushButton(QStringLiteral("清空全部历史…"), dataPage.body);
+    clearAll->setStyleSheet(QStringLiteral("QPushButton{color:#ff6961;}"));
+    addSettingsRow(dataRows, QStringLiteral("当前占用"), size);
+    addSettingsRow(dataRows, QStringLiteral("过期缓存"), clearExpired,
+                   QStringLiteral("删除超过保留期限的历史并回收空间"));
+    addSettingsRow(dataRows, QStringLiteral("全部历史"), clearAll);
+    dataPage.layout->addStretch();
 
     QObject::connect(sidebar, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
     sidebar->setCurrentRow(std::max(0, std::min(4, initialPage)));
