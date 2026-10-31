@@ -110,6 +110,26 @@ public:
     static QString detectedCodeLanguage(const QString &text, int *score = nullptr);
 
     static QStringList presetCategories();
+    // A category's colour is stored as "#RRGGBB" in its icon field. Older rows
+    // still hold a glyph there; they take one of the six defaults by position,
+    // which is how the Deck has always coloured them.
+    static QStringList categoryColorPalette();
+    static QString categoryColor(const QString &icon, int position);
+    // How a category's cards are shown. Text cards come in four types: plain
+    // text, code ("code": the language is detected), link ("url") and colour
+    // ("color"), stored in preview_language. Rows written before this may name
+    // a language ("json", "sql", …); they count as code and keep it.
+    struct DisplayChoice {
+        QString value;
+        QString label;
+        QString detail;
+    };
+    static QVector<DisplayChoice> cardTypeChoices();
+    // "text", "code", "url" or "color" for a stored preview_language value.
+    static QString cardTypeOf(const QString &previewLanguage);
+    // The preview_language to store when the card type changes; a category
+    // that already is code keeps its value.
+    static QString previewLanguageForCardType(const QString &cardType, const QString &current);
 
 private:
     bool initialize();

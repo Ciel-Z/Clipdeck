@@ -22,6 +22,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <cstdlib>
 #include <utility>
 
 namespace {
@@ -54,27 +55,117 @@ const QVector<CategoryPreset> &defaultCategoryPresets() {
     static const QVector<CategoryPreset> presets = {
         {QStringLiteral("JSON"), QStringLiteral("{}"), QStringLiteral("json"), QString::fromUtf8(R"JS(function classify(item) {
     const text = item.text.trim();
-    const isContainer =
-        (text.startsWith("{") && text.endsWith("}")) ||
-        (text.startsWith("[") && text.endsWith("]"));
-    if (!isContainer) return false;
-    try {
-        const value = JSON.parse(text);
-        return value !== null && typeof value === "object";
-    } catch (_) {
-        return false;
+    function parse(source) {
+        try {
+            return JSON.parse(source);
+        } catch (_) {
+            return undefined;
+        }
     }
+    function isContainer(value) {
+        return value !== null && typeof value === "object";
+    }
+    // Empty containers and one-number lists ("{}", "[]", "[1]") read as
+    // placeholders or citations far more often than as data.
+    function isData(value) {
+        if (!isContainer(value)) return false;
+        if (Array.isArray(value)) {
+            return value.length > 1 || (value.length === 1 && isContainer(value[0]));
+        }
+        return Object.keys(value).length > 0;
+    }
+
+    const first = text.charAt(0);
+    const last = text.charAt(text.length - 1);
+    if ((first === "{" && last === "}") || (first === "[" && last === "]")) {
+        if (isData(parse(text))) return true;
+    }
+
+    // JSON Lines (log lines, exports): every non-empty line is an object or array.
+    const lines = text.split(/\r?\n/).filter(function (line) {
+        return line.trim() !== "";
+    });
+    return lines.length >= 2 && lines.every(function (line) {
+        return isContainer(parse(line.trim()));
+    });
 })JS")},
         {QStringLiteral("URL"), QStringLiteral("↗"), QStringLiteral("url"), QString::fromUtf8(R"JS(function classify(item) {
-    return /^https?:\/\/\S+$/i.test(item.text.trim());
+    // One http(s) link whose host is a real name, IPv4/IPv6 address or
+    // localhost: what the Deck shows as a link card.
+    return /^https?:\/\/(?:[^\s\/?#@]+@)?(?:\[[0-9a-f:.]+\]|[^\s\/?#:.@-][^\s\/?#:@]*)(?::\d{1,5})?(?:[\/?#]\S*)?$/i
+        .test(item.text.trim());
 })JS")},
         {QStringLiteral("SQL"), QStringLiteral("◫"), QStringLiteral("sql"), QString::fromUtf8(R"JS(function classify(item) {
-    return /^(select|insert|update|delete|create|alter|drop)\b/i.test(
-        item.text.trim()
-    );
+    // Leading comments and an opening parenthesis do not change the statement.
+    const text = item.text.trim()
+        .replace(/^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)+/, "")
+        .replace(/^\(\s*/, "");
+    if (text.length < 6) return false;
+
+    // A table or column name, never an English article or pronoun, so that
+    // "Delete from the list" or "Insert into your document" stay text.
+    const name = "(?!(?:the|a|an|this|that|these|those|my|your|our|their|it|here|there)\\b)[\\w$.`\"\\[\\]]+";
+    const statements = [
+        new RegExp("^select\\s+(?:distinct\\s+|top\\s+\\d+\\s+)?(?!from\\b)[\\s\\S]+?\\bfrom\\s+" + name, "i"),
+        /^select\s+(?:\d+(?:\.\d+)?|'[^']*'|@@?\w+|\w+\s*\([^()]*\)|\*)\s*(?:as\s+\w+\s*)?(?:,[^\n]*)?;?$/i,
+        new RegExp("^(?:insert(?:\\s+ignore)?|replace|upsert)\\s+into\\s+" + name, "i"),
+        new RegExp("^update\\s+" + name + "\\s+set\\s+[\\w$.`\"\\[\\]]+\\s*=", "i"),
+        new RegExp("^delete\\s+from\\s+" + name, "i"),
+        new RegExp("^(?:create|alter|drop)\\s+(?:or\\s+replace\\s+|temp(?:orary)?\\s+|unique\\s+|materialized\\s+)*"
+            + "(?:table|view|index|database|schema|function|procedure|trigger|sequence|type|extension|user|role)\\s+"
+            + "(?:if\\s+(?:not\\s+)?exists\\s+)?" + name
+            + "\\s*(?:\\(|;|$|\\n|\\s(?:as|like|on|add|drop|alter|rename|modify|owner|set|cascade|restrict)\\b)", "i"),
+        /^with\s+(?:recursive\s+)?[\w"`]+\s*(?:\([^)]*\))?\s+as\s*\(/i,
+        new RegExp("^truncate\\s+(?:table\\s+)?" + name, "i"),
+        /^merge\s+into\s+\S+/i,
+        /^explain\s+(?:analyze\s+|query\s+plan\s+)?(?:select|insert|update|delete|with)\b/i,
+        /^(?:grant|revoke)\s+[\w\s,]+?\s+on\s+\S+\s+(?:to|from)\s+\S+/i,
+        /^show\s+(?:full\s+)?(?:tables|databases|schemas|columns|indexes|index|create\s+table|processlist|variables|grants)\b/i,
+        // "Describe yourself" / "Use Chrome" are sentences: these short MySQL
+        // commands count only when written like commands.
+        /^(?:desc|describe|use)\s+[\w$.`"]+\s*;$/i,
+        /^(?:DESC|DESCRIBE|USE)\s+[\w$.`"]+$/
+    ];
+    if (!statements.some(function (pattern) { return pattern.test(text); })) return false;
+
+    // Prose that happens to start like SQL: everyday words outside quotes.
+    const bare = text.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "''");
+    const prose = bare.match(/\b(?:the|you|your|please|we|our|my|me|this|these|those|will|should|would|could|can|then|just)\b/gi);
+    if (prose && prose.length >= 2) return false;
+    // A sentence ending needs some SQL punctuation or clause to back it up.
+    if (/[.!?。！？]$/.test(bare)) return /[*=(),;]|\b(?:where|join|group\s+by|order\s+by|limit|values)\b/i.test(bare);
+    return true;
 })JS")},
         {QStringLiteral("Markdown"), QStringLiteral("M↓"), QStringLiteral("markdown"), QString::fromUtf8(R"JS(function classify(item) {
-    return /(^|\n)(#{1,6} |[-*] |```)/.test(item.text);
+    const text = item.text.replace(/\r\n?/g, "\n");
+    function count(pattern) {
+        const matches = text.match(pattern);
+        return matches ? matches.length : 0;
+    }
+
+    // Structures only Markdown uses: one is enough.
+    const strong = [
+        /(?:^|\n)(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n\1[ \t]*(?:\n|$)/,                  // fenced code block
+        /^(`{3,}|~{3,})[\w+#.-]*\n/,                                                  // fence opening a copy
+        /(?:^|\n)[^\n]*\|[^\n]*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*(?:\n|$)/, // table
+        /!?\[[^\]\n]+\]\((?:https?:\/\/|mailto:|\/|\.{1,2}\/|#)[^)\s]*(?:\s+"[^"\n]*")?\)/, // [link](url), ![image](src)
+        /(?:^|\n)#{2,6}[ \t]+\S/,                                                     // ## heading
+        /(?:^|\n)[ \t]{0,3}[-*+][ \t]+\[[ xX]\][ \t]+\S/                              // - [ ] task
+    ];
+    if (strong.some(function (pattern) { return pattern.test(text); })) return true;
+
+    // Shapes plain notes, shell comments or code also use: two different
+    // kinds are needed. A lone "# comment" line or one "- item" stays text.
+    const weak = [
+        /(?:^|\n)#[ \t]+\S/.test(text),                                               // # heading
+        count(/(?:^|\n)[ \t]{0,3}[-*+][ \t]+\S/g) >= 2,                               // bullet list
+        count(/(?:^|\n)[ \t]{0,3}\d{1,3}[.)][ \t]+\S/g) >= 2,                         // numbered list
+        /(?:^|\n)>[ \t]?\S/.test(text),                                               // > quote
+        /(?:^|[\s(])(\*\*|__)(?=\S)[^\n]*?\S\1(?=[\s).,:;!?，。；：！？]|$)/.test(text), // **bold**
+        /(?:^|[^`])`[^`\n]+`(?!`)/.test(text),                                        // `code`
+        /(?:^|\n)[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*(?:\n|$)/.test(text)               // --- rule
+    ];
+    return weak.filter(Boolean).length >= 2;
 })JS")},
         {QStringLiteral("代码"), QStringLiteral("</>"), QStringLiteral("code"), QString::fromUtf8(R"JS(function classify(item) {
     return item.codeEngineMatched === true;
@@ -116,6 +207,36 @@ const QVector<CategoryPreset> &defaultCategoryPresets() {
 })JS")}
     };
     return presets;
+}
+
+const QMap<QString, QString> &previousFormattedDefaultScripts() {
+    static const QMap<QString, QString> scripts = {
+        {QStringLiteral("JSON"), QString::fromUtf8(R"JS(function classify(item) {
+    const text = item.text.trim();
+    const isContainer =
+        (text.startsWith("{") && text.endsWith("}")) ||
+        (text.startsWith("[") && text.endsWith("]"));
+    if (!isContainer) return false;
+    try {
+        const value = JSON.parse(text);
+        return value !== null && typeof value === "object";
+    } catch (_) {
+        return false;
+    }
+})JS")},
+        {QStringLiteral("URL"), QString::fromUtf8(R"JS(function classify(item) {
+    return /^https?:\/\/\S+$/i.test(item.text.trim());
+})JS")},
+        {QStringLiteral("SQL"), QString::fromUtf8(R"JS(function classify(item) {
+    return /^(select|insert|update|delete|create|alter|drop)\b/i.test(
+        item.text.trim()
+    );
+})JS")},
+        {QStringLiteral("Markdown"), QString::fromUtf8(R"JS(function classify(item) {
+    return /(^|\n)(#{1,6} |[-*] |```)/.test(item.text);
+})JS")},
+    };
+    return scripts;
 }
 
 QString legacyLinuxDefaultScript(const QString &name) {
@@ -337,10 +458,14 @@ bool HistoryRepository::initialize() {
                 if (hasCategories) {
                     query.prepare(QStringLiteral(
                         "UPDATE category SET icon=COALESCE(icon,?),preview_language=COALESCE(preview_language,?),"
-                        "script=CASE WHEN script=? THEN ? ELSE script END WHERE name=?"));
+                        "script=CASE WHEN script IN (?,?) THEN ? ELSE script END WHERE name=?"));
                     query.addBindValue(presets[index].icon);
                     query.addBindValue(presets[index].language);
-                    query.addBindValue(legacyLinuxDefaultScript(presets[index].name));
+                    // Only untouched defaults move to the current rule; edited
+                    // scripts are the user's and stay as they are.
+                    const QString legacy = legacyLinuxDefaultScript(presets[index].name);
+                    query.addBindValue(legacy);
+                    query.addBindValue(previousFormattedDefaultScripts().value(presets[index].name, legacy));
                     query.addBindValue(presets[index].script);
                     query.addBindValue(presets[index].name);
                 } else {
@@ -1154,6 +1279,41 @@ QString HistoryRepository::classifyBuiltinText(const QString &input) {
 QStringList HistoryRepository::presetCategories() {
     return {QStringLiteral("JSON"), QStringLiteral("URL"), QStringLiteral("SQL"),
             QStringLiteral("Markdown"), QStringLiteral("代码"), QStringLiteral("色彩")};
+}
+
+QStringList HistoryRepository::categoryColorPalette() {
+    return {QStringLiteral("#BF5AF2"), QStringLiteral("#64D2FF"), QStringLiteral("#30D158"),
+            QStringLiteral("#FF375F"), QStringLiteral("#5E5CE6"), QStringLiteral("#66D4CF")};
+}
+
+QString HistoryRepository::categoryColor(const QString &icon, int position) {
+    static const QRegularExpression hex(QStringLiteral("^#[0-9A-Fa-f]{6}$"));
+    if (hex.match(icon).hasMatch()) return icon.toUpper();
+    const QStringList palette = categoryColorPalette();
+    return palette.at(std::abs(position) % palette.size());
+}
+
+QVector<HistoryRepository::DisplayChoice> HistoryRepository::cardTypeChoices() {
+    return {
+        {QStringLiteral("text"), QStringLiteral("纯文本"), QStringLiteral("按原样显示文字")},
+        {QStringLiteral("code"), QStringLiteral("代码"), QStringLiteral("自动识别语言并着色")},
+        {QStringLiteral("url"), QStringLiteral("链接"), QStringLiteral("显示网页标题和缩略图")},
+        {QStringLiteral("color"), QStringLiteral("色彩"), QStringLiteral("显示为对应颜色的色块")},
+    };
+}
+
+QString HistoryRepository::cardTypeOf(const QString &previewLanguage) {
+    const QString value = previewLanguage.trimmed().toLower();
+    if (value.isEmpty() || value == QLatin1String("text")) return QStringLiteral("text");
+    if (value == QLatin1String("url") || value == QLatin1String("color")) return value;
+    return QStringLiteral("code");
+}
+
+QString HistoryRepository::previewLanguageForCardType(const QString &cardType, const QString &current) {
+    if (cardType == QLatin1String("code"))
+        return cardTypeOf(current) == QLatin1String("code") ? current : QStringLiteral("code");
+    if (cardType == QLatin1String("url") || cardType == QLatin1String("color")) return cardType;
+    return QStringLiteral("text");
 }
 
 QByteArray HistoryRepository::contentHash(const ClipboardItem &item) {
