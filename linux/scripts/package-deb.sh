@@ -23,8 +23,11 @@ install -Dm755 "${repo_root}/linux/packaging/clipdeck-launcher" \
   "${stage_dir}/usr/bin/clipdeck"
 install -Dm644 "${repo_root}/linux/packaging/clipdeck.desktop" \
   "${stage_dir}/usr/share/applications/clipdeck.desktop"
-install -Dm644 "${repo_root}/shared/assets/Assets.xcassets/AppIcon.appiconset/icon-256.png" \
-  "${stage_dir}/usr/share/icons/hicolor/256x256/apps/clipdeck.png"
+# Several sizes, so launchers and the dock do not scale one bitmap down.
+for icon_size in 32 64 128 256; do
+  install -Dm644 "${repo_root}/shared/assets/Assets.xcassets/AppIcon.appiconset/icon-${icon_size}.png" \
+    "${stage_dir}/usr/share/icons/hicolor/${icon_size}x${icon_size}/apps/clipdeck.png"
+done
 install -d "${stage_dir}/opt/clipdeck/lib" "${stage_dir}/opt/clipdeck/plugins" \
   "${stage_dir}/opt/clipdeck/libexec" "${stage_dir}/opt/clipdeck/resources" \
   "${stage_dir}/opt/clipdeck/translations/qtwebengine_locales"
