@@ -6,7 +6,7 @@
 <h1 align="center">ClipDeck</h1>
 
 <p align="center">
-  面向 macOS 与 Linux / UOS 的剪贴板历史工具，以横向卡片 Deck 让复制、查找和粘贴保持顺畅。
+  面向 macOS、Windows 与 Linux / UOS 的剪贴板历史工具，以横向卡片 Deck 让复制、查找和粘贴保持顺畅。
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 
 <p align="center"><sub>真实应用界面渲染；卡片文字、链接、代码与颜色均为虚拟演示内容。</sub></p>
 
-ClipDeck 提供原生 macOS 客户端和 Qt Linux / UOS 客户端。它以屏幕底部的横向卡片 Deck 呈现最近复制的内容，并针对代码、链接和颜色等内容提供自动识别与专属展示。下文以 macOS 操作为主，Linux 快捷键与安装说明见 [Linux README](linux/README.md)。
+ClipDeck 提供原生 macOS 客户端、Qt 6 + QML Windows 客户端和 Qt Linux / UOS 客户端。它以屏幕底部的横向卡片 Deck 呈现最近复制的内容，并针对代码、链接和颜色等内容提供自动识别与专属展示。下文以 macOS 操作为主（Windows / Linux 上 Command 对应 Ctrl），Linux 快捷键与安装说明见 [Linux README](linux/README.md)，Windows 构建方式见下文“从源码运行”。
 
 所有剪贴板历史、图片和分类配置均保存在本机，不依赖云端服务。
 
@@ -23,7 +23,9 @@ ClipDeck 提供原生 macOS 客户端和 Qt Linux / UOS 客户端。它以屏幕
 
 ### 原生 Deck 体验
 
-- 通过全局快捷键或左键点击菜单栏图标呼出 Deck
+- 通过全局快捷键或左键点击菜单栏 / 托盘图标呼出 Deck
+- 焦点离开 Deck 及其预览框、编辑框时自动收起
+- 菜单栏 / 托盘菜单提供“背景模糊”开关，在磨砂透明与不透明深色背景间切换
 - 在鼠标所在的显示器上弹出，支持多显示器
 - 从屏幕底部调整高度，并记住上次使用的 Deck 高度
 - 卡片随高度在紧凑模式和展开模式之间自适应切换
@@ -69,7 +71,12 @@ ClipDeck 提供原生 macOS 客户端和 Qt Linux / UOS 客户端。它以屏幕
 - 代码
 - 色彩
 
-分类按顺序匹配，支持拖动排序。所有内置分类与用户创建的分类使用相同的数据模型，均可修改名称、图标、预览语言和 JavaScript 分类规则，也可以恢复为系统预设。
+分类按顺序匹配，支持拖动排序。所有内置分类与用户创建的分类使用相同的数据模型，均可修改名称、颜色、卡片类型和 JavaScript 分类规则，也可以恢复为系统预设。
+
+- 颜色：6 种预设色或自定义颜色，分类列表与 Deck 分类栏显示同一圆点颜色
+- 卡片类型：纯文本、代码（自动识别语言并着色）、链接、色彩
+- 内置规则在识别率与误判之间做了平衡，例如带句号的英文句子不会被当作 SQL，单个数字或空对象不会被当作 JSON
+- 编辑文本卡片并保存后会重新分类，内容不再匹配时标签随之更新
 
 <p align="center">
   <img src="docs/images/categories.png" alt="ClipDeck 自动分类与自定义分类管理实机渲染">
@@ -81,7 +88,8 @@ ClipDeck 提供原生 macOS 客户端和 Qt Linux / UOS 客户端。它以屏幕
 
 - 分类新增、编辑、删除和排序
 - JavaScript 规则语法高亮与格式化
-- 公共 CodeMirror 6 编辑器，支持补全、自动缩进、Tab 缩进与注释快捷键
+- 公共 CodeMirror 6 编辑器，支持补全、自动缩进、Tab 缩进与注释快捷键；Windows 使用原生 QML 编辑器，提供同样的高亮与快捷键
+- 滚动时显示半透明滚动条；“展开编辑”在独立窗口中同时查看规则、测试与可用字段
 - 测试文本和规则即时验证
 - 测试结果显示 `console.log/info/warn/error/debug` 输出
 - 删除前确认
@@ -106,7 +114,7 @@ ClipDeck 使用可支持自定义的分类检测，并本地内置的 highlight.
 
 ### 内容专属展示
 
-- 链接：异步获取网页标题、站点图标和域名，失败时自动降级
+- 链接：复制后异步获取网页标题、站点图标、预览图和域名，失败时自动降级
 - 图片：透明棋盘背景、完整缩放预览，支持向左或向右旋转；macOS 预览框按宽高比动态调整，并限制最大尺寸
 - macOS 图片复制：兼容同时包含图片数据与文件 URL、仅图片文件 URL，以及 JPEG、HEIC、WebP 等图片表示
 - 颜色：识别 Hex、RGB 和 RGBA，并以实际颜色填充卡片
@@ -132,6 +140,7 @@ macOS 顶栏以 History、文本、图片、文件四个固定图标入口导航
 - macOS 14 或更高版本
 - Apple Silicon 或 Intel Mac
 - Xcode 16 或兼容 Swift 6 的开发环境（从源码构建时）
+- Windows：Windows 10 / 11 x64；从源码构建需要 Qt 6.5 或更高版本（已在 Qt 6.12 上验证）、MinGW-w64、CMake 3.21+ 与 Ninja
 - Linux：UOS 20 AMD64 / X11，构建与离线安装方式见 [Linux README](linux/README.md)
 
 ## 从源码运行
@@ -153,6 +162,15 @@ cd mac
 swift test
 ```
 
+Windows 使用 Qt 自带或 WinLibs 的 MinGW 工具链构建（将 Qt、MinGW、CMake 与 Ninja 加入 `PATH`）：
+
+```bash
+cmake -S windows -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=<Qt 安装目录>/mingw_64
+cmake --build build-win
+```
+
+构建产物为 `build-win/clipdeck.exe`，测试为同目录下的 `core-tests`、`store-tests`、`deck-tests` 与 `platform-tests`。运行 `platform-tests` 前请先退出 ClipDeck，否则测试写入的剪贴板内容会被记录进历史。
+
 Linux 在仓库根目录通过 Docker 构建：
 
 ```bash
@@ -162,9 +180,10 @@ bash linux/scripts/build-linux.sh
 ## 公共目录
 
 - `mac/`：Swift / AppKit / SwiftUI 客户端与测试
-- `linux/`：Qt 客户端、X11 剪贴板读取、后台历史处理与 Debian 打包脚本
+- `windows/`：Qt 6 + QML 客户端（Win32 剪贴板监听、托盘、全局快捷键、DWM 磨砂背景）与测试
+- `linux/`：Qt 客户端、X11 剪贴板读取、后台历史处理与 Debian 打包脚本；Windows 复用其中的 SQLite 数据层与默认分类规则
 - `script-editor/`：两端共用的 CodeMirror 6 编辑器，通过 WebView 桥接宿主
-- `shared/assets/`：共用 SVG、应用图标 PNG 与 Xcode 资源目录
+- `shared/assets/`：三端共用的图标（菜单栏 / 托盘 SVG、应用图标 PNG、Windows ICO），均由 `generate_icons.py` 从同一设计生成
 
 编辑公共编辑器后，在 `script-editor/` 中执行 `npm ci`、`npm run check` 和 `npm run build`；生成的 `dist/` 随客户端离线打包。
 
@@ -176,6 +195,7 @@ bash linux/scripts/build-linux.sh
 - JavaScriptCore
 - highlight.js（随应用本地打包，不从网络加载）
 - Carbon 全局快捷键
+- Windows：Qt 6 + QML、Win32 / DWM API，QJSEngine 运行分类规则与 highlight.js
 
 macOS 运行说明见 [RUNNING.md](mac/RUNNING.md)，更新说明见 [CHANGELOG.md](mac/CHANGELOG.md)。Linux 使用独立的 X11 读取线程与后台历史处理队列，在界面线程之外完成剪贴板读取、持久化和来源应用识别，并按需加载完整卡片内容。
 
