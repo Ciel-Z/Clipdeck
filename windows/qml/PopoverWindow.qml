@@ -1,4 +1,5 @@
 import QtQuick
+import ClipDeck.Native
 import QtQuick.Effects
 import QtQuick.Shapes
 import QtQuick.Window
@@ -213,6 +214,12 @@ Window {
                     color: Qt.rgba(1, 1, 1, 0.92)
                     selectionColor: "#0A84FF"
                     font { family: popup.info.monospaced ? popup.monoFont : popup.uiFont; pixelSize: 14 }
+                    // PreviewTextScrollView: same colours as the card.
+                    SyntaxHighlight {
+                        document: previewText.textDocument
+                        language: popup.info.previewLanguage || ""
+                        palette: "deck"
+                    }
                 }
                 Connections {
                     target: deck
@@ -416,6 +423,12 @@ Window {
                         font { family: popup.info.monospaced ? popup.monoFont : popup.uiFont; pixelSize: popup.info.monospaced ? 15 : 17 }
                         onCursorRectangleChanged: editorScroll.ensureVisible(cursorRectangle)
                         Keys.onPressed: (event) => popup.handleEditorKey(event)
+                        // SyntaxTextEditor: colours follow the edit as it is typed.
+                        SyntaxHighlight {
+                            document: textEditor.textDocument
+                            language: popup.info.editableLanguage || ""
+                            palette: "deck"
+                        }
                     }
                 }
             }

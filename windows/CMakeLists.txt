@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(ClipDeckWindows VERSION 0.1.0 LANGUAGES CXX)
+project(ClipDeckWindows VERSION 0.1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,17 +57,26 @@ target_link_libraries(clipdeck-store PUBLIC clipdeck-core)
 add_library(clipdeck-app STATIC
   src/app/deck_presentation.cpp
   src/app/deck_backdrop.cpp
+  src/app/code_highlight.cpp
   src/app/deck_image_provider.cpp
   src/app/deck_item_model.cpp
   src/app/deck_controller.cpp
   src/app/app_preferences.cpp
   src/app/javascript_formatter.cpp
   src/app/settings_controller.cpp
+  src/app/link_metadata_fetcher.cpp
 )
 target_include_directories(clipdeck-app PUBLIC src/app)
-target_link_libraries(clipdeck-app PUBLIC clipdeck-store clipdeck-platform Qt6::Quick)
+target_link_libraries(clipdeck-app PUBLIC clipdeck-store clipdeck-platform Qt6::Quick Qt6::Network)
+# highlight.js is shared with the mac client (CodeHighlightService).
+set(MAC_RESOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../mac/Sources/ClipDeck/Resources")
+qt_add_resources(clipdeck-app "highlight_js"
+  PREFIX "/highlight"
+  BASE "${MAC_RESOURCES}"
+  FILES "${MAC_RESOURCES}/highlight.min.js"
+)
 
-qt_add_executable(clipdeck WIN32 src/app/main.cpp)
+qt_add_executable(clipdeck WIN32 src/app/main.cpp resources/clipdeck.rc)
 qt_add_qml_module(clipdeck
   URI ClipDeck
   VERSION 1.0
@@ -96,12 +105,20 @@ qt_add_qml_module(clipdeck
     qml/TextButton.qml
     qml/CategorySettings.qml
     qml/DropShadow.qml
+    qml/ScriptEditor.qml
+    qml/ExpandedScriptEditor.qml
+    qml/OverlayScrollBar.qml
+    qml/ColorPicker.qml
+    qml/SegmentedControl.qml
 )
-set(APP_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/../shared/assets/Assets.xcassets/AppIcon.appiconset")
+# Windows icons stand on a transparent background (the mac AppIcon is a tile).
+set(APP_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/../shared/assets/windows")
 qt_add_resources(clipdeck "app_icons"
   PREFIX "/icons"
   BASE "${APP_ICONS}"
-  FILES "${APP_ICONS}/icon-16.png" "${APP_ICONS}/icon-32.png" "${APP_ICONS}/icon-64.png"
+  FILES "${APP_ICONS}/icon-16.png" "${APP_ICONS}/icon-20.png" "${APP_ICONS}/icon-24.png"
+        "${APP_ICONS}/icon-32.png" "${APP_ICONS}/icon-40.png" "${APP_ICONS}/icon-48.png"
+        "${APP_ICONS}/icon-64.png" "${APP_ICONS}/icon-256.png"
 )
 target_link_libraries(clipdeck PRIVATE clipdeck-app)
 

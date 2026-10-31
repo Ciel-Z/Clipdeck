@@ -15,6 +15,11 @@ void setRetentionDays(int days);
 bool preserveFormatting();
 void setPreserveFormatting(bool preserve);
 
+// material/blur (the Linux key): non-zero frosts the screen behind the Deck,
+// 0 shows the live desktop under a plain tint. On by default here, like mac.
+bool backdropBlur();
+void setBackdropBlur(bool enabled);
+
 bool recordsImages();
 void setRecordsImages(bool records);
 int maximumImageMegabytes();

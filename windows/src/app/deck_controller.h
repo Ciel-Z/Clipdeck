@@ -2,12 +2,14 @@
 
 #include "deck_item_model.h"
 #include "history_store.h"
+#include "link_metadata_fetcher.h"
 #include "settings_controller.h"
 #include "win_capture_service.h"
 #include "win_global_hotkey.h"
 #include "win_paste_service.h"
 #include "win_tray.h"
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QQuickWindow>
@@ -41,6 +43,9 @@ class DeckController final : public QObject {
     // so resizing never resizes the native window (or its swap chain).
     Q_PROPERTY(qreal deckHeight READ deckHeight NOTIFY deckHeightChanged)
     Q_PROPERTY(QString backdropUrl READ backdropUrl NOTIFY backdropChanged)
+    // Linux tray "背景模糊": a frosted snapshot behind the Deck, or the live
+    // desktop under a plain tint (QSettings material/blur, shared with Linux).
+    Q_PROPERTY(bool backdropBlur READ backdropBlur WRITE setBackdropBlur NOTIFY backdropChanged)
     // Preview / edit / rename popover: {kind: "" | "preview" | "edit" | "rename", index, …}
     Q_PROPERTY(QVariantMap popover READ popover NOTIFY popoverChanged)
     // Configurable in Settings → 键盘快捷键 (Qt::KeyboardModifier / Qt::Key values).
@@ -71,6 +76,8 @@ public:
     bool deckVisible() const { return window_ && window_->isVisible(); }
     qreal deckHeight() const { return deckHeight_; }
     QString backdropUrl() const;
+    bool backdropBlur() const { return backdropBlur_; }
+    void setBackdropBlur(bool enabled);
 
     // Window
     Q_INVOKABLE void toggle(const QString &trigger);
@@ -149,10 +156,13 @@ private:
     void registerHotkey();
     void refreshPopover();
     void publishPopover();
+    std::optional<ClipboardItem> storeItem(const QUuid &id) const;
     bool selectIndex(int index);
     void refreshModel();
     void loadPersistedHistory();
     void onCaptured(quint64 sequence);
+    // Fetches page title, icon and preview for web links that lack them.
+    void refreshLinkMetadata(const QVector<ClipboardItem> &items);
     void performSearch(const QString &query);
     void pasteItem(const ClipboardItem &item, bool plainText);
     void deliverPaste(const ClipboardItem &item, bool plainText);
@@ -161,6 +171,19 @@ private:
     void applyEffects();
     void onActiveChanged();
     HWND deckWindow() const;
+
+public:
+    // windowDidResignKey: hides the Deck once the foreground window is neither
+    // the Deck nor one of its popovers (preview, editor, context menu). Driven
+    // by a system-wide foreground hook, because with a popover focused the
+    // Deck window itself never sees the activation move to another app.
+    void checkForeground();
+
+private:
+    HWINEVENTHOOK foregroundHook_ = nullptr;
+    // Clicking the tray icon first makes the taskbar the foreground window,
+    // which hides the Deck; the tray's toggle must not then reopen it.
+    QElapsedTimer focusHide_;
 
     HistoryStore store_;
     HistoryRepository repository_; // GUI-thread connection for edits (Linux does the same)
@@ -178,6 +201,7 @@ private:
     ClipboardItem popoverItem_;
     HWND target_ = nullptr;
     QTimer searchDebounce_;
+    LinkMetadataFetcher linkMetadata_;
     QTimer clock_;
     quint64 searchGeneration_ = 0;
     bool resizing_ = false;
@@ -187,4 +211,5 @@ private:
     qreal minimumHeight_ = 250;
     qreal maximumHeight_ = 420;
     int backdropRevision_ = 0;
+    bool backdropBlur_ = true;
 };

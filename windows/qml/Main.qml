@@ -56,10 +56,13 @@ Window {
         focus: true
 
         // Material (DeckMaterialView): the frosted screen behind the Deck,
-        // clipped to 24 pt corners, then the vibrancy tint, black 20 % and
-        // white 6 % → clear → black 6 %.
+        // clipped to 24 pt corners, then a light tint, black 14 % (mac 20 %,
+        // whose material already lets less through) and
+        // white 6 % → clear → black 6 %. With 背景模糊 off (tray menu, as on
+        // Linux) the live desktop shows through black 37 % instead.
         Item {
             id: material
+            visible: deck.backdropBlur
             anchors.fill: parent
             layer.enabled: true
             layer.effect: MultiEffect {
@@ -77,9 +80,11 @@ Window {
                 smooth: true
                 cache: false
             }
+            // underWindowBackground lets much of the desktop through; this
+            // tint only evens out the brightest wallpapers.
             Rectangle {
                 anchors.fill: parent
-                color: Qt.rgba(0.118, 0.118, 0.125, 0.51)
+                color: Qt.rgba(0.118, 0.118, 0.125, 0.22)
             }
         }
         Rectangle {
@@ -93,7 +98,7 @@ Window {
         Rectangle {
             anchors.fill: parent
             radius: 24
-            color: Qt.rgba(0, 0, 0, 0.20)
+            color: Qt.rgba(0, 0, 0, deck.backdropBlur ? 0.14 : 0.37)
         }
         Rectangle {
             anchors.fill: parent
@@ -333,6 +338,7 @@ Window {
                 required categoryLabel
                 required time
                 required text
+                required highlightedText
                 required characterCount
                 required monospaced
                 required imageUrl

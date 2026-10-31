@@ -133,7 +133,10 @@ public:
     void beginRenamingSelection();
     void cancelRenaming();
     void updateRenamingItem(const QString &title);
-    void updateEditingItem(const ClipboardPayload &payload, std::optional<int> imageAngle = std::nullopt);
+    // category: the result of classifying edited text (Linux re-classifies
+    // on save; categories are automatic, so the old one may no longer apply).
+    void updateEditingItem(const ClipboardPayload &payload, std::optional<int> imageAngle = std::nullopt,
+                           std::optional<QString> category = std::nullopt);
     void updateLinkMetadata(const QUuid &itemId, std::optional<QString> title,
                             std::optional<QByteArray> iconData, std::optional<QByteArray> previewData);
 

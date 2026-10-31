@@ -7,9 +7,13 @@
 WinTray::WinTray(const QIcon &icon, QObject *parent) : QObject(parent), tray_(icon), menu_(new QMenu) {
     // The shortcut text mirrors the mac menu key equivalents (⌘, and ⌘Q).
     settingsAction_ = menu_->addAction(QStringLiteral("设置…\tCtrl+,"));
+    // Same item as the Linux tray: frosted backdrop on, or the live desktop.
+    blurAction_ = menu_->addAction(QStringLiteral("背景模糊"));
+    blurAction_->setCheckable(true);
     menu_->addSeparator();
     quitAction_ = menu_->addAction(QStringLiteral("退出 ClipDeck\tCtrl+Q"));
     connect(settingsAction_, &QAction::triggered, this, &WinTray::settingsRequested);
+    connect(blurAction_, &QAction::toggled, this, &WinTray::blurToggled);
     connect(quitAction_, &QAction::triggered, this, &WinTray::quitRequested);
 
     tray_.setContextMenu(menu_.get());
@@ -20,6 +24,11 @@ WinTray::WinTray(const QIcon &icon, QObject *parent) : QObject(parent), tray_(ic
 WinTray::~WinTray() {
     tray_.setContextMenu(nullptr);
     tray_.hide();
+}
+
+void WinTray::setBlurChecked(bool checked) {
+    const QSignalBlocker blocker(blurAction_);
+    blurAction_->setChecked(checked);
 }
 
 void WinTray::show() { tray_.show(); }

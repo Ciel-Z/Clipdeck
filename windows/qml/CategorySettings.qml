@@ -1,4 +1,5 @@
 import QtQuick
+import ClipDeck.Native
 
 // categoryWorkspace: the category list (210, drag to reorder) and the editor
 // (basic info, JavaScript rule, rule test).
@@ -12,7 +13,7 @@ Item {
     // "保存更改" carries ⌘S on mac for the whole pane, not just the script editor.
     Shortcut {
         sequence: "Ctrl+S"
-        enabled: settings.selectedCategoryId >= 0
+        enabled: settings.selectedCategoryId >= 0 && !expandedEditor.visible
         onActivated: settings.saveCategory()
     }
 
@@ -42,7 +43,7 @@ Item {
                     icon: "restore"
                     tooltip: "还原预制分类"
                     onClicked: workspace.confirmDialog.ask("还原预制分类？",
-                        "缺失的预制分类会被重新创建，同名预制分类的图标、规则和预览语言会恢复默认；其他自建分类会保留。",
+                        "缺失的预制分类会被重新创建，同名预制分类的颜色、规则和卡片显示方式会恢复默认；其他自建分类会保留。",
                         "还原预制分类", false, () => settings.restorePresets())
                 }
                 IconButton { width: 28; height: 28; icon: "plus"; tooltip: "新增分类"; onClicked: settings.addCategory() }
@@ -56,7 +57,7 @@ Item {
             if (categoryList.dragging) return
             categoryModel.clear()
             for (const category of settings.categories)
-                categoryModel.append({ categoryId: category.id, name: category.name, icon: category.icon || "#" })
+                categoryModel.append({ categoryId: category.id, name: category.name, dotColor: category.color })
         }
         Connections {
             target: settings
@@ -79,7 +80,7 @@ Item {
                 id: row
                 required property var categoryId
                 required property string name
-                required property string icon
+                required property string dotColor
                 required property int index
                 readonly property bool selected: settings.selectedCategoryId === categoryId
                 width: categoryList.width
@@ -89,18 +90,20 @@ Item {
                 opacity: categoryList.dragging && gripMouse.pressed ? 0.6 : 1
 
                 MouseArea { anchors.fill: parent; onClicked: settings.selectCategory(row.categoryId) }
-                Text {
-                    id: iconText
+                // The same dot the category's capsule shows in the Deck.
+                Item {
+                    id: dot
                     x: 11
-                    width: 20
+                    width: 20; height: 20
                     anchors.verticalCenter: parent.verticalCenter
-                    horizontalAlignment: Text.AlignHCenter
-                    text: row.icon
-                    color: Qt.rgba(1, 1, 1, row.selected ? 0.95 : 0.55)
-                    font { family: workspace.uiFont; pixelSize: 13; weight: Font.DemiBold }
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 11; height: 11; radius: 5.5
+                        color: row.dotColor
+                    }
                 }
                 Text {
-                    anchors.left: iconText.right
+                    anchors.left: dot.right
                     anchors.leftMargin: 9
                     anchors.right: grip.left
                     anchors.verticalCenter: parent.verticalCenter
@@ -176,9 +179,10 @@ Item {
         x: listPane.width + 1
         width: parent.width - x
         height: parent.height
-        maximumWidth: 820
+        // Wider than the other panes: the script editor uses the room.
+        maximumWidth: 1120
         title: "编辑分类"
-        subtitle: "调整名称、内容预览方式和自动分类规则"
+        subtitle: "调整名称、颜色、卡片显示方式和自动分类规则"
 
         SettingsSection {
             title: "基本信息"
@@ -204,12 +208,100 @@ Item {
                 }
             }
             SettingsRow {
-                title: "预览语言"
+                title: "颜色"
+                subtitle: "列表和 Deck 分类栏中显示的圆点颜色"
                 divider: false
-                DropDown {
-                    options: settings.previewLanguages().map(language => ({ value: language, text: language }))
-                    value: settings.categoryPreviewLanguage
-                    onActivated: (value) => settings.categoryPreviewLanguage = value
+                Row {
+                    spacing: 10
+                    Repeater {
+                        model: settings.categoryColors()
+                        delegate: Item {
+                            required property string modelData
+                            readonly property bool chosen: settings.categoryColor.toUpperCase() === modelData.toUpperCase()
+                            width: 24; height: 24
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: width / 2
+                                color: "transparent"
+                                border.width: 2
+                                border.color: parent.chosen ? "white" : "transparent"
+                            }
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 16; height: 16; radius: 8
+                                color: modelData
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: settings.categoryColor = modelData
+                            }
+                        }
+                    }
+                    // Custom colour: a hue wheel until a colour outside the
+                    // presets is chosen, then that colour.
+                    Item {
+                        id: customSwatch
+                        readonly property bool chosen: settings.categoryColors()
+                            .every(preset => preset.toUpperCase() !== settings.categoryColor.toUpperCase())
+                        width: 24; height: 24
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: width / 2
+                            color: "transparent"
+                            border.width: 2
+                            border.color: customSwatch.chosen ? "white" : "transparent"
+                        }
+                        Canvas {
+                            id: wheel
+                            anchors.centerIn: parent
+                            width: 16; height: 16
+                            visible: !customSwatch.chosen
+                            onPaint: {
+                                const context = getContext("2d")
+                                const gradient = context.createConicalGradient(8, 8, 0)
+                                const stops = ["#FF0000", "#FF00FF", "#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000"]
+                                stops.forEach((stop, index) => gradient.addColorStop(index / 6, stop))
+                                context.fillStyle = gradient
+                                context.beginPath()
+                                context.arc(8, 8, 8, 0, Math.PI * 2)
+                                context.fill()
+                            }
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 16; height: 16; radius: 8
+                            visible: customSwatch.chosen
+                            color: settings.categoryColor
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                colorPicker.color = settings.categoryColor
+                                colorPicker.open(customSwatch)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        SettingsSection {
+            title: "卡片显示"
+            SettingsRow {
+                id: cardTypeRow
+                readonly property var choices: settings.cardTypes()
+                title: "卡片类型"
+                subtitle: {
+                    for (const choice of choices) if (choice.value === settings.categoryCardType) return choice.detail
+                    return ""
+                }
+                divider: false
+                SegmentedControl {
+                    options: cardTypeRow.choices
+                    value: settings.categoryCardType
+                    onActivated: (value) => settings.categoryCardType = value
                 }
             }
         }
@@ -226,43 +318,27 @@ Item {
                     color: workspace.secondary
                     font { family: workspace.uiFont; pointSize: 12.5 * 0.75 }
                 }
-                TextButton {
+                Row {
                     anchors.right: parent.right
                     anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "格式化"
-                    onClicked: settings.formatScript()
+                    spacing: 8
+                    TextButton {
+                        text: "格式化"
+                        onClicked: settings.formatScript()
+                    }
+                    TextButton {
+                        text: "⤢  展开编辑"
+                        onClicked: expandedEditor.open()
+                    }
                 }
                 Rectangle { anchors.bottom: parent.bottom; x: 16; width: parent.width - 16; height: 1; color: Qt.rgba(1, 1, 1, 0.08) }
             }
-            Flickable {
-                id: scriptScroll
+            ScriptEditor {
+                id: scriptEditor
                 width: parent.width
-                height: 280
-                contentHeight: scriptEditor.paintedHeight + 24
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                function ensureVisible(r) {
-                    if (contentY >= r.y) contentY = r.y
-                    else if (contentY + height <= r.y + r.height + 24) contentY = r.y + r.height + 24 - height
-                }
-                TextEdit {
-                    id: scriptEditor
-                    x: 16; y: 12
-                    width: scriptScroll.width - 32
-                    // Fill the visible area so a click below the last line still focuses it.
-                    height: Math.max(paintedHeight, scriptScroll.height - 24)
-                    text: settings.categoryScript
-                    onTextChanged: if (text !== settings.categoryScript) settings.categoryScript = text
-                    textFormat: TextEdit.PlainText
-                    wrapMode: TextEdit.Wrap
-                    selectByMouse: true
-                    color: "white"
-                    selectionColor: "#0A84FF"
-                    font { family: workspace.monoFont; pixelSize: 13 }
-                    onCursorRectangleChanged: scriptScroll.ensureVisible(cursorRectangle)
-                    Keys.onPressed: (event) => workspace.handleScriptKey(event)
-                }
+                // Grows with a taller (maximised) window; 280 at the default size.
+                height: Math.round(Math.max(280, Math.min(760, editor.height - 420)))
             }
             Rectangle { x: 16; width: parent.width - 16; height: 1; color: Qt.rgba(1, 1, 1, 0.08) }
             Item {
@@ -397,29 +473,11 @@ Item {
         }
     }
 
-    // Ctrl+S saves, Ctrl+Enter tests, Tab indents, Ctrl+/ toggles "// ".
-    function handleScriptKey(event) {
-        const ctrl = (event.modifiers & Qt.ControlModifier) !== 0
-        if (ctrl && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { settings.testScript(); event.accepted = true }
-        else if (ctrl && event.key === Qt.Key_Slash) { toggleComment(); event.accepted = true }
-        else if (event.key === Qt.Key_Tab && event.modifiers === Qt.NoModifier) { scriptEditor.insert(scriptEditor.cursorPosition, "    "); event.accepted = true }
-    }
+    // Nested in the pane, so its transient parent is the settings window.
+    ExpandedScriptEditor { id: expandedEditor }
 
-    function toggleComment() {
-        const text = scriptEditor.text
-        const start = text.lastIndexOf("\n", scriptEditor.selectionStart - 1) + 1
-        let end = text.indexOf("\n", Math.max(scriptEditor.selectionEnd - (scriptEditor.selectionEnd > scriptEditor.selectionStart ? 1 : 0), start))
-        if (end < 0) end = text.length
-        const lines = text.substring(start, end).split("\n")
-        const commented = lines.every(line => line.trim() === "" || line.trim().startsWith("//"))
-        const changed = lines.map(line => {
-            if (line.trim() === "") return line
-            if (commented) return line.replace(/^(\s*)\/\/ ?/, "$1")
-            const indent = line.match(/^\s*/)[0]
-            return indent + "// " + line.substring(indent.length)
-        }).join("\n")
-        const cursor = scriptEditor.cursorPosition
-        settings.categoryScript = text.substring(0, start) + changed + text.substring(end)
-        scriptEditor.cursorPosition = Math.min(cursor, scriptEditor.length)
+    ColorPicker {
+        id: colorPicker
+        onPicked: (hex) => settings.categoryColor = hex
     }
 }

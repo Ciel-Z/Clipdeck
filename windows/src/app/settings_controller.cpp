@@ -36,6 +36,10 @@ void SettingsController::attachWindow(QWindow *window) {
     if (window) WinEffects::setDarkTitleBar(reinterpret_cast<HWND>(window->winId()));
 }
 
+void SettingsController::decorateSheet(QWindow *window) {
+    if (window) WinEffects::setFramelessChrome(reinterpret_cast<HWND>(window->winId()));
+}
+
 void SettingsController::open(const QString &pane) {
     if (!pane.isEmpty()) setPane(pane);
     refreshDatabaseSize();
@@ -141,10 +145,11 @@ void SettingsController::reportHotkeyError(const QString &error) {
 
 QVariantList SettingsController::categories() const {
     QVariantList list;
+    int position = 0;
     for (const ClipboardCategory &category : categories_) {
         list.append(QVariantMap{{QStringLiteral("id"), category.databaseID},
                                 {QStringLiteral("name"), category.name},
-                                {QStringLiteral("icon"), category.icon},
+                                {QStringLiteral("color"), HistoryRepository::categoryColor(category.icon, position++)},
                                 {QStringLiteral("previewLanguage"), category.previewLanguage}});
     }
     return list;
@@ -162,11 +167,13 @@ void SettingsController::reloadCategories(qint64 select) {
 
 void SettingsController::selectCategory(qint64 id) {
     selectedId_ = id;
-    for (const ClipboardCategory &category : categories_) {
+    for (int position = 0; position < categories_.size(); ++position) {
+        const ClipboardCategory &category = categories_.at(position);
         if (category.databaseID != id) continue;
         name_ = category.name;
         script_ = category.script;
         previewLanguage_ = category.previewLanguage.isEmpty() ? QStringLiteral("text") : category.previewLanguage;
+        color_ = HistoryRepository::categoryColor(category.icon, position);
         break;
     }
     testResult_.clear();
@@ -188,6 +195,12 @@ void SettingsController::setCategoryPreviewLanguage(const QString &language) {
     Q_EMIT categoryEditorChanged();
 }
 
+void SettingsController::setCategoryColor(const QString &color) {
+    if (color == color_) return;
+    color_ = color;
+    Q_EMIT categoryEditorChanged();
+}
+
 void SettingsController::setCategoryScript(const QString &script) {
     if (script == script_) return;
     script_ = script;
@@ -201,7 +214,8 @@ void SettingsController::setTestText(const QString &text) {
 }
 
 void SettingsController::addCategory() {
-    if (!repository_->createCategory(QStringLiteral("新分类"), QStringLiteral("{}"),
+    const QStringList palette = HistoryRepository::categoryColorPalette();
+    if (!repository_->createCategory(QStringLiteral("新分类"), palette.at(categories_.size() % palette.size()),
                                      QStringLiteral("function classify(item) {\n    return false;\n}"), QString())) {
         error_ = repository_->lastError();
         Q_EMIT categoryEditorChanged();
@@ -215,17 +229,13 @@ void SettingsController::addCategory() {
 
 void SettingsController::saveCategory() {
     if (selectedId_ < 0 || name_.trimmed().isEmpty()) return;
-    QString icon;
-    for (const ClipboardCategory &category : categories_) {
-        if (category.databaseID == selectedId_) icon = category.icon;
-    }
     const QString scriptError = repository_->categoryScriptError(script_);
     if (!scriptError.isEmpty()) {
         error_ = scriptError;
         Q_EMIT categoryEditorChanged();
         return;
     }
-    if (!repository_->updateCategory(selectedId_, name_.trimmed(), icon, script_,
+    if (!repository_->updateCategory(selectedId_, name_.trimmed(), color_, script_,
                                      previewLanguage_ == QLatin1String("text") ? QString() : previewLanguage_)) {
         error_ = repository_->lastError();
         Q_EMIT categoryEditorChanged();
@@ -283,10 +293,22 @@ void SettingsController::testScript() {
 
 void SettingsController::formatScript() { setCategoryScript(JavaScriptFormatter::format(script_)); }
 
-QStringList SettingsController::previewLanguages() const {
-    return {QStringLiteral("text"),  QStringLiteral("code"),     QStringLiteral("json"),       QStringLiteral("sql"),
-            QStringLiteral("java"),  QStringLiteral("javascript"), QStringLiteral("color"),    QStringLiteral("shell"),
-            QStringLiteral("markdown"), QStringLiteral("xml"),   QStringLiteral("yaml")};
+static QVariantList displayChoices(const QVector<HistoryRepository::DisplayChoice> &choices) {
+    QVariantList list;
+    for (const auto &choice : choices) {
+        list.append(QVariantMap{{QStringLiteral("value"), choice.value},
+                                {QStringLiteral("text"), choice.label},
+                                {QStringLiteral("detail"), choice.detail}});
+    }
+    return list;
+}
+
+QVariantList SettingsController::cardTypes() const { return displayChoices(HistoryRepository::cardTypeChoices()); }
+
+QString SettingsController::categoryCardType() const { return HistoryRepository::cardTypeOf(previewLanguage_); }
+
+void SettingsController::setCategoryCardType(const QString &cardType) {
+    setCategoryPreviewLanguage(HistoryRepository::previewLanguageForCardType(cardType, previewLanguage_));
 }
 
 // MARK: - 数据

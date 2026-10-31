@@ -1,3 +1,4 @@
+#include "code_highlight.h"
 #include "deck_controller.h"
 #include "deck_image_provider.h"
 
@@ -58,6 +59,7 @@ int main(int argc, char *argv[]) {
 
     QQmlApplicationEngine engine;
     engine.addImageProvider(QStringLiteral("deck"), images);
+    qmlRegisterType<SyntaxHighlightAttachment>("ClipDeck.Native", 1, 0, "SyntaxHighlight");
     engine.rootContext()->setContextProperty(QStringLiteral("deck"), &controller);
     engine.rootContext()->setContextProperty(QStringLiteral("settings"), controller.settings());
     engine.loadFromModule(QStringLiteral("ClipDeck"), QStringLiteral("Main"));
@@ -67,10 +69,12 @@ int main(int argc, char *argv[]) {
     if (engine.rootObjects().size() < 2) return 3;
     controller.settings()->attachWindow(qobject_cast<QWindow *>(engine.rootObjects().at(1)));
 
+    // Every size the tray and title bar use at 100–250 % scaling, so Windows
+    // never scales a neighbouring size and blurs it.
     QIcon trayIcon;
-    trayIcon.addFile(QStringLiteral(":/icons/icon-16.png"));
-    trayIcon.addFile(QStringLiteral(":/icons/icon-32.png"));
-    trayIcon.addFile(QStringLiteral(":/icons/icon-64.png"));
+    for (const int size : {16, 20, 24, 32, 40, 48, 64, 256}) {
+        trayIcon.addFile(QStringLiteral(":/icons/icon-%1.png").arg(size));
+    }
     QApplication::setWindowIcon(trayIcon);
     controller.start(window, trayIcon);
 

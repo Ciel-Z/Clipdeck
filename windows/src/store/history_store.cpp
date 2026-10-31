@@ -469,12 +469,24 @@ void HistoryStore::updateRenamingItem(const QString &title) {
     if (onUpdate) onUpdate(updated);
 }
 
-void HistoryStore::updateEditingItem(const ClipboardPayload &payload, std::optional<int> imageAngle) {
+void HistoryStore::updateEditingItem(const ClipboardPayload &payload, std::optional<int> imageAngle,
+                                     std::optional<QString> category) {
     const std::optional<ClipboardItem> current = editingItem();
     if (!current) return;
     ClipboardItem updated = *current;
     payload.applyTo(updated);
     if (imageAngle) updated.imageAngle = ((*imageAngle % 360) + 360) % 360;
+    if (category) {
+        // Re-classified text takes the category's look (preview language, icon).
+        updated.category = *category;
+        updated.categoryIcon.clear();
+        updated.previewLanguage.clear();
+        for (const ClipboardCategory &automatic : automaticCategories_) {
+            if (automatic.name != *category) continue;
+            updated.categoryIcon = automatic.icon;
+            updated.previewLanguage = automatic.previewLanguage;
+        }
+    }
     replace(*current, updated, items_);
     Q_EMIT itemsChanged();
     replace(*current, updated, searchResults_);

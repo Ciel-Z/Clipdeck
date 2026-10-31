@@ -40,6 +40,9 @@ class SettingsController final : public QObject {
     Q_PROPERTY(qint64 selectedCategoryId READ selectedCategoryId NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString categoryName READ categoryName WRITE setCategoryName NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString categoryPreviewLanguage READ categoryPreviewLanguage WRITE setCategoryPreviewLanguage NOTIFY categoryEditorChanged)
+    // text / code / url / color, derived from categoryPreviewLanguage.
+    Q_PROPERTY(QString categoryCardType READ categoryCardType WRITE setCategoryCardType NOTIFY categoryEditorChanged)
+    Q_PROPERTY(QString categoryColor READ categoryColor WRITE setCategoryColor NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString categoryScript READ categoryScript WRITE setCategoryScript NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString testText READ testText WRITE setTestText NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString testResult READ testResult NOTIFY testChanged)
@@ -56,6 +59,8 @@ public:
 
     void attachWindow(QWindow *window);
     Q_INVOKABLE void open(const QString &pane = QString());
+    // Rounded corners + shadow for the self-drawn sheet windows (展开编辑).
+    Q_INVOKABLE void decorateSheet(QWindow *window);
 
     QString pane() const { return pane_; }
     void setPane(const QString &pane);
@@ -99,6 +104,8 @@ public:
     void setCategoryName(const QString &name);
     QString categoryPreviewLanguage() const { return previewLanguage_; }
     void setCategoryPreviewLanguage(const QString &language);
+    QString categoryColor() const { return color_; }
+    void setCategoryColor(const QString &color);
     QString categoryScript() const { return script_; }
     void setCategoryScript(const QString &script);
     QString testText() const { return testText_; }
@@ -115,7 +122,11 @@ public:
     Q_INVOKABLE void restorePresets();
     Q_INVOKABLE void testScript();
     Q_INVOKABLE void formatScript();
-    Q_INVOKABLE QStringList previewLanguages() const;
+    // How a category's cards are shown: {value, text, detail} for each choice.
+    Q_INVOKABLE QVariantList cardTypes() const;
+    QString categoryCardType() const;
+    void setCategoryCardType(const QString &cardType);
+    Q_INVOKABLE QStringList categoryColors() const { return HistoryRepository::categoryColorPalette(); }
 
     QString databaseSize() const;
     QString maintenanceStatus() const { return maintenanceStatus_; }
@@ -154,6 +165,7 @@ private:
     qint64 selectedId_ = -1;
     QString name_;
     QString previewLanguage_ = QStringLiteral("text");
+    QString color_;
     QString script_;
     QString testText_;
     QString testResult_;

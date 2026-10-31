@@ -12,6 +12,7 @@ Item {
     property string categoryLabel: ""
     property string time: ""
     property string text: ""
+    property string highlightedText: ""
     property var characterCount: 0
     property bool monospaced: false
     property string imageUrl: ""
@@ -280,8 +281,9 @@ Item {
                 anchors.rightMargin: 14
                 anchors.topMargin: card.expanded ? 13 : 37
                 anchors.bottomMargin: card.expanded ? 34 : 12
-                text: card.text
-                textFormat: Text.PlainText
+                // Code languages arrive as coloured rich text (SyntaxHighlighter).
+                text: card.highlightedText !== "" ? card.highlightedText : card.text
+                textFormat: card.highlightedText !== "" ? Text.RichText : Text.PlainText
                 color: Qt.rgba(1, 1, 1, 0.90)
                 font { family: card.monospaced ? card.monoFont : card.uiFont; pointSize: 13.5 * 0.75 }
                 lineHeightMode: Text.FixedHeight
@@ -360,9 +362,15 @@ Item {
         id: linkBody
         Item {
             readonly property real footerHeight: Math.min(88, Math.max(72, card.side * 0.23))
+            // As on mac (VStack): the preview fills the area above the footer,
+            // never behind it, so the og:image is not cropped by the footer.
             Image {
                 id: preview
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: card.expanded ? parent.height - parent.footerHeight : parent.height
+                clip: true
                 visible: card.linkPreviewUrl !== ""
                 source: card.linkPreviewUrl
                 fillMode: Image.PreserveAspectCrop
@@ -382,7 +390,7 @@ Item {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: parent.footerHeight
-                color: Qt.rgba(0, 0, 0, preview.visible ? 0.55 : 0.0)
+                color: "transparent"
                 Row {
                     anchors.fill: parent
                     anchors.leftMargin: 12

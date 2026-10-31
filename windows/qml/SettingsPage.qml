@@ -1,7 +1,8 @@
 import QtQuick
 
 // A settings pane: 25 pt bold title, 13 pt secondary subtitle, then sections
-// 24 pt apart; padding 38 × 26, at most 760 wide, scrolls vertically.
+// 24 pt apart; padding 38 × 26, at most maximumWidth wide and centred once the
+// window is wider than that (a maximised window), scrolls vertically.
 Flickable {
     id: page
     property string title: ""
@@ -16,7 +17,7 @@ Flickable {
 
     Column {
         id: column
-        x: 38
+        x: Math.max(38, (page.width - width) / 2)
         y: 26
         width: Math.min(page.maximumWidth, page.width) - 76
         spacing: 24

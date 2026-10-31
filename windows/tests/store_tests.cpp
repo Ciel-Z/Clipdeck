@@ -320,6 +320,34 @@ void testImageEditingStoresAngleWithoutChangingImagePayload() {
     check(store.items().first().imageAngle == 90, "image-edit-stores-angle");
 }
 
+void testEditingReclassifiesText() {
+    HistoryStore store;
+    ClipboardCategory json;
+    json.name = QStringLiteral("JSON");
+    json.icon = QStringLiteral("{}");
+    json.previewLanguage = QStringLiteral("json");
+    store.replaceCategories({json});
+    ClipboardItem original = item("{\"a\": 1}");
+    original.category = QStringLiteral("JSON");
+    original.previewLanguage = QStringLiteral("json");
+    store.insert(original);
+
+    store.beginEditing(original);
+    ClipboardPayload payload;
+    payload.text = QStringLiteral("now just words");
+    store.updateEditingItem(payload, std::nullopt, QString());
+    check(store.items().first().category.isEmpty() && store.items().first().previewLanguage.isEmpty(),
+          "edit-into-plain-text-drops-category");
+
+    store.beginEditing(store.items().first());
+    payload.text = QStringLiteral("{\"b\": 2}");
+    store.updateEditingItem(payload, std::nullopt, QStringLiteral("JSON"));
+    check(store.items().first().category == QStringLiteral("JSON")
+              && store.items().first().previewLanguage == QStringLiteral("json")
+              && store.items().first().categoryIcon == QStringLiteral("{}"),
+          "edit-into-json-takes-the-category-look");
+}
+
 void testEditingASummaryMarksTheTextComplete() {
     HistoryStore store;
     ClipboardItem summary = item(QString(3000, QLatin1Char('x')));
@@ -445,6 +473,7 @@ int main(int argc, char *argv[]) {
     testImageEditingStoresAngleWithoutChangingImagePayload();
     testFilesCannotBeEdited();
     testEditingASummaryMarksTheTextComplete();
+    testEditingReclassifiesText();
     testRenamingPersistsAndTitleParticipatesInLocalSearch();
     testQuickPasteOverlayTracksCommandModifierState();
     testLinkMetadataReplacesDefaultTitleOnce();

@@ -31,6 +31,9 @@ void setPreserveFormatting(bool preserve) {
     QSettings().setValue(QLatin1String(WinPasteService::preserveFormattingKey), preserve);
 }
 
+bool backdropBlur() { return QSettings().value(QStringLiteral("material/blur"), 1).toInt() > 0; }
+void setBackdropBlur(bool enabled) { QSettings().setValue(QStringLiteral("material/blur"), enabled ? 1 : 0); }
+
 bool recordsImages() { return QSettings().value(recordsImagesKey, true).toBool(); }
 void setRecordsImages(bool records) { QSettings().setValue(recordsImagesKey, records); }
 int maximumImageMegabytes() { return QSettings().value(maximumImageKey, 10).toInt(); }

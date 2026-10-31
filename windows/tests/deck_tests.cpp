@@ -5,10 +5,19 @@
 #include "deck_presentation.h"
 #include "app_preferences.h"
 #include "deck_backdrop.h"
+#include "code_highlight.h"
 #include "javascript_formatter.h"
+#include "link_metadata_fetcher.h"
 #include "settings_controller.h"
 
+#include <QFile>
 #include <QGuiApplication>
+#include <QQmlComponent>
+#include <QQmlEngine>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextLayout>
+#include <memory>
 #include <QSettings>
 
 #include <cstdio>
@@ -207,6 +216,135 @@ void backdropTests() {
     check(DeckBackdrop::frost(QImage()).isNull(), "backdrop-of-nothing-is-null");
 }
 
+QColor runColourAt(const QVector<CodeHighlight::Run> &runs, int position) {
+    for (const CodeHighlight::Run &run : runs) {
+        if (position >= run.start && position < run.start + run.length) return run.color;
+    }
+    return QColor();
+}
+
+void highlightTests() {
+    check(QFile::exists(QStringLiteral(":/highlight/highlight.min.js")), "highlight-js-is-bundled");
+    const QString js = QStringLiteral("const total = 42; // sum\nreturn \"ok\"");
+    const CodeHighlight::Result result = CodeHighlight::highlight(js, QStringLiteral("javascript"));
+    if (!CodeHighlight::engineError().isEmpty()) std::printf("%s\n", qPrintable(CodeHighlight::engineError()));
+    check(CodeHighlight::engineError().isEmpty(), "highlight-engine-runs");
+    check(result.text == js, "highlight-keeps-text");
+    check(result.language == QStringLiteral("javascript"), "highlight-reports-language");
+    bool keyword = false, comment = false;
+    for (const auto &span : result.spans) {
+        keyword = keyword || (span.scope == QStringLiteral("keyword") && js.mid(span.start, span.length) == QStringLiteral("const"));
+        comment = comment || (span.scope == QStringLiteral("comment") && js.mid(span.start, span.length) == QStringLiteral("// sum"));
+    }
+    check(keyword && comment, "highlight-spans-map-to-source");
+
+    const QString python = QStringLiteral("def greet(name):\n    return f\"hi {name}\"");
+    const CodeHighlight::Result detected = CodeHighlight::highlight(python, QStringLiteral("code"));
+    if (detected.language != QStringLiteral("python")) {
+        std::printf("detected '%s' (engine '%s') spans=%d error=%s\n", qPrintable(detected.language),
+                    qPrintable(HistoryRepository::detectedCodeLanguage(python)), int(detected.spans.size()),
+                    qPrintable(CodeHighlight::engineError()));
+    }
+    check(detected.language == QStringLiteral("python"), "code-auto-detects-language");
+    const auto codeRuns = CodeHighlight::colourRuns(python, QStringLiteral("code"));
+    check(runColourAt(codeRuns, 0) == QColor(191, 90, 242), "code-keywords-are-purple");
+
+    const QString json = QStringLiteral("{\"name\": \"x\", \"n\": 3}");
+    const auto jsonRuns = CodeHighlight::colourRuns(json, QStringLiteral("json"));
+    check(runColourAt(jsonRuns, 1) == QColor(10, 132, 255), "json-keys-are-blue");
+    check(runColourAt(jsonRuns, 9) == QColor(255, 159, 10), "json-strings-are-orange");
+    check(CodeHighlight::colourRuns(json, QStringLiteral("text")).isEmpty(), "plain-text-is-not-coloured");
+
+    const QString html = CodeHighlight::highlightedHtml(QStringLiteral("a < b && c\n  d"), QStringLiteral("javascript"),
+                                                        Qt::white);
+    check(html.contains(QStringLiteral("&lt;")) && html.contains(QStringLiteral("&amp;&amp;")), "highlighted-html-escapes");
+    check(html.contains(QStringLiteral("pre-wrap")), "highlighted-html-keeps-whitespace");
+
+    // A regex literal is one regexp token, keywords inside it included.
+    const QString regex = QStringLiteral("function classify(item) {\n    return /^(select|delete)\\b/i.test(item.text);\n}");
+    const CodeHighlight::Result regexResult = CodeHighlight::highlight(regex, QStringLiteral("javascript"));
+    const int deleteAt = int(regex.indexOf(QStringLiteral("delete")));
+    QString scopeAtDelete;
+    for (const auto &span : regexResult.spans) {
+        if (deleteAt >= span.start && deleteAt < span.start + span.length) scopeAtDelete = span.scope;
+    }
+    if (scopeAtDelete != QStringLiteral("regexp")) std::printf("delete inside a regex is '%s'\n", qPrintable(scopeAtDelete));
+    check(scopeAtDelete == QStringLiteral("regexp"), "regex-literal-is-one-token");
+
+    // Other rules built from patterns with '/' (V4 RegExp.source bug).
+    auto scopeAt = [](const CodeHighlight::Result &r, int position) {
+        for (const auto &span : r.spans) {
+            if (position >= span.start && position < span.start + span.length) return span.scope;
+        }
+        return QString();
+    };
+    const QString c = QStringLiteral("int a; /* note */");
+    check(scopeAt(CodeHighlight::highlight(c, QStringLiteral("c")), int(c.indexOf(QStringLiteral("note")))) == QStringLiteral("comment"),
+          "block-comment-is-highlighted");
+    const QString xml = QStringLiteral("<a href=\"x\">t</a>");
+    check(scopeAt(CodeHighlight::highlight(xml, QStringLiteral("xml")), int(xml.lastIndexOf(QStringLiteral("a>")))) == QStringLiteral("name"),
+          "closing-tag-is-highlighted");
+
+    // Every grammar the Deck asks for must compile in V4 (no silent fallbacks).
+    const QStringList languages = {"bash", "c", "cpp", "csharp", "css", "go", "java", "javascript", "json", "kotlin",
+                                   "lua", "objectivec", "php", "python", "ruby", "rust", "sql", "swift", "typescript",
+                                   "xml", "yaml", "markdown"};
+    QStringList broken;
+    for (const QString &language : languages) {
+        const auto sample = CodeHighlight::highlight(QStringLiteral("name = \"value\" // 1 <a href=\"x\">"), language);
+        if (sample.language != language) broken.append(language);
+    }
+    if (!broken.isEmpty()) std::printf("broken grammars: %s (%s)\n", qPrintable(broken.join(QLatin1Char(','))),
+                                       qPrintable(CodeHighlight::engineError()));
+    check(broken.isEmpty(), "all-grammars-run-in-v4");
+
+    const auto editorRuns = CodeHighlight::colourRuns(QStringLiteral("return true"), QStringLiteral("javascript"),
+                                                      CodeHighlight::Palette::Editor);
+    check(runColourAt(editorRuns, 0) == QColor(0xc6, 0x78, 0xdd), "editor-palette-uses-script-editor-theme");
+}
+
+void editorHighlightTests() {
+    qmlRegisterType<SyntaxHighlightAttachment>("ClipDeck.Native", 1, 0, "SyntaxHighlight");
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(R"(
+        import QtQuick
+        import ClipDeck.Native
+        TextEdit {
+            id: edit
+            textFormat: TextEdit.PlainText
+            text: "function f() {\n    return 'x';\n}"
+            SyntaxHighlight { document: edit.textDocument; language: "javascript"; palette: "editor" }
+        }
+    )", QUrl());
+    std::unique_ptr<QObject> edit(component.create());
+    if (!edit) std::printf("%s\n", qPrintable(component.errorString()));
+    check(bool(edit), "editor-highlight-component-loads");
+    if (!edit) return;
+    QCoreApplication::processEvents();
+    auto *document = edit->property("textDocument").value<QQuickTextDocument *>()->textDocument();
+    // Whether the text starting at `position` is drawn in the keyword colour.
+    auto keywordAt = [document](int position) {
+        const QTextBlock block = document->findBlock(position);
+        for (const QTextLayout::FormatRange &range : block.layout()->formats()) {
+            const int offset = position - block.position();
+            if (offset >= range.start && offset < range.start + range.length) {
+                return range.format.foreground().color() == QColor(0xc6, 0x78, 0xdd);
+            }
+        }
+        return false;
+    };
+    check(keywordAt(0), "editor-highlighter-colours-keywords");
+    edit->setProperty("text", QStringLiteral("x\nconst y = 1"));
+    QCoreApplication::processEvents();
+    check(keywordAt(2) && !keywordAt(0), "editor-recolours-replaced-text");
+    QTextCursor cursor(document);
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(QStringLiteral("\nreturn y"));
+    QCoreApplication::processEvents();
+    check(keywordAt(14), "editor-recolours-typed-text");
+}
+
 void modelTests() {
     auto *images = new DeckImageProvider;
     DeckItemModel model(images);
@@ -241,10 +379,38 @@ void modelTests() {
     model.setItems({renamed});
     check(resets == 1, "different-rows-reset");
     check(model.indexOf(renamed.id) == 0 && model.indexOf(picture.id) == -1, "index-of-by-identity");
+
+    ClipboardItem code = textItem(QStringLiteral("SELECT id FROM t"));
+    code.previewLanguage = QStringLiteral("sql");
+    model.setItems({code, text});
+    check(model.data(model.index(0), DeckItemModel::HighlightedTextRole).toString().contains(QStringLiteral("<span")),
+          "code-card-is-highlighted");
+    check(model.data(model.index(0), DeckItemModel::MonospacedRole).toBool(), "code-card-is-monospaced");
+    check(model.data(model.index(1), DeckItemModel::HighlightedTextRole).toString().isEmpty(), "text-card-stays-plain");
     delete images;
 }
 
 } // namespace
+
+void linkMetadataParsingTests() {
+    const QUrl base(QStringLiteral("https://example.com/post/1"));
+    const QString html = QStringLiteral(
+        "<html><head><title>  Hello &amp; welcome </title>"
+        "<link rel=\"icon\" href=\"/favicon-32.png\">"
+        "<link rel=\"apple-touch-icon\" href=\"https://cdn.example.com/touch.png\">"
+        "<meta property=\"og:image\" content=\"/cover.jpg\"></head></html>");
+    check(LinkMetadataFetcher::pageTitle(html) == QStringLiteral("Hello & welcome"), "link-title-decoded");
+    const QList<QUrl> icons = LinkMetadataFetcher::iconUrls(html, base);
+    check(icons.size() == 4 && icons.first() == QUrl(QStringLiteral("https://cdn.example.com/touch.png"))
+              && icons.at(1) == QUrl(QStringLiteral("https://example.com/favicon-32.png"))
+              && icons.last() == QUrl(QStringLiteral("https://example.com/favicon.ico")),
+          "link-icons-ordered-with-fallbacks");
+    check(LinkMetadataFetcher::previewImageUrl(html, base) == QUrl(QStringLiteral("https://example.com/cover.jpg")),
+          "link-preview-resolved");
+    check(LinkMetadataFetcher::pageTitle(QStringLiteral("<meta property=\"og:title\" content=\"OG only\">"))
+              == QStringLiteral("OG only"),
+          "link-title-falls-back-to-og");
+}
 
 int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
@@ -252,6 +418,7 @@ int main(int argc, char *argv[]) {
     QCoreApplication::setApplicationName(QStringLiteral("deck-tests"));
     relativeTimeTests();
     linkTests();
+    linkMetadataParsingTests();
     titleTests();
     colorTests();
     previewLayoutTests();
@@ -259,6 +426,8 @@ int main(int argc, char *argv[]) {
     popoverTextTests();
     settingsLogicTests();
     backdropTests();
+    highlightTests();
+    editorHighlightTests();
     modelTests();
     std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "ALL PASSED", failures);
     return failures ? 1 : 0;

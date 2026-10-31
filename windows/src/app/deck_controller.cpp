@@ -24,6 +24,20 @@
 
 namespace {
 
+DeckController *foregroundListener = nullptr;
+
+// Out-of-context WinEvent callbacks run on the installing (GUI) thread.
+void CALLBACK onForegroundEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+    if (!foregroundListener) return;
+    QTimer::singleShot(0, foregroundListener, [] {
+        if (foregroundListener) foregroundListener->checkForeground();
+    });
+}
+
+} // namespace
+
+namespace {
+
 const QString preferredHeightKey = QStringLiteral("deck/preferredHeight");
 
 struct HeightLimits {
@@ -41,7 +55,6 @@ HeightLimits heightLimits(const QRect &workArea) {
 }
 
 // mac category dot colours (dark appearance), cycled by position.
-const char *const kCategoryColors[] = {"#BF5AF2", "#64D2FF", "#30D158", "#FF375F", "#5E5CE6", "#66D4CF"};
 
 QVector<ClipboardItem> mergeSearchResults(const QVector<ClipboardItem> &local, const QVector<ClipboardItem> &database) {
     QSet<qint64> seenDatabaseIds;
@@ -111,9 +124,10 @@ DeckController::DeckController(const QString &databasePath, DeckImageProvider *i
     connect(&store_, &HistoryStore::previewedItemIdChanged, this, &DeckController::refreshPopover);
     connect(&store_, &HistoryStore::editingItemIdChanged, this, &DeckController::refreshPopover);
     connect(&store_, &HistoryStore::renamingItemIdChanged, this, &DeckController::refreshPopover);
-    // The popover follows its card when the strip is rebuilt (search, category).
-    connect(&store_, &HistoryStore::itemsChanged, this, &DeckController::publishPopover);
-    connect(&store_, &HistoryStore::searchResultsChanged, this, &DeckController::publishPopover);
+    // The popover follows its card when the strip is rebuilt (search, category)
+    // and when the card itself changes.
+    connect(&store_, &HistoryStore::itemsChanged, this, &DeckController::refreshPopover);
+    connect(&store_, &HistoryStore::searchResultsChanged, this, &DeckController::refreshPopover);
     connect(&store_, &HistoryStore::selectedCategoryChanged, this, &DeckController::publishPopover);
 
     connect(capture_.pipeline(), &ClipboardPipeline::recentChanged, this, &DeckController::onCaptured);
@@ -139,6 +153,7 @@ DeckController::DeckController(const QString &databasePath, DeckImageProvider *i
         else registerHotkey();
     });
 
+    backdropBlur_ = AppPreferences::backdropBlur();
     searchDebounce_.setSingleShot(true);
     searchDebounce_.setInterval(120);
     connect(&searchDebounce_, &QTimer::timeout, this, [this] { performSearch(store_.searchQuery().trimmed()); });
@@ -148,12 +163,19 @@ DeckController::DeckController(const QString &databasePath, DeckImageProvider *i
     });
 }
 
-DeckController::~DeckController() { capture_.stop(); }
+DeckController::~DeckController() {
+    if (foregroundHook_) UnhookWinEvent(foregroundHook_);
+    foregroundListener = nullptr;
+    capture_.stop();
+}
 
 bool DeckController::start(QQuickWindow *window, const QIcon &trayIcon) {
     window_ = window;
     WinEffects::setToolWindow(deckWindow());
     connect(window, &QWindow::activeChanged, this, &DeckController::onActiveChanged);
+    foregroundListener = this;
+    foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, onForegroundEvent, 0, 0,
+                                      WINEVENT_OUTOFCONTEXT);
     connect(window, &QWindow::widthChanged, this, &DeckController::applyEffects);
     connect(window, &QWindow::heightChanged, this, &DeckController::applyEffects);
     connect(window, &QWindow::visibleChanged, this, &DeckController::deckVisibleChanged);
@@ -162,6 +184,8 @@ bool DeckController::start(QQuickWindow *window, const QIcon &trayIcon) {
     connect(tray_.get(), &WinTray::toggleRequested, this, [this] { toggle(QStringLiteral("tray")); });
     connect(tray_.get(), &WinTray::settingsRequested, this, [this] { openSettings(QStringLiteral("general")); });
     connect(tray_.get(), &WinTray::quitRequested, this, &DeckController::quit);
+    connect(tray_.get(), &WinTray::blurToggled, this, &DeckController::setBackdropBlur);
+    tray_->setBlurChecked(backdropBlur_);
     tray_->show();
 
     registerHotkey();
@@ -191,7 +215,7 @@ QVariantList DeckController::categories() const {
         list.append(QVariantMap{
             {QStringLiteral("key"), QStringLiteral("auto:") + category.name},
             {QStringLiteral("name"), category.name},
-            {QStringLiteral("color"), QString::fromLatin1(kCategoryColors[position++ % 6])},
+            {QStringLiteral("color"), HistoryRepository::categoryColor(category.icon, position++)},
         });
     }
     return list;
@@ -230,6 +254,7 @@ void DeckController::loadPersistedHistory() {
     // AppCoordinator.loadPersistedHistory: 20 rows first, then the rest.
     capture_.pipeline()->requestHistory(QString(), QString(), 20, 0, [this](QVector<ClipboardItem> items) {
         store_.replaceItems(items);
+        refreshLinkMetadata(items);
         capture_.pipeline()->requestHistory(QString(), QString(), 100, 0, [this](QVector<ClipboardItem> all) {
             store_.expandPersistedItems(all);
         });
@@ -242,6 +267,24 @@ void DeckController::onCaptured(quint64 sequence) {
     if (recent.isEmpty()) return;
     store_.insert(recent.first());
     if (deckVisible()) store_.revealSelection();
+    refreshLinkMetadata({recent.first()});
+}
+
+void DeckController::refreshLinkMetadata(const QVector<ClipboardItem> &items) {
+    // AppCoordinator.refreshLinkMetadata: links never fetched, or still
+    // without an icon or a page title.
+    for (const ClipboardItem &item : items) {
+        const QUrl url = DeckPresentation::webUrl(item);
+        if (!url.isValid()) continue;
+        if (item.hasFetchedLinkPreview && !item.linkIconData.isEmpty() && item.title != QStringLiteral("文本")) continue;
+        const QUuid id = item.id;
+        linkMetadata_.fetch(id, url, [this, id](const LinkMetadataFetcher::Metadata &metadata) {
+            store_.updateLinkMetadata(
+                id, metadata.title.isEmpty() ? std::nullopt : std::optional<QString>(metadata.title),
+                metadata.iconData.isEmpty() ? std::nullopt : std::optional<QByteArray>(metadata.iconData),
+                metadata.previewData.isEmpty() ? std::nullopt : std::optional<QByteArray>(metadata.previewData));
+        });
+    }
 }
 
 void DeckController::performSearch(const QString &query) {
@@ -460,7 +503,12 @@ void DeckController::saveText(const QString &text) {
     ClipboardPayload payload;
     payload.type = ClipboardPayloadType::Text;
     payload.text = text; // rich text is dropped, as on mac (rtfData: nil)
-    store_.updateEditingItem(payload);
+    // As on Linux, the edited text is classified again: JSON edited into
+    // plain prose must not keep the JSON label and preview.
+    const auto current = store_.editingItem();
+    const QString category = current ? repository_.classifyText(text, current->sourceID, current->sourceName, current->copiedAt)
+                                     : QString();
+    store_.updateEditingItem(payload, std::nullopt, category);
 }
 
 void DeckController::saveImageAngle(int angle) {
@@ -477,6 +525,16 @@ void DeckController::activateDeck() {
     window_->requestActivate();
 }
 
+std::optional<ClipboardItem> DeckController::storeItem(const QUuid &id) const {
+    for (const ClipboardItem &item : store_.items()) {
+        if (item.id == id) return item;
+    }
+    for (const ClipboardItem &item : store_.searchResults()) {
+        if (item.id == id) return item;
+    }
+    return std::nullopt;
+}
+
 void DeckController::refreshPopover() {
     QUuid id = store_.renamingItemId();
     if (id.isNull()) id = store_.editingItemId();
@@ -487,25 +545,40 @@ void DeckController::refreshPopover() {
         publishPopover();
         return;
     }
-    if (id != popoverId_) {
+    const std::optional<ClipboardItem> found = storeItem(id);
+    if (!found) {
+        publishPopover();
+        return;
+    }
+    if (id == popoverId_) {
+        // The same card changed under the popover (edited, renamed, rotated,
+        // recategorised): the store is the truth. A summary in the store keeps
+        // the full text already loaded and takes everything else from it.
+        if (found->payloadComplete || !popoverItem_.payloadComplete) {
+            popoverItem_ = *found;
+        } else {
+            ClipboardItem merged = *found;
+            merged.text = popoverItem_.text;
+            merged.richTextHtml = popoverItem_.richTextHtml;
+            merged.image = popoverItem_.image;
+            merged.imageData = popoverItem_.imageData;
+            merged.payloadComplete = true;
+            popoverItem_ = merged;
+        }
+    } else {
         popoverId_ = id;
-        std::optional<ClipboardItem> found;
-        for (const ClipboardItem &item : store_.items()) {
-            if (item.id == id) found = item;
-        }
-        for (const ClipboardItem &item : store_.searchResults()) {
-            if (!found && item.id == id) found = item;
-        }
-        if (!found) return;
         popoverItem_ = *found;
         // Cards hold summaries; the popover shows the full text and image.
         if (!popoverItem_.payloadComplete && popoverItem_.databaseID >= 0) {
             capture_.pipeline()->requestItem(popoverItem_.databaseID, [this, id](QVector<ClipboardItem> rows) {
                 if (rows.isEmpty() || popoverId_ != id) return;
+                // An edit made while the row was loading is newer than the row.
+                const std::optional<ClipboardItem> current = storeItem(id);
+                if (!current || current->payloadComplete) return;
                 ClipboardItem full = rows.first();
                 full.id = id;
-                full.title = popoverItem_.title;
-                full.imageAngle = popoverItem_.imageAngle;
+                full.title = current->title;
+                full.imageAngle = current->imageAngle;
                 popoverItem_ = full;
                 if (full.isImage()) {
                     QImage image = full.image;
@@ -552,6 +625,7 @@ void DeckController::publishPopover() {
             {QStringLiteral("text"), item.text.left(200000)},
             {QStringLiteral("editableLanguage"), language},
             {QStringLiteral("monospaced"), !language.isEmpty()},
+            {QStringLiteral("previewLanguage"), item.previewLanguage},
             {QStringLiteral("imageUrl"), !item.isImage() ? QString()
                  : QStringLiteral("image://deck/") + (images_->contains(fullKey) ? fullKey : QStringLiteral("thumb/") + id)},
             {QStringLiteral("imageWidth"), item.imagePixelSize.width()},
@@ -569,8 +643,13 @@ void DeckController::publishPopover() {
 // MARK: - Window
 
 void DeckController::toggle(const QString &trigger) {
-    if (deckVisible()) hideDeck(trigger);
-    else showDeck(trigger);
+    if (deckVisible()) {
+        hideDeck(trigger);
+    } else if (trigger == QLatin1String("tray") && focusHide_.isValid() && focusHide_.elapsed() < 500) {
+        // The click on the tray icon already closed the Deck.
+    } else {
+        showDeck(trigger);
+    }
 }
 
 void DeckController::showDeck(const QString &trigger) {
@@ -591,7 +670,7 @@ void DeckController::showDeck(const QString &trigger) {
     // 8 DIP from both edges, flush with the work area bottom, as tall as the
     // Deck can get; the part above the Deck is transparent and click-through.
     const QRect frame(area.x() + 8, int(area.y() + area.height() - maximumHeight_), area.width() - 16, int(maximumHeight_));
-    captureBackdrop(screen, frame); // before showing: the screen behind the Deck
+    if (backdropBlur_) captureBackdrop(screen, frame); // before showing: the screen behind the Deck
     window_->setScreen(screen);
     window_->setGeometry(frame);
 
@@ -618,7 +697,18 @@ void DeckController::hideDeck(const QString &reason) {
 }
 
 QString DeckController::backdropUrl() const {
-    return backdropRevision_ > 0 ? QStringLiteral("image://deck/backdrop?%1").arg(backdropRevision_) : QString();
+    return backdropBlur_ && backdropRevision_ > 0 ? QStringLiteral("image://deck/backdrop?%1").arg(backdropRevision_)
+                                                  : QString();
+}
+
+void DeckController::setBackdropBlur(bool enabled) {
+    if (backdropBlur_ == enabled) return;
+    backdropBlur_ = enabled;
+    AppPreferences::setBackdropBlur(enabled);
+    if (tray_) tray_->setBlurChecked(enabled);
+    // An open Deck switches at once; the snapshot is of what is behind it.
+    if (enabled && deckVisible() && window_->screen()) captureBackdrop(window_->screen(), window_->geometry());
+    Q_EMIT backdropChanged();
 }
 
 void DeckController::captureBackdrop(QScreen *screen, const QRect &frame) {
@@ -678,13 +768,19 @@ void DeckController::endResize() {
 
 void DeckController::onActiveChanged() {
     if (!window_ || window_->isActive() || !window_->isVisible()) return;
-    if (resizing_ || paste_.isPending()) return;
     // windowDidResignKey: decide on the next event-loop turn.
-    QTimer::singleShot(0, this, [this] {
-        if (!window_ || window_->isActive() || !window_->isVisible()) return;
-        if (WinProcess::belongsToCurrentProcess(GetForegroundWindow())) return;
-        hideDeck(QStringLiteral("lost activation"));
-    });
+    QTimer::singleShot(0, this, &DeckController::checkForeground);
+}
+
+void DeckController::checkForeground() {
+    if (!deckVisible() || resizing_ || paste_.isPending()) return;
+    HWND foreground = GetForegroundWindow();
+    // No foreground window is the moment between two activations.
+    if (!foreground) return;
+    HWND deck = deckWindow();
+    if (foreground == deck || WinProcess::rootOwner(foreground) == deck) return;
+    focusHide_.start();
+    hideDeck(QStringLiteral("lost activation"));
 }
 
 HWND DeckController::deckWindow() const { return window_ ? reinterpret_cast<HWND>(window_->winId()) : nullptr; }

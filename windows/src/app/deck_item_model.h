@@ -35,6 +35,7 @@ public:
         ColorRole,
         ColorTextRole,
         ImmersiveRole,
+        HighlightedTextRole,
     };
 
     explicit DeckItemModel(DeckImageProvider *images, QObject *parent = nullptr);
@@ -57,4 +58,6 @@ private:
     DeckImageProvider *images_;
     QVector<ClipboardItem> items_;
     QDateTime now_ = QDateTime::currentDateTime();
+    // Highlighted card HTML by item id + text hash (mac SyntaxHighlighter cache).
+    mutable QHash<QString, QString> highlighted_;
 };

@@ -11,7 +11,8 @@ class QAction;
 class QMenu;
 
 // Port of AppCoordinator.configureStatusItem / makeStatusMenu: left click
-// toggles the Deck, right click opens a menu with "设置…" and "退出 ClipDeck".
+// toggles the Deck, right click opens a menu with "设置…", "背景模糊" (as on
+// Linux) and "退出 ClipDeck".
 class WinTray final : public QObject {
     Q_OBJECT
 
@@ -38,11 +39,15 @@ public:
     QMenu *menu() const { return menu_.get(); }
     QAction *settingsAction() const { return settingsAction_; }
     QAction *quitAction() const { return quitAction_; }
+    QAction *blurAction() const { return blurAction_; }
+    // Reflects the stored setting without emitting blurToggled.
+    void setBlurChecked(bool checked);
 
 Q_SIGNALS:
     void toggleRequested();
     void settingsRequested();
     void quitRequested();
+    void blurToggled(bool enabled);
 
 private:
     void onActivated(QSystemTrayIcon::ActivationReason reason);
@@ -51,4 +56,5 @@ private:
     std::unique_ptr<QMenu> menu_;
     QAction *settingsAction_ = nullptr;
     QAction *quitAction_ = nullptr;
+    QAction *blurAction_ = nullptr;
 };

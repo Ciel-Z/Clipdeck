@@ -29,5 +29,8 @@ void setToolWindow(HWND window);
 // Dark caption for the settings window (DWMWA_USE_IMMERSIVE_DARK_MODE: 20,
 // 19 on Win10 1809–1909).
 void setDarkTitleBar(HWND window);
+// Windows 11 rounded corners and the DWM shadow for a frameless window that
+// draws its own chrome (DWMWA_WINDOW_CORNER_PREFERENCE + a 1 px frame).
+void setFramelessChrome(HWND window);
 
 } // namespace WinEffects

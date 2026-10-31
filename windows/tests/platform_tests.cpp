@@ -366,7 +366,15 @@ void trayTests() {
     check(tray.toolTip().startsWith(QStringLiteral("全局快捷键注册失败：")), "tray-tooltip-reports-hotkey-failure");
     tray.setHotkeyError(QString());
 
-    check(tray.menu()->actions().size() == 3, "tray-menu-has-settings-separator-quit");
+    check(tray.menu()->actions().size() == 4, "tray-menu-has-settings-blur-separator-quit");
+    check(tray.blurAction()->text() == QStringLiteral("背景模糊") && tray.blurAction()->isCheckable(),
+          "tray-menu-blur-is-a-checkbox");
+    QList<bool> blurChanges;
+    QObject::connect(&tray, &WinTray::blurToggled, [&](bool enabled) { blurChanges.append(enabled); });
+    tray.setBlurChecked(true);
+    check(tray.blurAction()->isChecked() && blurChanges.isEmpty(), "tray-blur-reflects-setting-silently");
+    tray.blurAction()->trigger();
+    check(blurChanges == QList<bool>{false}, "tray-blur-toggle-emits");
     check(tray.settingsAction()->text().startsWith(QStringLiteral("设置…")), "tray-menu-settings-title");
     check(tray.quitAction()->text().startsWith(QStringLiteral("退出 ClipDeck")), "tray-menu-quit-title");
     tray.settingsAction()->trigger();

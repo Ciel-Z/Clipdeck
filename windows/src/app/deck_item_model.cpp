@@ -1,5 +1,6 @@
 #include "deck_item_model.h"
 
+#include "code_highlight.h"
 #include "deck_image_provider.h"
 #include "deck_presentation.h"
 #include "win_source_application.h"
@@ -48,6 +49,7 @@ QHash<int, QByteArray> DeckItemModel::roleNames() const {
         {ColorRole, "colorValue"},
         {ColorTextRole, "colorText"},
         {ImmersiveRole, "immersive"},
+        {HighlightedTextRole, "highlightedText"},
     };
 }
 
@@ -63,9 +65,20 @@ QVariant DeckItemModel::data(const QModelIndex &index, int role) const {
     case TimeRole: return DeckPresentation::relativeTime(item.copiedAt, now_);
     case TextRole: return item.text.left(3000);
     case CharacterCountRole: return qlonglong(item.textLength > 0 ? item.textLength : item.text.size());
-    case MonospacedRole: {
-        const QString language = item.previewLanguage.toLower();
-        return language == QLatin1String("code") || language == QLatin1String("json") || language == QLatin1String("sql");
+    case MonospacedRole: return CodeHighlight::isCodeLanguage(item.previewLanguage);
+    case HighlightedTextRole: {
+        // Only text cards draw the body; colour and link cards have their own.
+        if (!item.isText() || !CodeHighlight::isCodeLanguage(item.previewLanguage)) return QString();
+        const QString kind = DeckPresentation::cardKind(item);
+        if (kind != QLatin1String("text")) return QString();
+        const QString body = item.text.left(3000);
+        const QString key = id + QLatin1Char('/') + QString::number(qHash(body)) + item.previewLanguage;
+        auto found = highlighted_.constFind(key);
+        if (found != highlighted_.constEnd()) return found.value();
+        if (highlighted_.size() >= 256) highlighted_.clear();
+        const QString html = CodeHighlight::highlightedHtml(body, item.previewLanguage, QColor(255, 255, 255, 230));
+        highlighted_.insert(key, html);
+        return html;
     }
     case ImageUrlRole:
         return item.isImage() && images_->contains(QStringLiteral("thumb/") + id) ? imageUrl(QStringLiteral("thumb/") + id)

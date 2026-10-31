@@ -68,6 +68,15 @@ void setDarkTitleBar(HWND window) {
     if (FAILED(DwmSetWindowAttribute(window, 20, &dark, sizeof(dark)))) DwmSetWindowAttribute(window, 19, &dark, sizeof(dark));
 }
 
+void setFramelessChrome(HWND window) {
+    if (!window) return;
+    const int round = 2; // DWMWCP_ROUND
+    DwmSetWindowAttribute(window, 33, &round, sizeof(round)); // DWMWA_WINDOW_CORNER_PREFERENCE (Win11)
+    setDarkTitleBar(window); // dark shadow/border tint
+    const MARGINS margins{0, 0, 0, 1};
+    DwmExtendFrameIntoClientArea(window, &margins);
+}
+
 void setToolWindow(HWND window) {
     if (!window) return;
     const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
