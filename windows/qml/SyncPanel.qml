@@ -353,7 +353,8 @@ Window {
                                     anchors.rightMargin: 10
                                     anchors.verticalCenter: parent.verticalCenter
                                     visible: !nearbyRow.pairingThis
-                                    enabled: modelData.pairable && panel.pairing.active !== true
+                                    enabled: modelData.pairable && (panel.pairing.active !== true || panel.pairing.stage === "failed"
+                                                                     || panel.pairing.stage === "done")
                                     accent: true
                                     text: "配对"
                                     onClicked: sync.pair(modelData.key)

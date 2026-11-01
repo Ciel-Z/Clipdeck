@@ -150,7 +150,7 @@ struct SyncPanelView: View {
                         Text("识别码 \(device.tag)").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if sync.pairing.role == .none {
+                    if !sync.pairing.isBusy, !(sync.pairing.role == .outgoing && sync.pairing.key == device.id) {
                         Button("配对") {
                             codeDraft = ""
                             sync.pair(device.id)
@@ -168,7 +168,11 @@ struct SyncPanelView: View {
     private var outgoingPairing: some View {
         switch sync.pairing.stage {
         case .connecting:
-            HStack { ProgressView().controlSize(.small); Text("正在连接…").font(.callout) }
+            HStack {
+                ProgressView().controlSize(.small)
+                Text("正在连接…").font(.callout)
+                Button("取消") { sync.cancelPairing() }.buttonStyle(.borderless)
+            }
         case .code, .verifying:
             HStack {
                 TextField("6 位配对码", text: $codeDraft)

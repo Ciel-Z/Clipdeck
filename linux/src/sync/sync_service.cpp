@@ -285,7 +285,7 @@ void SyncService::tick() {
     const qint64 elapsed = sinceTick_.restart();
     const qint64 now = nowMs();
     if (visible_) {
-        if (now >= visibleUntilMs_ && pairing_.role != Pairing::Role::Incoming) setVisible(false);
+        if (now >= visibleUntilMs_ && !(pairing_.role == Pairing::Role::Incoming && pairing_.busy())) setVisible(false);
         else Q_EMIT stateChanged();
     }
     static int counter = 0;
@@ -811,7 +811,7 @@ void SyncService::pair(const QString &nearbyKey) {
 }
 
 void SyncService::pairWithAddress(const QString &host, quint16 portNumber) {
-    if (!available_ || pairing_.role != Pairing::Role::None || peers_.size() >= SyncProtocol::kMaxPeers) return;
+    if (!available_ || pairing_.busy() || peers_.size() >= SyncProtocol::kMaxPeers) return;
     clearPairing();
     pairing_.role = Pairing::Role::Outgoing;
     pairing_.stage = Pairing::Stage::Connecting;
@@ -897,12 +897,17 @@ void SyncService::handlePairingMessage(SecureChannel *channel, const QJsonObject
                         : reason == QStringLiteral("full")   ? QStringLiteral("对方的已配对设备已满")
                         : reason == QStringLiteral("busy")   ? QStringLiteral("对方正在与其他设备配对")
                         : reason == QStringLiteral("expired") ? QStringLiteral("配对码已过期")
+                        : reason == QStringLiteral("cancelled") ? QStringLiteral("对方已取消配对")
                                                              : QStringLiteral("对方拒绝了配对"));
         }
         return;
     }
 
     // Incoming: the initiator's answer to the challenge, then its public key.
+    if (type == QStringLiteral("pair_reject")) {
+        failPairing(QStringLiteral("对方已取消配对"));
+        return;
+    }
     if (type == QStringLiteral("pair_response") && pairing_.stage == Pairing::Stage::WaitingForCode) {
         const auto isk = pairing_.cpace ? pairing_.cpace->sharedKey(unb64(message.value(QStringLiteral("cpace"))),
                                                                     pairing_.peerDeviceID.toLatin1())
@@ -946,7 +951,7 @@ void SyncService::startIncomingPairing(SecureChannel *channel, const QJsonObject
         QTimer::singleShot(500, channel, &SecureChannel::close);
     };
     if (!visible_) return reject(QStringLiteral("rejected"));
-    if (pairing_.role != Pairing::Role::None) return reject(QStringLiteral("busy"));
+    if (pairing_.busy()) return reject(QStringLiteral("busy"));
     if (peers_.size() >= SyncProtocol::kMaxPeers) return reject(QStringLiteral("full"));
     const QString peerID = request.value(QStringLiteral("deviceId")).toString();
     if (peerID.size() != 32 || peerID == deviceID_) return reject(QStringLiteral("rejected"));
@@ -1049,6 +1054,9 @@ void SyncService::failPairing(const QString &error) {
 }
 
 void SyncService::cancelPairing() {
+    if (pairing_.busy())
+        sendJson(pairing_.channel, {{QStringLiteral("type"), QStringLiteral("pair_reject")},
+                                    {QStringLiteral("reason"), QStringLiteral("cancelled")}});
     if (pairing_.channel) pairing_.channel->close();
     clearPairing();
     Q_EMIT pairingChanged();

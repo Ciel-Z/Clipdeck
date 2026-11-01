@@ -127,6 +127,9 @@ final class SyncService: ObservableObject {
         var attemptsLeft = 5
         var error = ""
         var isActive: Bool { role != .none }
+        /// A failed or finished attempt only waits to be dismissed; it must
+        /// not block a new pairing in either direction.
+        var isBusy: Bool { isActive && stage != .failed && stage != .done }
     }
 
     @Published private(set) var isAvailable = false
@@ -160,6 +163,7 @@ final class SyncService: ObservableObject {
     private var listener: NWListener?
     private let discovery = SyncDiscovery()
 
+    @MainActor
     private final class Peer {
         var stored: SyncPeerRecord
         var channel: SyncChannel?
@@ -382,7 +386,7 @@ final class SyncService: ObservableObject {
         lastTick = now
         tickCount += 1
         if isVisible {
-            if now >= visibleUntil, pairing.role != .incoming { setVisible(false) } else { publish() }
+            if now >= visibleUntil, !(pairing.role == .incoming && pairing.isBusy) { setVisible(false) } else { publish() }
         }
         if tickCount % 10 == 0 || elapsed > 5 {
             if elapsed > 5 { peers.values.forEach { $0.failures = 0 } } // woke from sleep
@@ -842,7 +846,7 @@ final class SyncService: ObservableObject {
     }
 
     func pair(host: String, port: UInt16) {
-        guard isAvailable, !pairing.isActive, peers.count < SyncProtocol.maxPeers else { return }
+        guard isAvailable, !pairing.isBusy, peers.count < SyncProtocol.maxPeers else { return }
         clearPairing()
         pairing.role = .outgoing
         pairing.stage = .connecting
@@ -906,7 +910,8 @@ final class SyncService: ObservableObject {
                               address: pairing.address, port: message["port"] as? Int ?? 0)
             case "pair_reject":
                 let reasons = ["attempts": "配对码错误次数过多", "full": "对方的已配对设备已满",
-                               "busy": "对方正在与其他设备配对", "expired": "配对码已过期"]
+                               "busy": "对方正在与其他设备配对", "expired": "配对码已过期",
+                               "cancelled": "对方已取消配对"]
                 failPairing(reasons[message["reason"] as? String ?? ""] ?? "对方拒绝了配对")
             default:
                 break
@@ -915,6 +920,7 @@ final class SyncService: ObservableObject {
         }
 
         // Incoming: the initiator's answer, then its public key.
+        if type == "pair_reject" { return failPairing("对方已取消配对") }
         if type == "pair_response", pairing.stage == .code {
             let peerMessage = Data(base64Encoded: message["cpace"] as? String ?? "") ?? Data()
             let confirm = Data(base64Encoded: message["confirm"] as? String ?? "") ?? Data()
@@ -957,7 +963,7 @@ final class SyncService: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { channel.close() } }
         }
         guard isVisible else { return reject("rejected") }
-        guard !pairing.isActive else { return reject("busy") }
+        guard !pairing.isBusy else { return reject("busy") }
         guard peers.count < SyncProtocol.maxPeers else { return reject("full") }
         let peerID = request["deviceId"] as? String ?? ""
         guard peerID.count == 32, peerID != deviceID else { return reject("rejected") }
@@ -1049,7 +1055,13 @@ final class SyncService: ObservableObject {
     }
 
     func cancelPairing() {
-        pairingChannel?.close()
+        let channel = pairingChannel
+        if pairing.isBusy {
+            send(["type": "pair_reject", "reason": "cancelled"], on: channel)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { MainActor.assumeIsolated { channel?.close() } }
+        } else {
+            channel?.close()
+        }
         clearPairing()
     }
 

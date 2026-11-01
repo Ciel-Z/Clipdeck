@@ -143,6 +143,9 @@ private:
         int attemptsLeft = 5;
         QString error;
         QTimer *expiry = nullptr;
+        // A failed or finished attempt only waits to be dismissed; it must
+        // not block a new pairing in either direction.
+        bool busy() const { return role != Role::None && stage != Stage::Failed && stage != Stage::Done; }
     };
 
     void loadIdentity();

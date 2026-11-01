@@ -325,7 +325,10 @@ QWidget *SyncPanel::deviceRow(const QVariantMap &device, bool paired) {
     if (!pairingThis) {
         auto *pair = new QPushButton(QStringLiteral("配对"), row);
         pair->setObjectName(QStringLiteral("accent"));
-        pair->setEnabled(device.value(QStringLiteral("pairable")).toBool() && !pairing.value(QStringLiteral("active")).toBool());
+        const QString stage = pairing.value(QStringLiteral("stage")).toString();
+        const bool busy = pairing.value(QStringLiteral("active")).toBool() && stage != QStringLiteral("failed")
+                          && stage != QStringLiteral("done");
+        pair->setEnabled(device.value(QStringLiteral("pairable")).toBool() && !busy);
         connect(pair, &QPushButton::clicked, this, [this, key] { sync_->pair(key); });
         layout->addWidget(pair);
         return row;
