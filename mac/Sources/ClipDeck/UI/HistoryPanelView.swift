@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct HistoryPanelView: View {
     @ObservedObject var store: InMemoryHistoryStore
     let onPaste: (ClipboardItem, Bool) -> Void
+    var onCopy: (ClipboardItem) -> Void = { _ in }
     let onClose: () -> Void
     let onManageCategories: () -> Void
     let onSearch: (String) -> Void
@@ -167,6 +168,14 @@ struct HistoryPanelView: View {
                                     }
                                     .keyboardShortcut(.return, modifiers: [])
 
+                                    Button {
+                                        store.selectedItemID = item.id
+                                        onCopy(item)
+                                    } label: {
+                                        Label("复制", systemImage: "doc.on.doc")
+                                    }
+                                    .keyboardShortcut("c", modifiers: .command)
+
                                     if let url = item.webURL {
                                         Button {
                                             store.selectedItemID = item.id
@@ -270,6 +279,15 @@ struct HistoryPanelView: View {
 
     private var toolbar: some View {
         ZStack {
+            // LAN sync in progress: the top-left corner, only while items move.
+            HStack {
+                if store.isSyncing {
+                    SyncLoaderView().transition(.opacity)
+                }
+                Spacer()
+            }
+            .animation(.easeOut(duration: 0.22), value: store.isSyncing)
+
             HStack {
                 Spacer()
 
@@ -593,12 +611,7 @@ private struct ClipboardCardView: View {
                     .opacity(0.78)
             }
             Spacer(minLength: 8)
-            if item.payload.fileReferences != nil {
-                DeckNavigationIcon(kind: .folder)
-                    .frame(width: 30, height: 30)
-            } else {
-                sourceBadge(size: sourceIconSize)
-            }
+            sourceBadge(size: sourceIconSize)
         }
         .foregroundStyle(.white)
         .padding(.leading, 14)
@@ -796,7 +809,12 @@ private struct ClipboardCardView: View {
 
     private func sourceBadge(size: CGFloat) -> some View {
         Group {
-            if let data = item.sourceApplication.iconData,
+            if item.payload.fileReferences != nil {
+                GlyphSourceTile(size: size, kind: .files)
+            } else if SyncIdentity.isFromOtherDevice(item) {
+                // Synced items: the icon does not travel; the details still name the app.
+                GlyphSourceTile(size: size, kind: .synced)
+            } else if let data = item.sourceApplication.iconData,
                let image = ClipboardImageCache.image(
                    key: "app:\(item.sourceApplication.bundleIdentifier ?? item.sourceApplication.name)",
                    data: data
@@ -812,7 +830,9 @@ private struct ClipboardCardView: View {
             }
         }
         .frame(width: size, height: size)
-        .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+        // The flat glyph tiles have no shadow; application icons keep theirs.
+        .shadow(color: .black.opacity(item.payload.fileReferences != nil || SyncIdentity.isFromOtherDevice(item) ? 0 : 0.35),
+                radius: 2, y: 1)
     }
 
     private var categoryLabel: String? {
@@ -1724,6 +1744,113 @@ struct DeckNavigationIcon: View {
             .stroke(style: StrokeStyle(lineWidth: 1.7, lineCap: .round, lineJoin: .round))
         }
         .accessibilityHidden(true)
+    }
+}
+
+/// Which items came from another device: synced rows are stored with the
+/// source bundle ID "clipdeck-sync:<origin device ID>" (HistoryRepository.importRemote).
+@MainActor
+enum SyncIdentity {
+    static var localDeviceID = ""
+
+    static func isFromOtherDevice(_ item: ClipboardItem) -> Bool {
+        guard let bundle = item.sourceApplication.bundleIdentifier, bundle.hasPrefix("clipdeck-sync:") else { return false }
+        return bundle.dropFirst("clipdeck-sync:".count) != localDeviceID[...]
+    }
+}
+
+/// A white glyph on a coloured tile in place of the source icon: teal arrows
+/// for items synced from another device, an amber folder for file cards.
+/// Same geometry as windows/qml/SourceBadge.qml.
+private struct GlyphSourceTile: View {
+    enum Kind { case synced, files }
+    let size: CGFloat
+    let kind: Kind
+
+    var body: some View {
+        let tile = (size * 0.84).rounded()
+        let small = tile < 20
+        let glyph = tile * (small ? 0.86 : kind == .files ? 0.75 : 0.66)
+        let stroke = (small ? 2.9 : kind == .files ? 2.4 : 2.3) * glyph / 24
+        ZStack {
+            RoundedRectangle(cornerRadius: max(4, size * 0.20), style: .continuous)
+                .fill(kind == .files ? Color(red: 0.898, green: 0.643, blue: 0.227)
+                                     : Color(red: 0.114, green: 0.620, blue: 0.459))
+                .frame(width: tile, height: tile)
+            Group {
+                if kind == .files {
+                    FolderGlyphShape().stroke(.white, style: StrokeStyle(lineWidth: stroke, lineCap: .round, lineJoin: .round))
+                } else {
+                    SyncArrowsShape().stroke(.white, style: StrokeStyle(lineWidth: stroke, lineCap: .round, lineJoin: .round))
+                }
+            }
+            .frame(width: glyph, height: glyph)
+        }
+        .frame(width: size, height: size)
+        .accessibilityLabel(kind == .files ? "文件" : "来自其他设备")
+        .help(kind == .files ? "文件" : "来自其他设备")
+    }
+}
+
+private struct FolderGlyphShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = rect.width / 24
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * s, y: rect.minY + y * s) }
+        var path = Path()
+        path.move(to: p(3.5, 8)); path.addLine(to: p(3.5, 17.5))
+        path.addQuadCurve(to: p(5, 19), control: p(3.5, 19)); path.addLine(to: p(19, 19))
+        path.addQuadCurve(to: p(20.5, 17.5), control: p(20.5, 19)); path.addLine(to: p(20.5, 9.5))
+        path.addQuadCurve(to: p(19, 8), control: p(20.5, 8)); path.addLine(to: p(11.5, 8))
+        path.addLine(to: p(9.8, 5.8)); path.addQuadCurve(to: p(8.8, 5.3), control: p(9.4, 5.3))
+        path.addLine(to: p(5, 5.3)); path.addQuadCurve(to: p(3.5, 6.8), control: p(3.5, 5.3))
+        path.closeSubpath()
+        path.move(to: p(3.5, 9.5)); path.addLine(to: p(20.5, 9.5))
+        return path
+    }
+}
+
+private struct SyncArrowsShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = rect.width / 24
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * s, y: rect.minY + y * s) }
+        var path = Path()
+        path.move(to: p(5, 8.5)); path.addLine(to: p(18, 8.5))
+        path.move(to: p(14.5, 5)); path.addLine(to: p(18, 8.5)); path.addLine(to: p(14.5, 12))
+        path.move(to: p(19, 15.5)); path.addLine(to: p(6, 15.5))
+        path.move(to: p(9.5, 12)); path.addLine(to: p(6, 15.5)); path.addLine(to: p(9.5, 19))
+        return path
+    }
+}
+
+/// LAN sync in progress (docs/lan-sync-design.md §8): a grey arc whose head
+/// breaks off into a short dash and joins it again while the mark turns. Same
+/// geometry as windows/qml/SyncLoader.qml: 24-unit grid, radius 7, stroke 2.6,
+/// main arc 155–245°, dash 22°, 1.8 s breathing, 1.1 s per turn.
+struct SyncLoaderView: View {
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let breath = (1 - cos(t.truncatingRemainder(dividingBy: 1.8) / 1.8 * 2 * .pi)) / 2
+            let mainSweep = 245 - 90 * breath
+            let gap = (245 - mainSweep) * 0.6
+            Canvas { canvas, size in
+                let unit = size.width / 24
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                func arc(from start: Double, sweep: Double) -> Path {
+                    Path { path in
+                        path.addArc(center: center, radius: 7 * unit, startAngle: .degrees(start),
+                                    endAngle: .degrees(start + sweep), clockwise: false)
+                    }
+                }
+                let style = StrokeStyle(lineWidth: 2.6 * unit, lineCap: .round)
+                canvas.stroke(arc(from: -90, sweep: mainSweep), with: .color(Color(red: 0.827, green: 0.820, blue: 0.780)), style: style)
+                canvas.stroke(arc(from: -90 + mainSweep + gap, sweep: 22), with: .color(Color(red: 0.533, green: 0.529, blue: 0.502)), style: style)
+            }
+            .rotationEffect(.degrees(t.truncatingRemainder(dividingBy: 1.1) / 1.1 * 360))
+        }
+        .frame(width: 22, height: 22)
+        .accessibilityLabel("正在同步")
+        .help("正在同步")
     }
 }
 

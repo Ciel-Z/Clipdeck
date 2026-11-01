@@ -398,6 +398,43 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 )
             }
         }
+        // LAN sync bookkeeping (docs/lan-sync-design.md §3), same columns and
+        // rules as the shared Linux/Windows repository.
+        migrator.registerMigration("addSyncBookkeeping") { database in
+            try database.alter(table: "content") { table in
+                table.add(column: "sync_id", .text)
+                table.add(column: "origin_device", .text)
+                table.add(column: "updated_hlc", .integer).notNull().defaults(to: 0)
+            }
+            let rows = try Row.fetchAll(database, sql: "SELECT id, updated_at FROM content")
+            for row in rows {
+                let updatedAt: Int64 = row["updated_at"]
+                try database.execute(
+                    sql: "UPDATE content SET sync_id = ?, updated_hlc = ? WHERE id = ?",
+                    arguments: [
+                        UUID().uuidString.lowercased(),
+                        Int64(bitPattern: HybridLogicalClock.make(milliseconds: updatedAt)),
+                        row["id"] as Int64,
+                    ]
+                )
+            }
+            try database.execute(sql: "CREATE UNIQUE INDEX idx_content_sync_id ON content(sync_id)")
+            try database.execute(sql: "CREATE INDEX idx_content_updated_hlc ON content(updated_hlc)")
+            try database.create(table: "sync_deleted") { table in
+                table.column("sync_id", .text).primaryKey()
+                table.column("deleted_at", .integer).notNull()
+            }
+        }
+        migrator.registerMigration("addSyncPeers") { database in
+            try database.create(table: "sync_peer") { table in
+                table.column("device_id", .text).primaryKey()
+                table.column("hostname", .text).notNull()
+                table.column("public_key", .blob).notNull()
+                table.column("addresses", .text)
+                table.column("last_seen", .integer).notNull().defaults(to: 0)
+                table.column("sent_cursor", .integer).notNull().defaults(to: 0)
+            }
+        }
         return migrator
     }
 }

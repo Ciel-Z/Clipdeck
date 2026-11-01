@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 @MainActor
 final class AppCoordinator: NSObject, NSApplicationDelegate {
@@ -10,8 +11,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         store: store,
         repository: repository,
         classifier: classifier,
-        onCapture: { [weak self] in self?.feedbackSoundPlayer.playCopy() }
+        onCapture: { [weak self] in
+            self?.feedbackSoundPlayer.playCopy()
+            self?.sync?.notifyLocalChange()
+        }
     )
+    private var sync: SyncService?
+    private var syncPanelController: SyncPanelController?
+    private var syncObservers: Set<AnyCancellable> = []
     private lazy var pasteService = PasteService(
         onPasteKeystroke: { [weak self] in self?.feedbackSoundPlayer.playPaste() }
     )
@@ -59,10 +66,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        store.onUpdate = { [historyRepository] item in
+        store.onUpdate = { [weak self, historyRepository] item in
             DispatchQueue.global(qos: .utility).async {
                 do {
                     try historyRepository?.update(item)
+                    Task { @MainActor in self?.sync?.notifyLocalChange() }
                 } catch {
                     NSLog("ClipDeck failed to update persisted item: %@", String(describing: error))
                 }
@@ -96,6 +104,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             onPaste: { [weak self] item, forcePlainText in
                 self?.pasteSelection(item, forcePlainText: forcePlainText)
             },
+            onCopy: { [weak self] item in self?.copyToPasteboard(item) },
             onManageCategories: { [weak self] in self?.showCategorySettings(selectCategories: true) },
             onSearch: { [weak self] query in self?.performSearch(query) }
         )
@@ -114,6 +123,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureApplicationShortcuts()
         NSLog("ClipDeck status item configured")
+        startSync(showPanel: ProcessInfo.processInfo.arguments.contains("--sync-panel"))
 
         // Start WebKit after the critical Deck path is ready, so the first visit
         // to the category script editor does not pay the WebContent startup cost.
@@ -211,6 +221,34 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// "复制" on a card: writes it to the pasteboard and keeps the Deck open.
+    private func copyToPasteboard(_ item: ClipboardItem) {
+        let didWrite = pasteService.write(
+            item,
+            to: .general,
+            preserveFormatting: UserDefaults.standard.bool(forKey: PasteService.preserveFormattingKey)
+        )
+        guard didWrite else { return }
+        monitor.suppressCurrentPasteboardChange()
+        feedbackSoundPlayer.playCopy()
+        recordCopy(item)
+    }
+
+    /// Pasting or copying a card counts as copying it again. The monitor
+    /// skips ClipDeck's own pasteboard writes, so it is recorded here.
+    private func recordCopy(_ item: ClipboardItem) {
+        store.markCopied(item.id)
+        let historyRepository = repository
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try historyRepository?.touch(item)
+                Task { @MainActor [weak self] in self?.sync?.notifyLocalChange() }
+            } catch {
+                NSLog("ClipDeck failed to record a copy: %@", String(describing: error))
+            }
+        }
+    }
+
     private func pasteSelection(_ item: ClipboardItem, forcePlainText: Bool = false) {
         guard case .files = item.payload else {
             pasteValidatedSelection(item, forcePlainText: forcePlainText)
@@ -233,6 +271,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             )
             guard didWrite else { return }
             monitor.suppressCurrentPasteboardChange()
+            recordCopy(item)
             panelController.hide()
             categorySettingsController?.restoreFocusAndPaste()
             feedbackSoundPlayer.playPaste()
@@ -245,6 +284,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             self?.panelController.hide()
         }
         monitor.suppressCurrentPasteboardChange()
+        if case .failed = result {} else { recordCopy(item) }
 
         if case let .copiedOnly(reason) = result {
             let alert = NSAlert()
@@ -438,8 +478,80 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: LAN sync
+
+    private func startSync(showPanel: Bool) {
+        guard let repository else { return }
+        let sync = SyncService(repository: repository, classifier: classifier)
+        self.sync = sync
+        syncPanelController = SyncPanelController(sync: sync)
+        sync.onHistoryChanged = { [weak self] in self?.loadPersistedHistory() }
+        sync.onPairingRequested = { [weak self] in self?.showSyncPanel() }
+        sync.$isSyncing.removeDuplicates().sink { [weak self] in self?.store.isSyncing = $0 }.store(in: &syncObservers)
+        sync.start()
+        SyncIdentity.localDeviceID = sync.deviceID
+        if showPanel { showSyncPanel() }
+    }
+
+    private func showSyncPanel() {
+        panelController.hide()
+        syncPanelController?.show(near: statusItem?.button)
+    }
+
+    /// The "局域网同步" submenu, the same entries as the Windows and Linux tray.
+    private func makeSyncMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "局域网同步", action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "局域网同步")
+        let submenu = NSMenu()
+        let available = sync?.isAvailable == true
+        let status = submenu.addItem(withTitle: sync?.statusText ?? "同步不可用", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        submenu.addItem(.separator())
+        let visibleTitle = sync?.isVisible == true
+            ? "局域网可见（\(SyncPanelView.countdown(sync?.visibleSecondsLeft ?? 0))）"
+            : "局域网可见"
+        let visibleItem = submenu.addItem(withTitle: visibleTitle, action: #selector(toggleSyncVisibility), keyEquivalent: "")
+        visibleItem.target = self
+        visibleItem.state = sync?.isVisible == true ? .on : .off
+        visibleItem.isEnabled = available
+        let pauseItem = submenu.addItem(withTitle: "暂停同步", action: #selector(toggleSyncPaused), keyEquivalent: "")
+        pauseItem.target = self
+        pauseItem.state = sync?.isPaused == true ? .on : .off
+        pauseItem.isEnabled = available
+        let nowItem = submenu.addItem(withTitle: "立即同步", action: #selector(syncNow), keyEquivalent: "")
+        nowItem.target = self
+        nowItem.isEnabled = available && sync?.isPaused == false && sync?.hasPairedDevices == true
+        submenu.addItem(.separator())
+        let devicesItem = submenu.addItem(withTitle: "同步设备…", action: #selector(openSyncPanel), keyEquivalent: "")
+        devicesItem.target = self
+        devicesItem.isEnabled = available
+        submenu.autoenablesItems = false
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func toggleSyncVisibility() {
+        guard let sync else { return }
+        sync.setVisible(!sync.isVisible)
+    }
+
+    @objc private func toggleSyncPaused() {
+        guard let sync else { return }
+        sync.setPaused(!sync.isPaused)
+    }
+
+    @objc private func syncNow() {
+        sync?.syncNow()
+    }
+
+    @objc private func openSyncPanel() {
+        showSyncPanel()
+    }
+
     private func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.addItem(makeSyncMenuItem())
+        menu.addItem(.separator())
         let settingsItem = menu.addItem(withTitle: "设置…", action: #selector(openCategorySettings), keyEquivalent: ",")
         settingsItem.target = self
         settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")

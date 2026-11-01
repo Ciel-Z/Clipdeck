@@ -13,6 +13,7 @@ private final class ClipDeckPanel: NSPanel {
     var onCollapseEmptySearch: (() -> Void)?
     var onDeleteSelection: (() -> Void)?
     var onPasteSelection: (() -> Void)?
+    var onCopySelection: (() -> Void)?
     var onTogglePreview: (() -> Void)?
     var onEditSelection: (() -> Void)?
     var onRenameSelection: (() -> Void)?
@@ -73,6 +74,11 @@ private final class ClipDeckPanel: NSPanel {
         }
         // Context-menu shortcuts remain available whenever the Deck panel is key,
         // even when the context menu itself is closed.
+        if event.keyCode == 8, shortcutModifiers == .command,
+           isSearchFieldFocused?() != true, isSearchEditing?() != true {
+            onCopySelection?()
+            return
+        }
         if event.keyCode == 14, shortcutModifiers == .command {
             onEditSelection?()
             return
@@ -330,6 +336,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
     init(
         store: InMemoryHistoryStore,
         onPaste: @escaping (ClipboardItem, Bool) -> Void,
+        onCopy: @escaping (ClipboardItem) -> Void = { _ in },
         onManageCategories: @escaping () -> Void,
         onSearch: @escaping (String) -> Void
     ) {
@@ -420,6 +427,10 @@ final class PanelController: NSWindowController, NSWindowDelegate {
             store.dismissPreview()
             onPaste(item, false)
         }
+        panel.onCopySelection = { [weak store] in
+            guard let item = store?.selectedItem else { return }
+            onCopy(item)
+        }
         panel.onTogglePreview = { [weak store] in store?.togglePreviewForSelection() }
         panel.onEditSelection = { [weak store] in store?.beginEditingSelection() }
         panel.onRenameSelection = { [weak store] in store?.beginRenamingSelection() }
@@ -442,6 +453,7 @@ final class PanelController: NSWindowController, NSWindowDelegate {
             rootView: HistoryPanelView(
                 store: store,
                 onPaste: onPaste,
+                onCopy: onCopy,
                 onClose: { [weak panel] in panel?.orderOut(nil) },
                 onManageCategories: onManageCategories,
                 onSearch: onSearch

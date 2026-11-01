@@ -1,4 +1,5 @@
 #include "history_repository.h"
+#include "history/hybrid_logical_clock.h"
 
 #include <QtGlobal>
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
@@ -478,8 +479,79 @@ bool HistoryRepository::initialize() {
                 }
                 if (!query.exec()) return false;
             }
-            return collapseRecentDuplicates();
+            return migrateSyncColumns() && collapseRecentDuplicates();
         }();
+}
+
+bool HistoryRepository::migrateSyncColumns() {
+    QSqlQuery columns(database_);
+    if (!columns.exec(QStringLiteral("PRAGMA table_info(content)"))) return false;
+    QSet<QString> names;
+    while (columns.next()) names.insert(columns.value(1).toString());
+    columns.finish();
+    if (!names.contains(QStringLiteral("sync_id"))
+        && !execute(QStringLiteral("ALTER TABLE content ADD COLUMN sync_id TEXT"))) return false;
+    if (!names.contains(QStringLiteral("origin_device"))
+        && !execute(QStringLiteral("ALTER TABLE content ADD COLUMN origin_device TEXT"))) return false;
+    if (!names.contains(QStringLiteral("updated_hlc"))
+        && !execute(QStringLiteral(
+            "ALTER TABLE content ADD COLUMN updated_hlc INTEGER NOT NULL DEFAULT 0"))) return false;
+    if (!execute(QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS sync_deleted ("
+            "sync_id TEXT PRIMARY KEY,"
+            "deleted_at INTEGER NOT NULL)"))) return false;
+    if (!execute(QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS sync_peer ("
+            "device_id TEXT PRIMARY KEY,"
+            "hostname TEXT NOT NULL,"
+            "public_key BLOB NOT NULL,"
+            "addresses TEXT,"
+            "last_seen INTEGER NOT NULL DEFAULT 0,"
+            "sent_cursor INTEGER NOT NULL DEFAULT 0)"))) return false;
+
+    // Rows from before sync: give each an identity, and a clock value taken
+    // from its last change so their order is kept.
+    QSqlQuery missing(database_);
+    if (!missing.exec(QStringLiteral("SELECT id,updated_at FROM content WHERE sync_id IS NULL OR updated_hlc=0")))
+        return false;
+    QVector<QPair<qint64, qint64>> rows;
+    while (missing.next()) rows.append({missing.value(0).toLongLong(), missing.value(1).toLongLong()});
+    missing.finish();
+    if (!rows.isEmpty()) {
+        if (!database_.transaction()) return false;
+        QSqlQuery fill(database_);
+        fill.prepare(QStringLiteral(
+            "UPDATE content SET sync_id=COALESCE(sync_id,?),"
+            "updated_hlc=CASE WHEN updated_hlc=0 THEN ? ELSE updated_hlc END WHERE id=?"));
+        for (const auto &row : rows) {
+            fill.bindValue(0, QUuid::createUuid().toString(QUuid::WithoutBraces));
+            fill.bindValue(1, QVariant::fromValue<qint64>(qint64(HybridLogicalClock::make(row.second))));
+            fill.bindValue(2, row.first);
+            if (!fill.exec()) {
+                lastError_ = fill.lastError().text();
+                database_.rollback();
+                return false;
+            }
+        }
+        if (!database_.commit()) return false;
+    }
+    if (!execute(QStringLiteral(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_content_sync_id ON content(sync_id)"))
+        || !execute(QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_content_updated_hlc ON content(updated_hlc)"))) return false;
+
+    QSqlQuery latest(database_);
+    if (latest.exec(QStringLiteral("SELECT MAX(updated_hlc) FROM content")) && latest.next())
+        HybridLogicalClock::shared().observe(quint64(latest.value(0).toLongLong()));
+    pruneDeletedRecords();
+    return true;
+}
+
+void HistoryRepository::pruneDeletedRecords() {
+    QSqlQuery prune(database_);
+    prune.prepare(QStringLiteral("DELETE FROM sync_deleted WHERE deleted_at<?"));
+    prune.addBindValue(QDateTime::currentMSecsSinceEpoch() - kDeletedRecordRetentionMs);
+    if (!prune.exec()) lastError_ = prune.lastError().text();
 }
 
 bool HistoryRepository::collapseRecentDuplicates() {
@@ -613,7 +685,8 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
 
     QSqlQuery existing(database_);
     existing.prepare(QStringLiteral(
-        "SELECT id,copy_count,copied_at,title,category,source_id,source_name,last_copied_at FROM content "
+        "SELECT id,copy_count,copied_at,title,category,source_id,source_name,last_copied_at,sync_id,origin_device "
+        "FROM content "
         "WHERE content_hash=? AND last_copied_at>=? AND last_copied_at<=? "
         "ORDER BY last_copied_at DESC,id DESC LIMIT 1"));
     existing.addBindValue(hash);
@@ -627,16 +700,20 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
         const QString existingSourceID = existing.value(5).toString();
         const QString existingSourceName = existing.value(6).toString();
         const qint64 existingTime = existing.value(7).toLongLong();
+        item.syncID = existing.value(8).toString();
+        item.originDevice = existing.value(9).toString();
+        // Copying it again is a change that syncs (the item re-enters the window).
+        item.updatedHlc = HybridLogicalClock::shared().now();
         const bool preserveExistingSource = now < existingTime || (isDDEGrandSearchSource(item.sourceID, item.sourceName)
             && !existingSourceID.isEmpty()
             && !isDDEGrandSearchSource(existingSourceID, existingSourceName));
         QSqlQuery update(database_);
         update.prepare(preserveExistingSource
             ? QStringLiteral(
-                "UPDATE content SET last_copied_at=?,copy_count=?,updated_at=? WHERE id=?")
+                "UPDATE content SET last_copied_at=?,copy_count=?,updated_at=?,updated_hlc=? WHERE id=?")
             : QStringLiteral(
                 "UPDATE content SET source_id=?,source_name=?,source_icon=?,source_icon_variants=?,last_copied_at=?,"
-                "copy_count=?,updated_at=? WHERE id=?"));
+                "copy_count=?,updated_at=?,updated_hlc=? WHERE id=?"));
         if (!preserveExistingSource) {
             update.addBindValue(item.sourceID);
             update.addBindValue(item.sourceName);
@@ -649,6 +726,7 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
         update.addBindValue(std::max(now, existingTime));
         update.addBindValue(item.copyCount);
         update.addBindValue(now);
+        update.addBindValue(QVariant::fromValue<qint64>(qint64(item.updatedHlc)));
         update.addBindValue(item.databaseID);
         if (!update.exec()) {
             lastError_ = update.lastError().text();
@@ -662,8 +740,10 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
         "INSERT INTO content(title,content_type,plain_text,rich_text_html,link_icon_data,link_preview_data,"
         "link_preview_fetched,image_data,image_width,image_height,image_angle,"
         "content_hash,source_id,source_name,source_icon,source_icon_variants,category,"
-        "copied_at,last_copied_at,copy_count,updated_at,files_json) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        "copied_at,last_copied_at,copy_count,updated_at,files_json,sync_id,origin_device,updated_hlc) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+    if (item.syncID.isEmpty()) item.syncID = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.updatedHlc = HybridLogicalClock::shared().now();
     insert.addBindValue(item.title.isEmpty()
         ? (item.isImage() ? QStringLiteral("图片") : QStringLiteral("文本"))
         : item.title);
@@ -690,6 +770,9 @@ ClipboardItem HistoryRepository::save(const ClipboardItem &input) {
     insert.addBindValue(1);
     insert.addBindValue(now);
     insert.addBindValue(item.isFiles() ? QVariant(FileReferences::encode(item.files)) : QVariant());
+    insert.addBindValue(item.syncID);
+    insert.addBindValue(item.originDevice.isEmpty() ? QVariant() : QVariant(item.originDevice));
+    insert.addBindValue(QVariant::fromValue<qint64>(qint64(item.updatedHlc)));
     if (!insert.exec()) {
         lastError_ = insert.lastError().text();
         return item;
@@ -721,7 +804,8 @@ QVector<ClipboardItem> HistoryRepository::fetch(
         "COALESCE(application_icon.source_icon,content.source_icon),"
         "COALESCE(application_icon.source_icon_variants,content.source_icon_variants),"
         "content.category,content.last_copied_at,content.copy_count,"
-        "category.preview_language,category.icon,content.image_angle,content.files_json FROM content "
+        "category.preview_language,category.icon,content.image_angle,content.files_json,"
+        "content.sync_id,content.origin_device,content.updated_hlc FROM content "
         "LEFT JOIN application_icon ON application_icon.source_id=content.source_id "
         "LEFT JOIN category ON category.name=content.category WHERE 1=1");
     if (!category.isEmpty()) {
@@ -777,7 +861,11 @@ bool HistoryRepository::updateTitle(qint64 id, const QString &title) {
             value=files.size()==1?files.first().name:QStringLiteral("文件 · %1 项").arg(files.size());
         } else value=original.value(0).toString()==QStringLiteral("image")?QStringLiteral("图片"):QStringLiteral("文本");
     }
-    query.prepare(QStringLiteral("UPDATE content SET title=?,updated_at=? WHERE id=?"));
+    query.prepare(QStringLiteral(
+        "UPDATE content SET updated_hlc=CASE WHEN title IS NOT ? THEN ? ELSE updated_hlc END,title=?,updated_at=? "
+        "WHERE id=?"));
+    query.addBindValue(value);
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(HybridLogicalClock::shared().now())));
     query.addBindValue(value);
     query.addBindValue(QDateTime::currentMSecsSinceEpoch());
     query.addBindValue(id);
@@ -789,7 +877,12 @@ bool HistoryRepository::updateText(qint64 id, const QString &text, const QString
     hashItem.text = text;
     QSqlQuery query(database_);
     query.prepare(QStringLiteral(
-        "UPDATE content SET plain_text=?,rich_text_html=NULL,content_hash=?,category=?,updated_at=? WHERE id=?"));
+        "UPDATE content SET updated_hlc=CASE WHEN plain_text IS NOT ? THEN ? ELSE updated_hlc END,"
+        "plain_text=?,rich_text_html=CASE WHEN plain_text IS NOT ? THEN NULL ELSE rich_text_html END,"
+        "content_hash=?,category=?,updated_at=? WHERE id=?"));
+    query.addBindValue(text);
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(HybridLogicalClock::shared().now())));
+    query.addBindValue(text);
     query.addBindValue(text);
     query.addBindValue(contentHash(hashItem));
     query.addBindValue(category);
@@ -804,12 +897,14 @@ bool HistoryRepository::updateImage(qint64 id, const QByteArray &pngData, const 
     hashItem.imageData = pngData;
     QSqlQuery query(database_);
     query.prepare(QStringLiteral(
-        "UPDATE content SET image_data=?,image_width=?,image_height=?,image_angle=0,content_hash=?,updated_at=? WHERE id=?"));
+        "UPDATE content SET image_data=?,image_width=?,image_height=?,image_angle=0,content_hash=?,updated_at=?,"
+        "updated_hlc=? WHERE id=?"));
     query.addBindValue(pngData);
     query.addBindValue(image.width());
     query.addBindValue(image.height());
     query.addBindValue(contentHash(hashItem));
     query.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(HybridLogicalClock::shared().now())));
     query.addBindValue(id);
     return query.exec();
 }
@@ -818,7 +913,10 @@ bool HistoryRepository::updateImageAngle(qint64 id, int angle) {
     angle = ((angle % 360) + 360) % 360;
     QSqlQuery query(database_);
     query.prepare(QStringLiteral(
-        "UPDATE content SET image_angle=?,updated_at=? WHERE id=?"));
+        "UPDATE content SET updated_hlc=CASE WHEN image_angle IS NOT ? THEN ? ELSE updated_hlc END,"
+        "image_angle=?,updated_at=? WHERE id=?"));
+    query.addBindValue(angle);
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(HybridLogicalClock::shared().now())));
     query.addBindValue(angle);
     query.addBindValue(QDateTime::currentMSecsSinceEpoch());
     query.addBindValue(id);
@@ -846,11 +944,207 @@ bool HistoryRepository::updateLinkMetadata(qint64 id, const QString &title,
     return false;
 }
 
+bool HistoryRepository::touch(qint64 id) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral(
+        "UPDATE content SET last_copied_at=MAX(last_copied_at,?),copy_count=copy_count+1,updated_at=?,"
+        "updated_hlc=? WHERE id=?"));
+    query.addBindValue(now);
+    query.addBindValue(now);
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(HybridLogicalClock::shared().now())));
+    query.addBindValue(id);
+    if (query.exec()) return query.numRowsAffected() > 0;
+    lastError_ = query.lastError().text();
+    return false;
+}
+
 bool HistoryRepository::remove(qint64 id) {
+    if (!database_.transaction()) return false;
+    QSqlQuery remember(database_);
+    remember.prepare(QStringLiteral(
+        "INSERT OR REPLACE INTO sync_deleted(sync_id,deleted_at) "
+        "SELECT sync_id,? FROM content WHERE id=? AND sync_id IS NOT NULL"));
+    remember.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    remember.addBindValue(id);
     QSqlQuery query(database_);
     query.prepare(QStringLiteral("DELETE FROM content WHERE id=?"));
     query.addBindValue(id);
+    if (!remember.exec() || !query.exec()) {
+        lastError_ = remember.lastError().isValid() ? remember.lastError().text() : query.lastError().text();
+        database_.rollback();
+        return false;
+    }
+    return database_.commit();
+}
+
+QVector<ClipboardItem> HistoryRepository::syncChanges(quint64 afterHlc, qint64 windowMs, int limit) const {
+    QVector<ClipboardItem> result;
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral(
+        "SELECT content.id,content.title,content.content_type,content.plain_text,content.rich_text_html,"
+        "content.link_icon_data,content.link_preview_data,content.link_preview_fetched,"
+        "content.image_data,content.image_width,content.image_height,"
+        "content.source_id,content.source_name,NULL,NULL,content.category,content.last_copied_at,content.copy_count,"
+        "NULL,NULL,content.image_angle,content.files_json,"
+        "content.sync_id,content.origin_device,content.updated_hlc FROM content "
+        "WHERE content.content_type IN ('text','image') AND content.updated_hlc>? AND content.last_copied_at>=? "
+        "ORDER BY content.updated_hlc ASC LIMIT ?"));
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(afterHlc)));
+    query.addBindValue(QDateTime::currentMSecsSinceEpoch() - windowMs);
+    query.addBindValue(std::max(1, limit));
+    if (!query.exec()) {
+        lastError_ = query.lastError().text();
+        return result;
+    }
+    while (query.next()) result.append(itemFromQuery(query, false));
+    return result;
+}
+
+HistoryRepository::ImportResult HistoryRepository::importRemoteItem(const ClipboardItem &remote) {
+    if (remote.syncID.isEmpty() || remote.isFiles()) return ImportResult::Failed;
+    if (wasDeleted(remote.syncID)) return ImportResult::Skipped;
+    HybridLogicalClock::shared().receive(remote.updatedHlc);
+    const qint64 copiedAt = milliseconds(remote.copiedAt.isValid() ? remote.copiedAt : QDateTime::currentDateTime());
+
+    QSqlQuery existing(database_);
+    existing.prepare(QStringLiteral("SELECT id,updated_hlc FROM content WHERE sync_id=?"));
+    existing.addBindValue(remote.syncID);
+    if (existing.exec() && existing.next()) {
+        const qint64 id = existing.value(0).toLongLong();
+        if (remote.updatedHlc <= quint64(existing.value(1).toLongLong())) return ImportResult::Skipped;
+        existing.finish();
+        // Last writer wins for the fields that sync: content, title, rotation.
+        ClipboardItem hashItem = remote;
+        QSqlQuery update(database_);
+        update.prepare(QStringLiteral(
+            "UPDATE content SET title=?,plain_text=?,rich_text_html=?,image_data=?,image_width=?,image_height=?,"
+            "image_angle=?,content_hash=?,category=?,last_copied_at=MAX(last_copied_at,?),updated_hlc=?,updated_at=? "
+            "WHERE id=?"));
+        update.addBindValue(remote.title);
+        update.addBindValue(remote.isText() ? QVariant(remote.text) : QVariant());
+        update.addBindValue(remote.isText() && !remote.richTextHtml.isEmpty() ? QVariant(remote.richTextHtml) : QVariant());
+        update.addBindValue(remote.isImage() ? QVariant(remote.imageData) : QVariant());
+        update.addBindValue(remote.isImage() ? QVariant(remote.image.width()) : QVariant());
+        update.addBindValue(remote.isImage() ? QVariant(remote.image.height()) : QVariant());
+        update.addBindValue(((remote.imageAngle % 360) + 360) % 360);
+        update.addBindValue(contentHash(hashItem));
+        update.addBindValue(remote.isText() ? classifyText(remote.text) : QString());
+        update.addBindValue(copiedAt);
+        update.addBindValue(QVariant::fromValue<qint64>(qint64(remote.updatedHlc)));
+        update.addBindValue(QDateTime::currentMSecsSinceEpoch());
+        update.addBindValue(id);
+        if (!update.exec()) {
+            lastError_ = update.lastError().text();
+            return ImportResult::Failed;
+        }
+        return ImportResult::Updated;
+    }
+    existing.finish();
+
+    // The same content copied on both devices: one card, the local identity.
+    QSqlQuery sameContent(database_);
+    sameContent.prepare(QStringLiteral(
+        "SELECT id,updated_hlc FROM content WHERE content_hash=? ORDER BY last_copied_at DESC LIMIT 1"));
+    sameContent.addBindValue(contentHash(remote));
+    if (sameContent.exec() && sameContent.next()) {
+        const qint64 id = sameContent.value(0).toLongLong();
+        const quint64 hlc = std::max(remote.updatedHlc, quint64(sameContent.value(1).toLongLong()));
+        sameContent.finish();
+        QSqlQuery merge(database_);
+        merge.prepare(QStringLiteral(
+            "UPDATE content SET last_copied_at=MAX(last_copied_at,?),updated_hlc=?,updated_at=? WHERE id=?"));
+        merge.addBindValue(copiedAt);
+        merge.addBindValue(QVariant::fromValue<qint64>(qint64(hlc)));
+        merge.addBindValue(QDateTime::currentMSecsSinceEpoch());
+        merge.addBindValue(id);
+        return merge.exec() ? ImportResult::Merged : ImportResult::Failed;
+    }
+    sameContent.finish();
+
+    QSqlQuery insert(database_);
+    insert.prepare(QStringLiteral(
+        "INSERT INTO content(title,content_type,plain_text,rich_text_html,image_data,image_width,image_height,"
+        "image_angle,content_hash,source_id,source_name,category,copied_at,last_copied_at,copy_count,updated_at,"
+        "sync_id,origin_device,updated_hlc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)"));
+    insert.addBindValue(remote.title.isEmpty() ? (remote.isImage() ? QStringLiteral("图片") : QStringLiteral("文本"))
+                                               : remote.title);
+    insert.addBindValue(remote.isImage() ? QStringLiteral("image") : QStringLiteral("text"));
+    insert.addBindValue(remote.isText() ? QVariant(remote.text) : QVariant());
+    insert.addBindValue(remote.isText() && !remote.richTextHtml.isEmpty() ? QVariant(remote.richTextHtml) : QVariant());
+    insert.addBindValue(remote.isImage() ? QVariant(remote.imageData) : QVariant());
+    insert.addBindValue(remote.isImage() ? QVariant(remote.image.width()) : QVariant());
+    insert.addBindValue(remote.isImage() ? QVariant(remote.image.height()) : QVariant());
+    insert.addBindValue(((remote.imageAngle % 360) + 360) % 360);
+    insert.addBindValue(contentHash(remote));
+    insert.addBindValue(QStringLiteral("clipdeck-sync:") + remote.originDevice);
+    insert.addBindValue(remote.sourceName.isEmpty() ? QStringLiteral("ClipDeck") : remote.sourceName);
+    insert.addBindValue(remote.isText() ? classifyText(remote.text) : QString());
+    insert.addBindValue(copiedAt);
+    insert.addBindValue(copiedAt);
+    insert.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    insert.addBindValue(remote.syncID);
+    insert.addBindValue(remote.originDevice.isEmpty() ? QVariant() : QVariant(remote.originDevice));
+    insert.addBindValue(QVariant::fromValue<qint64>(qint64(remote.updatedHlc)));
+    if (!insert.exec()) {
+        lastError_ = insert.lastError().text();
+        return ImportResult::Failed;
+    }
+    return ImportResult::Inserted;
+}
+
+QVector<SyncPeer> HistoryRepository::syncPeers() const {
+    QVector<SyncPeer> peers;
+    QSqlQuery query(database_);
+    if (!query.exec(QStringLiteral(
+            "SELECT device_id,hostname,public_key,addresses,last_seen,sent_cursor FROM sync_peer ORDER BY hostname"))) {
+        lastError_ = query.lastError().text();
+        return peers;
+    }
+    while (query.next()) {
+        SyncPeer peer;
+        peer.deviceID = query.value(0).toString();
+        peer.hostname = query.value(1).toString();
+        peer.publicKey = query.value(2).toByteArray();
+        // Qt 5.11 (UOS) has no Qt::SkipEmptyParts: drop empty entries by hand.
+        for (const QString &address : query.value(3).toString().split(QLatin1Char(',')))
+            if (!address.isEmpty()) peer.addresses.append(address);
+        peer.lastSeenMs = query.value(4).toLongLong();
+        peer.sentCursor = quint64(query.value(5).toLongLong());
+        peers.append(peer);
+    }
+    return peers;
+}
+
+bool HistoryRepository::saveSyncPeer(const SyncPeer &peer) {
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral(
+        "INSERT INTO sync_peer(device_id,hostname,public_key,addresses,last_seen,sent_cursor) VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(device_id) DO UPDATE SET hostname=excluded.hostname,public_key=excluded.public_key,"
+        "addresses=excluded.addresses,last_seen=excluded.last_seen,sent_cursor=excluded.sent_cursor"));
+    query.addBindValue(peer.deviceID);
+    query.addBindValue(peer.hostname);
+    query.addBindValue(peer.publicKey);
+    query.addBindValue(peer.addresses.join(QLatin1Char(',')));
+    query.addBindValue(peer.lastSeenMs);
+    query.addBindValue(QVariant::fromValue<qint64>(qint64(peer.sentCursor)));
+    if (query.exec()) return true;
+    lastError_ = query.lastError().text();
+    return false;
+}
+
+bool HistoryRepository::removeSyncPeer(const QString &deviceID) {
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral("DELETE FROM sync_peer WHERE device_id=?"));
+    query.addBindValue(deviceID);
     return query.exec();
+}
+
+bool HistoryRepository::wasDeleted(const QString &syncID) const {
+    QSqlQuery query(database_);
+    query.prepare(QStringLiteral("SELECT 1 FROM sync_deleted WHERE sync_id=?"));
+    query.addBindValue(syncID);
+    return query.exec() && query.next();
 }
 
 int HistoryRepository::clearExpired(int retentionDays) {
@@ -864,6 +1158,9 @@ int HistoryRepository::clearExpired(int retentionDays) {
         lastError_ = query.lastError().text();
         return 0;
     }
+    // Expired items are older than the 24-hour sync window, so they need no
+    // deletion record; this is just a good moment to drop old records.
+    pruneDeletedRecords();
     return query.numRowsAffected();
 }
 
@@ -875,6 +1172,14 @@ int HistoryRepository::clearExpiredAndReclaim(int retentionDays) {
 }
 
 int HistoryRepository::clearAll() {
+    // Clearing is a local deletion too: remember what was there, so peers do
+    // not refill the history from the last 24 hours.
+    QSqlQuery remember(database_);
+    remember.prepare(QStringLiteral(
+        "INSERT OR REPLACE INTO sync_deleted(sync_id,deleted_at) "
+        "SELECT sync_id,? FROM content WHERE sync_id IS NOT NULL"));
+    remember.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    if (!remember.exec()) lastError_ = remember.lastError().text();
     QSqlQuery query(database_);
     if (!query.exec(QStringLiteral("DELETE FROM content"))) {
         lastError_ = query.lastError().text();
@@ -1358,6 +1663,9 @@ ClipboardItem HistoryRepository::itemFromQuery(const QSqlQuery &query, bool deco
         item.files = FileReferences::decode(query.value(21).toByteArray());
         item.text.clear();
     }
+    item.syncID = query.value(22).toString();
+    item.originDevice = query.value(23).toString();
+    item.updatedHlc = quint64(query.value(24).toLongLong());
     return item;
 }
 

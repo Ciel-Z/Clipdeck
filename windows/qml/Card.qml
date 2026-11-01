@@ -21,6 +21,7 @@ Item {
     property var files: []
     property string sourceIconUrl: ""
     property string sourceName: ""
+    property bool fromOtherDevice: false
     property string linkTitle: ""
     property string linkHost: ""
     property string linkIconUrl: ""
@@ -175,17 +176,12 @@ Item {
                 anchors.right: parent.right
                 anchors.rightMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
-                DeckIcon {
-                    visible: card.kind === "files"
-                    anchors.fill: parent
-                    kind: "folder"
-                    color: "white"
-                }
                 SourceBadge {
-                    visible: card.kind !== "files"
                     size: parent.width
+                    isFiles: card.kind === "files"
                     iconUrl: card.sourceIconUrl
                     name: card.sourceName
+                    fromOtherDevice: card.fromOtherDevice
                 }
             }
         }
@@ -232,8 +228,10 @@ Item {
         SourceBadge {
             visible: !card.expanded
             size: 18
+            isFiles: card.kind === "files"
             iconUrl: card.sourceIconUrl
             name: card.sourceName
+            fromOtherDevice: card.fromOtherDevice
             anchors.right: parent.right
             anchors.rightMargin: 11
             anchors.top: parent.top

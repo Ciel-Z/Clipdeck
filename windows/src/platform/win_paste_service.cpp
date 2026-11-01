@@ -38,6 +38,17 @@ ClipboardItem WinPasteService::prepareForWrite(const ClipboardItem &item) {
     return prepared;
 }
 
+bool WinPasteService::copy(const ClipboardItem &item, HWND owner) {
+    const bool preserveFormatting = QSettings().value(QLatin1String(preserveFormattingKey), false).toBool();
+    const auto written = WinClipboard::write(prepareForWrite(item), !preserveFormatting, owner);
+    if (!written.ok) {
+        qWarning() << "[ClipDeck][Copy]" << written.error;
+        return false;
+    }
+    if (writeObserver_) writeObserver_(written.sequence);
+    return true;
+}
+
 WinPasteService::Result WinPasteService::paste(const ClipboardItem &item, HWND target, HWND deck,
                                                bool forcePlainText, const std::function<void()> &dismissDeck) {
     cancel();

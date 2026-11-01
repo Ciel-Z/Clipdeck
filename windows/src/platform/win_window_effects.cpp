@@ -77,6 +77,12 @@ void setFramelessChrome(HWND window) {
     DwmExtendFrameIntoClientArea(window, &margins);
 }
 
+void setRoundedPopup(HWND window) {
+    if (!window) return;
+    const int round = 3; // DWMWCP_ROUNDSMALL
+    DwmSetWindowAttribute(window, 33, &round, sizeof(round));
+}
+
 void setToolWindow(HWND window) {
     if (!window) return;
     const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);

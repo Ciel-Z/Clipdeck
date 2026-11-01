@@ -25,6 +25,26 @@ add_executable(clipdeck-linux
   src/history/clipboard_pipeline.cpp
   src/history/clipboard_pipeline.h
   src/history/clipboard_snapshot.h
+  src/history/hybrid_logical_clock.cpp
+  src/history/hybrid_logical_clock.h
+  src/sync/cpace.cpp
+  src/sync/cpace.h
+  src/sync/discovery.cpp
+  src/sync/discovery.h
+  src/sync/key_store.cpp
+  src/sync/key_store.h
+  src/sync/network_interfaces.cpp
+  src/sync/network_interfaces.h
+  src/sync/noise.cpp
+  src/sync/noise.h
+  src/sync/secure_channel.cpp
+  src/sync/secure_channel.h
+  src/sync/sync_protocol.cpp
+  src/sync/sync_protocol.h
+  src/sync/sync_service.cpp
+  src/sync/sync_service.h
+  src/ui/sync_panel.cpp
+  src/ui/sync_panel.h
   src/history/file_reference.cpp
   src/history/file_reference.h
   src/history/capture_payload.cpp
@@ -57,7 +77,17 @@ add_executable(clipdeck-linux
   src/ui/script_editor_widget.h
 )
 
-target_include_directories(clipdeck-linux PRIVATE ${X11_INCLUDE_DIR})
+# LAN sync: libsodium >= 1.0.18 (ristretto255), linked statically. The Docker
+# image builds it into /opt/libsodium (linux/docker/Dockerfile).
+set(SODIUM_ROOT "/opt/libsodium" CACHE PATH "libsodium install prefix")
+find_path(SODIUM_INCLUDE_DIR sodium.h HINTS "${SODIUM_ROOT}/include")
+find_library(SODIUM_LIBRARY NAMES libsodium.a sodium HINTS "${SODIUM_ROOT}/lib")
+if(NOT SODIUM_INCLUDE_DIR OR NOT SODIUM_LIBRARY)
+  message(FATAL_ERROR "libsodium >= 1.0.18 is required (set SODIUM_ROOT)")
+endif()
+
+target_include_directories(clipdeck-linux PRIVATE ${X11_INCLUDE_DIR} ${SODIUM_INCLUDE_DIR} src)
+target_compile_definitions(clipdeck-linux PRIVATE SODIUM_STATIC=1)
 target_compile_definitions(clipdeck-linux PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(clipdeck-linux PRIVATE
   Qt5::Core
@@ -73,6 +103,7 @@ target_link_libraries(clipdeck-linux PRIVATE
   ${XTST_LIBRARY}
   ${XCB_LIBRARY}
   Threads::Threads
+  ${SODIUM_LIBRARY}
 )
 
 install(TARGETS clipdeck-linux

@@ -1,13 +1,24 @@
+import AppKit
 import CryptoKit
 import Foundation
 import GRDB
 
 final class HistoryRepository: @unchecked Sendable {
-    private let database: ClipDeckDatabase
+    fileprivate let database: ClipDeckDatabase
     private let duplicateWindowMilliseconds: Int64 = 24 * 60 * 60 * 1_000
+
+    /// How long a local deletion is remembered, so a peer cannot sync the
+    /// item straight back (the sync window is 24 hours).
+    static let deletedRecordRetentionMilliseconds: Int64 = 48 * 60 * 60 * 1_000
 
     init(database: ClipDeckDatabase) {
         self.database = database
+        // Later clock values must order after everything already stored.
+        if let latest = try? database.writer.read({ db in
+            try Int64.fetchOne(db, sql: "SELECT MAX(updated_hlc) FROM content")
+        }) {
+            HybridLogicalClock.shared.observe(UInt64(bitPattern: latest))
+        }
     }
 
     func ensureDefaultCategories() throws {
@@ -166,9 +177,10 @@ final class HistoryRepository: @unchecked Sendable {
                 sql: "SELECT id FROM content WHERE content_hash = ? AND last_copied_at >= ? ORDER BY last_copied_at DESC LIMIT 1",
                 arguments: [hash, duplicateCutoff]
             ) {
+                // Copying it again is a change that syncs (the item re-enters the window).
                 try db.execute(
-                    sql: "UPDATE content SET application_id = ?, last_copied_at = ?, copy_count = copy_count + 1, updated_at = ? WHERE id = ?",
-                    arguments: [applicationID, now, now, existingID]
+                    sql: "UPDATE content SET application_id = ?, last_copied_at = ?, copy_count = copy_count + 1, updated_at = ?, updated_hlc = ? WHERE id = ?",
+                    arguments: [applicationID, now, now, Self.nextClockValue(), existingID]
                 )
                 let existingTitle = try String.fetchOne(
                     db,
@@ -205,14 +217,15 @@ final class HistoryRepository: @unchecked Sendable {
                         title, link_icon_data, link_preview_data, link_preview_fetched, content_type, plain_text, rich_text, rich_text_type,
                         image_data, image_width, image_height, image_format, image_angle, file_references,
                         content_hash, content_size, application_id,
-                        copied_at, last_copied_at, copy_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        copied_at, last_copied_at, copy_count, created_at, updated_at, sync_id, updated_hlc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                     """,
                 arguments: [
                     item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
                     values.type, values.plainText, values.richText, values.richTextType,
                     values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle, values.files,
                     hash, values.size, applicationID, now, now, now, now,
+                    UUID().uuidString.lowercased(), Self.nextClockValue(),
                 ]
             )
             return (db.lastInsertedRowID, item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview, item.imageAngle)
@@ -265,30 +278,90 @@ final class HistoryRepository: @unchecked Sendable {
         }
     }
 
+    /// Deleting is local only; the sync ID is remembered for a while so a
+    /// peer cannot sync the item straight back.
     func delete(_ item: ClipboardItem) throws {
         guard let databaseID = item.databaseID else { return }
         try database.writer.write { db in
+            try db.execute(
+                sql: """
+                    INSERT OR REPLACE INTO sync_deleted (sync_id, deleted_at)
+                    SELECT sync_id, ? FROM content WHERE id = ? AND sync_id IS NOT NULL
+                    """,
+                arguments: [Self.milliseconds(Date()), databaseID]
+            )
             try db.execute(sql: "DELETE FROM content WHERE id = ?", arguments: [databaseID])
+        }
+    }
+
+    /// A paste or copy from the Deck counts as copying the item again: it
+    /// moves to the front and, with LAN sync, into the window that is synced.
+    func touch(_ item: ClipboardItem) throws {
+        guard let databaseID = item.databaseID else { return }
+        let now = Self.milliseconds(Date())
+        try database.writer.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE content SET last_copied_at = MAX(last_copied_at, ?), copy_count = copy_count + 1,
+                        updated_at = ?, updated_hlc = ?
+                    WHERE id = ?
+                    """,
+                arguments: [now, now, Self.nextClockValue(), databaseID]
+            )
+        }
+    }
+
+    func wasDeleted(syncID: String) throws -> Bool {
+        try database.writer.read { db in
+            try Bool.fetchOne(db, sql: "SELECT 1 FROM sync_deleted WHERE sync_id = ?", arguments: [syncID]) ?? false
+        }
+    }
+
+    /// The row's sync identity and clock value (tests and, later, sync).
+    func syncState(databaseID: Int64) throws -> (syncID: String, updatedHLC: UInt64)? {
+        try database.writer.read { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT sync_id, updated_hlc FROM content WHERE id = ?",
+                arguments: [databaseID]
+            ), let syncID: String = row["sync_id"] else { return nil }
+            return (syncID, UInt64(bitPattern: row["updated_hlc"] as Int64))
         }
     }
 
     func update(_ item: ClipboardItem) throws {
         guard let databaseID = item.databaseID else { return }
         let values = Self.databaseValues(item.payload)
+        let hash = Self.hash(item.payload)
         try database.writer.write { db in
+            // Only changes that sync move the clock on: the title, content and
+            // rotation. Link metadata is fetched by each device itself.
+            let stored = try Row.fetchOne(
+                db,
+                sql: "SELECT title, content_hash, image_angle, updated_hlc FROM content WHERE id = ?",
+                arguments: [databaseID]
+            )
+            let syncedFieldsChanged = stored.map {
+                ($0["title"] as String) != item.title
+                    || ($0["content_hash"] as String) != hash
+                    || ($0["image_angle"] as Int) != item.imageAngle
+            } ?? false
+            let updatedHLC = syncedFieldsChanged
+                ? Self.nextClockValue()
+                : (stored?["updated_hlc"] as Int64?) ?? 0
             try db.execute(
                 sql: """
                     UPDATE content SET
                         title = ?, link_icon_data = ?, link_preview_data = ?, link_preview_fetched = ?, content_type = ?, plain_text = ?, rich_text = ?, rich_text_type = ?,
                         image_data = ?, image_width = ?, image_height = ?, image_format = ?, image_angle = ?, file_references = ?,
-                        content_hash = ?, content_size = ?, updated_at = ?
+                        content_hash = ?, content_size = ?, updated_at = ?, updated_hlc = ?
                     WHERE id = ?
                     """,
                 arguments: [
                     item.title, item.linkIconData, item.linkPreviewData, item.hasFetchedLinkPreview,
                     values.type, values.plainText, values.richText, values.richTextType,
                     values.imageData, values.imageWidth, values.imageHeight, values.imageFormat, item.imageAngle, values.files,
-                    Self.hash(item.payload), values.size, Self.milliseconds(Date()), databaseID,
+                    hash, values.size, Self.milliseconds(Date()), updatedHLC, databaseID,
                 ]
             )
         }
@@ -319,6 +392,12 @@ final class HistoryRepository: @unchecked Sendable {
         guard retentionDays > 0 else { return 0 }
         let cutoff = Self.milliseconds(Date().addingTimeInterval(-Double(retentionDays) * 86_400))
         return try database.writer.write { db in
+            // Expired items are older than the 24-hour sync window and need no
+            // deletion record; this is just a good moment to drop old records.
+            try db.execute(
+                sql: "DELETE FROM sync_deleted WHERE deleted_at < ?",
+                arguments: [Self.milliseconds(Date()) - Self.deletedRecordRetentionMilliseconds]
+            )
             var total = 0
             while true {
                 try db.execute(
@@ -353,6 +432,15 @@ final class HistoryRepository: @unchecked Sendable {
     @discardableResult
     func clearAllHistoryAndReclaim() throws -> Int {
         let deleted = try database.writer.write { db in
+            // Clearing is a local deletion too: remember what was there, so
+            // peers do not refill the history from the last 24 hours.
+            try db.execute(
+                sql: """
+                    INSERT OR REPLACE INTO sync_deleted (sync_id, deleted_at)
+                    SELECT sync_id, ? FROM content WHERE sync_id IS NOT NULL
+                    """,
+                arguments: [Self.milliseconds(Date())]
+            )
             try db.execute(sql: "DELETE FROM content")
             return db.changesCount
         }
@@ -368,7 +456,7 @@ final class HistoryRepository: @unchecked Sendable {
         database.releaseMemory()
     }
 
-    private func upsertApplication(_ application: SourceApplication, at now: Int64, in db: Database) throws -> Int64 {
+    fileprivate func upsertApplication(_ application: SourceApplication, at now: Int64, in db: Database) throws -> Int64 {
         let bundleID = application.bundleIdentifier ?? "unknown:\(application.name)"
         try db.execute(
             sql: """
@@ -381,7 +469,7 @@ final class HistoryRepository: @unchecked Sendable {
         return try Int64.fetchOne(db, sql: "SELECT id FROM application WHERE bundle_id = ?", arguments: [bundleID])!
     }
 
-    private static func item(_ row: Row) -> ClipboardItem? {
+    fileprivate static func item(_ row: Row) -> ClipboardItem? {
         let payload: ClipboardPayload
         if (row["content_type"] as String) == "text" {
             guard let text: String = row["plain_text"] else { return nil }
@@ -436,7 +524,7 @@ final class HistoryRepository: @unchecked Sendable {
         )
     }
 
-    private static func hash(_ payload: ClipboardPayload) -> String {
+    fileprivate static func hash(_ payload: ClipboardPayload) -> String {
         let data: Data
         switch payload {
         case let .text(text, _): data = Data("text:\(text)".utf8)
@@ -454,6 +542,10 @@ final class HistoryRepository: @unchecked Sendable {
                 return "\"\(escaped)\"*"
             }
             .joined(separator: " AND ")
+    }
+
+    private static func nextClockValue() -> Int64 {
+        Int64(bitPattern: HybridLogicalClock.shared.now())
     }
 
     private static func milliseconds(_ date: Date) -> Int64 {
@@ -475,4 +567,254 @@ final class HistoryRepository: @unchecked Sendable {
             return ("files", searchable, nil, nil, nil, nil, nil, nil, data.count, data)
         }
     }
+}
+
+/// Hybrid logical clock (docs/lan-sync-design.md §3): orders history changes
+/// across devices whose system clocks disagree. A value packs milliseconds
+/// since the epoch into the high 48 bits and a counter into the low 16, so
+/// values compare as plain integers and still read as wall-clock time. Same
+/// encoding and rules as the Linux/Windows `HybridLogicalClock`.
+final class HybridLogicalClock: @unchecked Sendable {
+    static let counterBits: UInt64 = 16
+    static let counterMask: UInt64 = (1 << counterBits) - 1
+    static let shared = HybridLogicalClock()
+
+    private let wallClockMilliseconds: () -> Int64
+    private let lock = NSLock()
+    private var lastValue: UInt64 = 0
+
+    init(wallClockMilliseconds: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1_000) }) {
+        self.wallClockMilliseconds = wallClockMilliseconds
+    }
+
+    static func make(milliseconds: Int64, counter: UInt64 = 0) -> UInt64 {
+        (UInt64(max(0, milliseconds)) << counterBits) | (counter & counterMask)
+    }
+
+    static func milliseconds(of value: UInt64) -> Int64 { Int64(value >> counterBits) }
+    static func counter(of value: UInt64) -> UInt64 { value & counterMask }
+
+    /// A local change.
+    func now() -> UInt64 { advance(past: 0) }
+
+    /// A value received from another device: later values order after it.
+    func receive(_ remote: UInt64) -> UInt64 { advance(past: remote) }
+
+    /// Makes later values greater than one already stored.
+    func observe(_ value: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        lastValue = max(lastValue, value)
+    }
+
+    var last: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastValue
+    }
+
+    // The wall clock if it is ahead of everything seen so far, otherwise one
+    // tick past the larger of the last value and `floor` (a full counter
+    // carries into the milliseconds).
+    private func advance(past floor: UInt64) -> UInt64 {
+        let fromWall = Self.make(milliseconds: wallClockMilliseconds())
+        lock.lock()
+        defer { lock.unlock() }
+        let seen = max(lastValue, floor)
+        lastValue = fromWall > seen ? fromWall : seen + 1
+        return lastValue
+    }
+}
+
+// MARK: - LAN sync (docs/lan-sync-design.md), as linux/src/history_repository.cpp
+
+/// A paired device. Its locate key lives in the Keychain, not here.
+struct SyncPeerRecord: Equatable, Sendable {
+    var deviceID: String
+    var hostname: String
+    var publicKey: Data
+    var addresses: [String] = []
+    var lastSeenMilliseconds: Int64 = 0
+    var sentCursor: UInt64 = 0
+}
+
+extension HistoryRepository {
+    enum SyncImportResult: Equatable {
+        case inserted(Int64), updated(Int64), merged(Int64), skipped, failed
+    }
+
+    /// Changes to send: non-file items copied within `windowMilliseconds`
+    /// whose clock is past `after`, oldest change first. Images go as PNG.
+    func syncChanges(after: UInt64, windowMilliseconds: Int64, limit: Int) throws -> [SyncProtocol.WireItem] {
+        let cutoff = Self.syncMilliseconds(Date()) - windowMilliseconds
+        return try database.writer.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT content.*, application.name AS application_name
+                    FROM content LEFT JOIN application ON application.id = content.application_id
+                    WHERE content.content_type IN ('text', 'image') AND content.updated_hlc > ? AND content.last_copied_at >= ?
+                    ORDER BY content.updated_hlc ASC LIMIT ?
+                    """,
+                arguments: [Int64(bitPattern: after), cutoff, max(1, limit)]
+            )
+            return rows.compactMap { row -> SyncProtocol.WireItem? in
+                guard let syncID: String = row["sync_id"] else { return nil }
+                let isImage = (row["content_type"] as String) == "image"
+                var body = Data()
+                if isImage {
+                    guard let data: Data = row["image_data"] else { return nil }
+                    let format: String = row["image_format"] ?? "png"
+                    guard let png = format == "png" ? data : Self.pngData(from: data) else { return nil }
+                    body = png
+                } else {
+                    guard let text: String = row["plain_text"] else { return nil }
+                    body = Data(text.utf8)
+                }
+                var wire = SyncProtocol.WireItem(
+                    syncID: syncID,
+                    origin: row["origin_device"] ?? "",
+                    hlc: UInt64(bitPattern: row["updated_hlc"] as Int64),
+                    isImage: isImage,
+                    title: row["title"] ?? "",
+                    copiedAtMilliseconds: row["last_copied_at"],
+                    angle: row["image_angle"] ?? 0,
+                    sourceName: row["application_name"] ?? "ClipDeck",
+                    html: nil
+                )
+                wire.body = body
+                return SyncProtocol.makeWireItem(wire)
+            }
+        }
+    }
+
+    /// Merges an item from a peer: a newer clock value wins for the same sync
+    /// ID; the same content merges into the local row; locally deleted items
+    /// are skipped. Classification is left to the caller.
+    func importRemote(_ wire: SyncProtocol.WireItem) throws -> SyncImportResult {
+        if try wasDeleted(syncID: wire.syncID) { return .skipped }
+        _ = HybridLogicalClock.shared.receive(wire.hlc)
+        let payload: ClipboardPayload
+        if wire.isImage {
+            guard let representation = NSBitmapImageRep(data: wire.body) else { return .failed }
+            payload = .image(data: wire.body, width: representation.pixelsWide, height: representation.pixelsHigh, format: .png)
+        } else {
+            payload = .text(plainText: wire.text, rtfData: nil)
+        }
+        let values = Self.databaseValues(payload)
+        let hash = Self.hash(payload)
+        let copiedAt = wire.copiedAtMilliseconds > 0 ? wire.copiedAtMilliseconds : Self.syncMilliseconds(Date())
+        let now = Self.syncMilliseconds(Date())
+        let hlc = Int64(bitPattern: wire.hlc)
+        let title = wire.title.isEmpty ? payload.defaultTitle : wire.title
+        return try database.writer.write { db -> SyncImportResult in
+            if let existing = try Row.fetchOne(db, sql: "SELECT id, updated_hlc FROM content WHERE sync_id = ?",
+                                                 arguments: [wire.syncID]) {
+                let id: Int64 = existing["id"]
+                guard UInt64(bitPattern: existing["updated_hlc"] as Int64) < wire.hlc else { return .skipped }
+                try db.execute(
+                    sql: """
+                        UPDATE content SET title = ?, content_type = ?, plain_text = ?, rich_text = NULL, rich_text_type = NULL,
+                            image_data = ?, image_width = ?, image_height = ?, image_format = ?, image_angle = ?,
+                            content_hash = ?, content_size = ?, last_copied_at = MAX(last_copied_at, ?),
+                            updated_hlc = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                    arguments: [title, values.type, values.plainText, values.imageData, values.imageWidth, values.imageHeight,
+                                values.imageFormat, wire.angle, hash, values.size, copiedAt, hlc, now, id]
+                )
+                return .updated(id)
+            }
+            if let same = try Row.fetchOne(
+                db, sql: "SELECT id, updated_hlc FROM content WHERE content_hash = ? ORDER BY last_copied_at DESC LIMIT 1",
+                arguments: [hash]) {
+                let id: Int64 = same["id"]
+                try db.execute(
+                    sql: "UPDATE content SET last_copied_at = MAX(last_copied_at, ?), updated_hlc = MAX(updated_hlc, ?), updated_at = ? WHERE id = ?",
+                    arguments: [copiedAt, hlc, now, id]
+                )
+                return .merged(id)
+            }
+            let application = SourceApplication(
+                bundleIdentifier: "clipdeck-sync:\(wire.origin)",
+                name: wire.sourceName.isEmpty ? "ClipDeck" : wire.sourceName,
+                iconData: nil
+            )
+            let applicationID = try self.upsertApplication(application, at: now, in: db)
+            try db.execute(
+                sql: """
+                    INSERT INTO content (
+                        title, link_preview_fetched, content_type, plain_text, image_data, image_width, image_height, image_format,
+                        image_angle, content_hash, content_size, application_id, copied_at, last_copied_at, copy_count,
+                        created_at, updated_at, sync_id, origin_device, updated_hlc
+                    ) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [title, values.type, values.plainText, values.imageData, values.imageWidth, values.imageHeight,
+                            values.imageFormat, wire.angle, hash, values.size, applicationID, copiedAt, copiedAt, now, now,
+                            wire.syncID, wire.origin.isEmpty ? nil : wire.origin, hlc]
+            )
+            return .inserted(db.lastInsertedRowID)
+        }
+    }
+
+    func syncPeers() throws -> [SyncPeerRecord] {
+        try database.writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM sync_peer ORDER BY hostname").map { row in
+                SyncPeerRecord(
+                    deviceID: row["device_id"],
+                    hostname: row["hostname"],
+                    publicKey: row["public_key"],
+                    addresses: (row["addresses"] as String? ?? "").split(separator: ",").map(String.init),
+                    lastSeenMilliseconds: row["last_seen"],
+                    sentCursor: UInt64(bitPattern: row["sent_cursor"] as Int64)
+                )
+            }
+        }
+    }
+
+    func saveSyncPeer(_ peer: SyncPeerRecord) throws {
+        try database.writer.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO sync_peer (device_id, hostname, public_key, addresses, last_seen, sent_cursor)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id) DO UPDATE SET hostname = excluded.hostname, public_key = excluded.public_key,
+                        addresses = excluded.addresses, last_seen = excluded.last_seen, sent_cursor = excluded.sent_cursor
+                    """,
+                arguments: [peer.deviceID, peer.hostname, peer.publicKey, peer.addresses.joined(separator: ","),
+                            peer.lastSeenMilliseconds, Int64(bitPattern: peer.sentCursor)]
+            )
+        }
+    }
+
+    func removeSyncPeer(deviceID: String) throws {
+        try database.writer.write { db in
+            try db.execute(sql: "DELETE FROM sync_peer WHERE device_id = ?", arguments: [deviceID])
+        }
+    }
+
+    /// The item for a row (after an import, to classify it).
+    func item(databaseID: Int64) throws -> ClipboardItem? {
+        try database.writer.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT content.*, application.bundle_id, application.name AS application_name, application.icon_data,
+                           category.name AS category_name, category.icon AS category_icon, category.script AS category_script,
+                           category.preview_language, category.sort_order
+                    FROM content LEFT JOIN application ON application.id = content.application_id
+                    LEFT JOIN category ON category.id = content.category_id
+                    WHERE content.id = ?
+                    """,
+                arguments: [databaseID]
+            ).flatMap { Self.item($0) }
+        }
+    }
+
+    static func pngData(from data: Data) -> Data? {
+        guard let representation = NSBitmapImageRep(data: data) else { return nil }
+        return representation.representation(using: .png, properties: [:])
+    }
+
+    fileprivate static func syncMilliseconds(_ date: Date) -> Int64 { Int64(date.timeIntervalSince1970 * 1_000) }
 }

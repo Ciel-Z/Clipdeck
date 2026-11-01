@@ -17,6 +17,7 @@ Window {
 
     readonly property var entries: [
         { action: "paste", text: "粘贴", icon: "clipboard", shortcut: "Enter", visible: true, enabled: true },
+        { action: "copy", text: "复制", icon: "copy", shortcut: "Ctrl+C", visible: true, enabled: true },
         { action: "open", text: "访问", icon: "safari", shortcut: "Ctrl+O", visible: isLink, enabled: true },
         { separator: true, visible: true },
         { action: "edit", text: "编辑", icon: "pencil", shortcut: "Ctrl+E", visible: true, enabled: !isFiles },
@@ -65,6 +66,7 @@ Window {
         close()
         switch (entry.action) {
         case "paste": deck.paste(itemIndex, false); break
+        case "copy": deck.copyItem(itemIndex); break
         case "open": deck.openItem(itemIndex); break
         case "edit": deck.editItem(itemIndex); break
         case "rename": deck.renameItem(itemIndex); break

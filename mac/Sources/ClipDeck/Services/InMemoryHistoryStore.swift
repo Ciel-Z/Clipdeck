@@ -45,6 +45,8 @@ final class InMemoryHistoryStore: ObservableObject {
     @Published private(set) var renamingItemID: ClipboardItem.ID?
     @Published private(set) var isQuickPasteOverlayVisible = false
     @Published var filePasteFeedback: FilePasteFeedback?
+    /// LAN sync: the Deck shows its loader while items are exchanged.
+    @Published var isSyncing = false
     var onDelete: ((ClipboardItem) -> Void)?
     var onUpdate: ((ClipboardItem) -> Void)?
     /// Classifies edited text again, so a card whose content no longer fits its
@@ -120,6 +122,28 @@ final class InMemoryHistoryStore: ObservableObject {
             default: false
             }
         }
+    }
+
+    /// A paste or copy from the Deck counts as copying the item again: it
+    /// moves to the front with a fresh copy time. Selection and category stay.
+    func markCopied(_ itemID: ClipboardItem.ID) {
+        guard let current = items.first(where: { $0.id == itemID }) else { return }
+        let updated = ClipboardItem(
+            id: current.id,
+            databaseID: current.databaseID,
+            title: current.title,
+            linkIconData: current.linkIconData,
+            linkPreviewData: current.linkPreviewData,
+            hasFetchedLinkPreview: current.hasFetchedLinkPreview,
+            imageAngle: current.imageAngle,
+            payload: current.payload,
+            sourceApplication: current.sourceApplication,
+            category: current.category,
+            copiedAt: Date()
+        )
+        items.removeAll { $0.id == itemID }
+        items.insert(updated, at: 0)
+        replace(current, with: updated, in: &searchResults)
     }
 
     func insert(_ item: ClipboardItem) {

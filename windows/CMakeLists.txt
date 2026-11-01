@@ -20,11 +20,30 @@ add_library(clipdeck-core STATIC
   ${LINUX_SRC}/history/capture_payload.cpp
   ${LINUX_SRC}/history/file_paste_controller.cpp
   ${LINUX_SRC}/history/clipboard_pipeline.cpp
+  ${LINUX_SRC}/history/hybrid_logical_clock.cpp
+  ${LINUX_SRC}/sync/noise.cpp
+  ${LINUX_SRC}/sync/cpace.cpp
+  ${LINUX_SRC}/sync/sync_protocol.cpp
+  ${LINUX_SRC}/sync/key_store.cpp
+  ${LINUX_SRC}/sync/network_interfaces.cpp
+  ${LINUX_SRC}/sync/secure_channel.cpp
+  ${LINUX_SRC}/sync/discovery.cpp
+  ${LINUX_SRC}/sync/sync_service.cpp
   ${LINUX_SRC}/ui/display_scale.cpp
 )
 target_include_directories(clipdeck-core PUBLIC ${LINUX_SRC})
 target_compile_definitions(clipdeck-core PUBLIC QT_NO_KEYWORDS UNICODE _UNICODE NOMINMAX CLIPDECK_NO_X11)
-target_link_libraries(clipdeck-core PUBLIC Qt6::Core Qt6::Gui Qt6::Sql Qt6::Qml)
+target_link_libraries(clipdeck-core PUBLIC Qt6::Core Qt6::Gui Qt6::Sql Qt6::Qml Qt6::Network crypt32)
+
+# libsodium (>= 1.0.18 for ristretto255), linked statically: LAN sync crypto
+# (docs/lan-sync-design.md §9). Point SODIUM_ROOT at the official MinGW build,
+# e.g. libsodium-1.0.20-mingw/libsodium-win64.
+set(SODIUM_ROOT "" CACHE PATH "libsodium install prefix (include/ and lib/libsodium.a)")
+find_path(SODIUM_INCLUDE_DIR sodium.h HINTS "${SODIUM_ROOT}/include" REQUIRED)
+find_library(SODIUM_LIBRARY NAMES libsodium.a sodium HINTS "${SODIUM_ROOT}/lib" REQUIRED)
+target_include_directories(clipdeck-core PUBLIC ${SODIUM_INCLUDE_DIR})
+target_compile_definitions(clipdeck-core PUBLIC SODIUM_STATIC=1)
+target_link_libraries(clipdeck-core PUBLIC ${SODIUM_LIBRARY})
 
 # Win32 platform layer: clipboard monitor/reader/writer, source application,
 # global hot key.
@@ -110,6 +129,8 @@ qt_add_qml_module(clipdeck
     qml/OverlayScrollBar.qml
     qml/ColorPicker.qml
     qml/SegmentedControl.qml
+    qml/SyncPanel.qml
+    qml/SyncLoader.qml
 )
 # Windows icons stand on a transparent background (the mac AppIcon is a tile).
 set(APP_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/../shared/assets/windows")
@@ -137,6 +158,13 @@ target_link_libraries(store-tests PRIVATE clipdeck-store)
 
 add_executable(deck-tests tests/deck_tests.cpp)
 target_link_libraries(deck-tests PRIVATE clipdeck-app)
+
+add_executable(sync-tests tests/sync_tests.cpp)
+target_link_libraries(sync-tests PRIVATE clipdeck-core)
+
+# Golden values for the macOS implementation (mac/Tests/.../SyncGoldenTests.swift).
+add_executable(sync-golden tests/sync_golden.cpp)
+target_link_libraries(sync-golden PRIVATE clipdeck-core)
 
 add_executable(platform-tests tests/platform_tests.cpp)
 target_link_libraries(platform-tests PRIVATE clipdeck-platform Qt6::Widgets)

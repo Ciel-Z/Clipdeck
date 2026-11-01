@@ -50,6 +50,7 @@ QHash<int, QByteArray> DeckItemModel::roleNames() const {
         {ColorTextRole, "colorText"},
         {ImmersiveRole, "immersive"},
         {HighlightedTextRole, "highlightedText"},
+        {FromOtherDeviceRole, "fromOtherDevice"},
     };
 }
 
@@ -59,6 +60,7 @@ QVariant DeckItemModel::data(const QModelIndex &index, int role) const {
     const QString id = item.id.toString(QUuid::WithoutBraces);
     switch (role) {
     case IdRole: return id;
+    case FromOtherDeviceRole: return !item.originDevice.isEmpty() && item.originDevice != localDeviceId_;
     case KindRole: return DeckPresentation::cardKind(item);
     case TitleRole: return DeckPresentation::cardHeaderTitle(item);
     case CategoryLabelRole: return DeckPresentation::categoryLabel(item);

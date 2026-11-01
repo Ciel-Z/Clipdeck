@@ -26,6 +26,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       build-essential \
       ca-certificates \
       cmake \
+      curl \
       dpkg-dev \
       fakeroot \
       file \
@@ -44,5 +45,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       libxrender-dev \
       libxtst-dev \
       libxcb1-dev
+
+# LAN sync needs libsodium >= 1.0.18 (ristretto255); Debian 10 ships 1.0.17.
+# Built static from the official release, pinned by its SHA-256.
+ARG SODIUM_VERSION=1.0.20
+ARG SODIUM_SHA256=ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19
+RUN curl -fsSL -o /tmp/libsodium.tar.gz \
+      "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz" \
+    && echo "${SODIUM_SHA256}  /tmp/libsodium.tar.gz" | sha256sum -c - \
+    && mkdir -p /tmp/libsodium && tar -xzf /tmp/libsodium.tar.gz -C /tmp/libsodium --strip-components=1 \
+    && cd /tmp/libsodium \
+    && ./configure --prefix=/opt/libsodium --disable-shared --enable-static --with-pic \
+    && make -j"$(nproc)" && make install \
+    && rm -rf /tmp/libsodium /tmp/libsodium.tar.gz
 
 WORKDIR /workspace

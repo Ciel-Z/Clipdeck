@@ -8,6 +8,7 @@
 #include "win_tray.h"
 #include "win_source_application.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QBuffer>
 #include <QClipboard>
@@ -366,7 +367,25 @@ void trayTests() {
     check(tray.toolTip().startsWith(QStringLiteral("全局快捷键注册失败：")), "tray-tooltip-reports-hotkey-failure");
     tray.setHotkeyError(QString());
 
-    check(tray.menu()->actions().size() == 4, "tray-menu-has-settings-blur-separator-quit");
+    // 局域网同步 ▸, separator, 设置…, 背景模糊, separator, 退出.
+    check(tray.menu()->actions().size() == 6 && tray.menu()->actions().first()->menu() == tray.syncMenu(),
+          "tray-menu-has-sync-settings-blur-separator-quit");
+    QStringList syncItems;
+    for (QAction *action : tray.syncMenu()->actions())
+        if (!action->isSeparator()) syncItems.append(action->text());
+    check(syncItems == QStringList({QStringLiteral("未配对设备"), QStringLiteral("局域网可见"), QStringLiteral("暂停同步"),
+                                    QStringLiteral("立即同步"), QStringLiteral("同步设备…")}),
+          "tray-sync-submenu-lists-status-visibility-pause-sync-panel");
+    QList<bool> visibility;
+    QObject::connect(&tray, &WinTray::syncVisibilityToggled, [&](bool visible) { visibility.append(visible); });
+    tray.setSyncState(QStringLiteral("已连接 2 台设备"), true, 161, false, true);
+    check(tray.syncMenu()->actions().first()->text() == QStringLiteral("已连接 2 台设备")
+              && !tray.syncMenu()->actions().first()->isEnabled() && visibility.isEmpty(),
+          "tray-sync-status-is-a-disabled-line");
+    check(syncItems.size() == 5 && tray.syncMenu()->actions().at(2)->text() == QStringLiteral("局域网可见 (2:41)"),
+          "tray-sync-visibility-shows-the-countdown");
+    tray.syncMenu()->actions().at(2)->trigger();
+    check(visibility == QList<bool>{false}, "tray-sync-visibility-toggle-emits");
     check(tray.blurAction()->text() == QStringLiteral("背景模糊") && tray.blurAction()->isCheckable(),
           "tray-menu-blur-is-a-checkbox");
     QList<bool> blurChanges;

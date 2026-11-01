@@ -448,6 +448,25 @@ void testSignalsFireOnlyOnChange() {
 
 } // namespace
 
+void testMarkCopiedMovesTheItemToTheFront() {
+    HistoryStore store;
+    ClipboardItem older = item("older");
+    older.copiedAt = QDateTime::currentDateTime().addSecs(-3600);
+    const ClipboardItem newer = item("newer");
+    store.insert(older);
+    store.insert(newer);
+    store.setSelectedItemId(newer.id);
+
+    store.markCopied(older.id);
+    check(store.items().first().id == older.id && store.items().size() == 2, "copied-item-moves-to-front");
+    check(store.items().first().copiedAt > older.copiedAt
+              && store.items().first().copyCount == older.copyCount + 1,
+          "copied-item-gets-a-fresh-copy-time");
+    check(store.selectedItemId() == newer.id, "marking-copied-keeps-the-selection");
+    store.markCopied(QUuid::createUuid());
+    check(store.items().size() == 2, "marking-an-unknown-item-does-nothing");
+}
+
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
     testNewestItemIsSelectedAndCapacityIsEnforced();
@@ -474,6 +493,7 @@ int main(int argc, char *argv[]) {
     testFilesCannotBeEdited();
     testEditingASummaryMarksTheTextComplete();
     testEditingReclassifiesText();
+    testMarkCopiedMovesTheItemToTheFront();
     testRenamingPersistsAndTitleParticipatesInLocalSearch();
     testQuickPasteOverlayTracksCommandModifierState();
     testLinkMetadataReplacesDefaultTitleOnce();

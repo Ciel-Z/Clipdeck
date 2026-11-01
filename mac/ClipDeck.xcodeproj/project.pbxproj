@@ -32,6 +32,12 @@
 		A10000000000000000000018 /* clipdeck.svg in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001A /* clipdeck.svg */; };
 		A10000000000000000000019 /* ScriptEditorWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001B /* ScriptEditorWebView.swift */; };
 		A1000000000000000000001A /* script-editor in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001C /* script-editor */; };
+		A1000000000000000000001B /* SyncCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001D /* SyncCrypto.swift */; };
+		A1000000000000000000001C /* SyncProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001E /* SyncProtocol.swift */; };
+		A1000000000000000000001D /* SyncNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001F /* SyncNetwork.swift */; };
+		A1000000000000000000001E /* SyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* SyncService.swift */; };
+		A1000000000000000000001F /* SyncPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* SyncPanelView.swift */; };
+		A10000000000000000000020 /* Clibsodium in Frameworks */ = {isa = PBXBuildFile; productRef = H10000000000000000000004 /* Clibsodium */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -63,13 +69,18 @@
 		B1000000000000000000001A /* clipdeck.svg */ = {isa = PBXFileReference; lastKnownFileType = image.svg; name = clipdeck.svg; path = ../shared/assets/clipdeck.svg; sourceTree = SOURCE_ROOT; };
 		B1000000000000000000001B /* ScriptEditorWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/UI/ScriptEditorWebView.swift; sourceTree = SOURCE_ROOT; };
 		B1000000000000000000001C /* script-editor */ = {isa = PBXFileReference; explicitFileType = folder; name = "script-editor"; path = "../script-editor/dist"; sourceTree = SOURCE_ROOT; };
+		B1000000000000000000001D /* SyncCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Sync/SyncCrypto.swift; sourceTree = SOURCE_ROOT; };
+		B1000000000000000000001E /* SyncProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Sync/SyncProtocol.swift; sourceTree = SOURCE_ROOT; };
+		B1000000000000000000001F /* SyncNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Sync/SyncNetwork.swift; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000021 /* SyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Sync/SyncService.swift; sourceTree = SOURCE_ROOT; };
+		B10000000000000000000022 /* SyncPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ClipDeck/Sync/SyncPanelView.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		C10000000000000000000001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			files = (A1000000000000000000000B /* GRDB in Frameworks */);
+			files = (A1000000000000000000000B /* GRDB in Frameworks */, A10000000000000000000020 /* Clibsodium in Frameworks */);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -112,6 +123,11 @@
 				B10000000000000000000018 /* AppPreferences.swift */,
 				B10000000000000000000019 /* LaunchAtLoginController.swift */,
 				B1000000000000000000001A /* clipdeck.svg */,
+				B1000000000000000000001D /* SyncCrypto.swift */,
+				B1000000000000000000001E /* SyncProtocol.swift */,
+				B1000000000000000000001F /* SyncNetwork.swift */,
+				B10000000000000000000021 /* SyncService.swift */,
+				B10000000000000000000022 /* SyncPanelView.swift */,
 			);
 			name = ClipDeck;
 			sourceTree = "<group>";
@@ -137,7 +153,7 @@
 			dependencies = ();
 			name = ClipDeck;
 			productName = ClipDeck;
-			packageProductDependencies = (H10000000000000000000002 /* GRDB */);
+			packageProductDependencies = (H10000000000000000000002 /* GRDB */, H10000000000000000000004 /* Clibsodium */);
 			productReference = B1000000000000000000000B /* ClipDeck.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -160,7 +176,7 @@
 			mainGroup = D10000000000000000000001;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D10000000000000000000003 /* Products */;
-			packageReferences = (H10000000000000000000001 /* XCRemoteSwiftPackageReference "GRDB.swift" */);
+			packageReferences = (H10000000000000000000001 /* XCRemoteSwiftPackageReference "GRDB.swift" */, H10000000000000000000003 /* XCRemoteSwiftPackageReference "swift-sodium" */);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (E10000000000000000000001 /* ClipDeck */);
@@ -207,6 +223,11 @@
 				A10000000000000000000016 /* AppPreferences.swift in Sources */,
 				A10000000000000000000017 /* LaunchAtLoginController.swift in Sources */,
 				A10000000000000000000019 /* ScriptEditorWebView.swift in Sources */,
+				A1000000000000000000001B /* SyncCrypto.swift in Sources */,
+				A1000000000000000000001C /* SyncProtocol.swift in Sources */,
+				A1000000000000000000001D /* SyncNetwork.swift in Sources */,
+				A1000000000000000000001E /* SyncService.swift in Sources */,
+				A1000000000000000000001F /* SyncPanelView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -248,6 +269,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = ClipDeck;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ClipDeck 通过局域网与你配对的设备同步剪贴板历史。";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.clipdeck.local;
@@ -271,6 +293,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = ClipDeck;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ClipDeck 通过局域网与你配对的设备同步剪贴板历史。";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.clipdeck.local;
@@ -302,6 +325,11 @@
 			repositoryURL = "https://github.com/groue/GRDB.swift.git";
 			requirement = {kind = upToNextMajorVersion; minimumVersion = 7.10.0;};
 		};
+		H10000000000000000000003 /* XCRemoteSwiftPackageReference "swift-sodium" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jedisct1/swift-sodium.git";
+			requirement = {kind = upToNextMinorVersion; minimumVersion = 0.9.1;};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -309,6 +337,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = H10000000000000000000001 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;
+		};
+		H10000000000000000000004 /* Clibsodium */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = H10000000000000000000003 /* XCRemoteSwiftPackageReference "swift-sodium" */;
+			productName = Clibsodium;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
