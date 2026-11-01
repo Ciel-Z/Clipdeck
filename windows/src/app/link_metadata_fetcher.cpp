@@ -178,18 +178,34 @@ void LinkMetadataFetcher::fetchPreview(const QUrl &url, std::function<void(QByte
 }
 
 void LinkMetadataFetcher::fetch(const QUuid &itemId, const QUrl &url, Completion completion) {
-    if (!isWeb(url) || pending_.contains(itemId)) return;
-    pending_.insert(itemId);
+    if (!isWeb(url) || requested_.contains(itemId)) return;
+    requested_.insert(itemId);
+    waiting_.append({url, std::move(completion)});
+    startWaiting();
+}
+
+void LinkMetadataFetcher::startWaiting() {
+    while (running_ < kMaximumConcurrentFetches && !waiting_.isEmpty()) {
+        Waiting next = waiting_.takeFirst();
+        ++running_;
+        start(next.url, [this, completion = std::move(next.completion)](const Metadata &metadata) {
+            --running_;
+            completion(metadata);
+            startWaiting();
+        });
+    }
+}
+
+void LinkMetadataFetcher::start(const QUrl &url, Completion completion) {
     download(url, "text/html,application/xhtml+xml", kMaximumHtmlBytes, 8000,
-             [this, itemId, url, completion = std::move(completion)](QByteArray page, QUrl finalUrl) {
+             [this, url, completion = std::move(completion)](QByteArray page, QUrl finalUrl) {
         struct State {
             Metadata metadata;
             int remaining = 2;
         };
         auto state = std::make_shared<State>();
-        auto finish = [this, state, itemId, completion] {
+        auto finish = [state, completion] {
             if (--state->remaining != 0) return;
-            pending_.remove(itemId);
             completion(state->metadata);
         };
         const QString html = QString::fromUtf8(page);

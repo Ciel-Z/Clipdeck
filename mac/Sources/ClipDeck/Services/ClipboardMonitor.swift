@@ -8,6 +8,50 @@ struct LinkMetadata: Equatable, Sendable {
     let previewData: Data?
 }
 
+/// The one way a link card gets its title, icon and preview: fresh copies,
+/// history loaded at launch and cards synced from another device are all just
+/// enqueued. Each item is fetched at most once per run, a few at a time, in
+/// the order they were enqueued.
+@MainActor
+final class LinkMetadataQueue {
+    typealias Fetch = @Sendable (URL) async -> LinkMetadata
+
+    static let maximumConcurrentFetches = 3
+
+    private let fetch: Fetch
+    private let onFetched: (ClipboardItem.ID, LinkMetadata) -> Void
+    private var waiting: [(id: ClipboardItem.ID, url: URL)] = []
+    private var requested: Set<ClipboardItem.ID> = []
+    private var running = 0
+
+    init(fetch: @escaping Fetch = { await LinkMetadataService.fetch(for: $0) },
+         onFetched: @escaping (ClipboardItem.ID, LinkMetadata) -> Void) {
+        self.fetch = fetch
+        self.onFetched = onFetched
+    }
+
+    func enqueue(_ items: [ClipboardItem]) {
+        for item in items {
+            guard item.needsLinkMetadata, let url = item.webURL, requested.insert(item.id).inserted else { continue }
+            waiting.append((item.id, url))
+        }
+        startWaiting()
+    }
+
+    private func startWaiting() {
+        while running < Self.maximumConcurrentFetches, !waiting.isEmpty {
+            let next = waiting.removeFirst()
+            running += 1
+            Task { [fetch] in
+                let metadata = await fetch(next.url)
+                self.running -= 1
+                self.onFetched(next.id, metadata)
+                self.startWaiting()
+            }
+        }
+    }
+}
+
 enum LinkMetadataService {
     private static let maximumHTMLBytes = 512 * 1_024
     private static let maximumIconBytes = 512 * 1_024
@@ -285,6 +329,7 @@ final class ClipboardMonitor {
     private let repository: HistoryRepository?
     private let classifier: ClassificationService?
     private let onCapture: @MainActor () -> Void
+    private let onPersisted: @MainActor (ClipboardItem) -> Void
     private let reader = ClipboardReader()
     private let readerQueue = DispatchQueue(label: "app.clipdeck.clipboard-reader", qos: .userInitiated)
     private let persistenceQueue = DispatchQueue(
@@ -299,12 +344,14 @@ final class ClipboardMonitor {
         store: InMemoryHistoryStore,
         repository: HistoryRepository? = nil,
         classifier: ClassificationService? = nil,
-        onCapture: @escaping @MainActor () -> Void = {}
+        onCapture: @escaping @MainActor () -> Void = {},
+        onPersisted: @escaping @MainActor (ClipboardItem) -> Void = { _ in }
     ) {
         self.store = store
         self.repository = repository
         self.classifier = classifier
         self.onCapture = onCapture
+        self.onPersisted = onPersisted
     }
 
     func start() {
@@ -383,21 +430,7 @@ final class ClipboardMonitor {
                         return
                     }
                     guard reconciliation == .reconciled else { return }
-                    if let url = item.webURL,
-                       !item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本" {
-                        let itemID = item.id
-                        Task.detached(priority: .utility) { [weak self] in
-                            let metadata = await LinkMetadataService.fetch(for: url)
-                            await MainActor.run {
-                                self?.store.updateLinkMetadata(
-                                    itemID: itemID,
-                                    title: metadata.title,
-                                    iconData: metadata.iconData,
-                                    previewData: metadata.previewData
-                                )
-                            }
-                        }
-                    }
+                    self.onPersisted(item)
                 }
             }
         }

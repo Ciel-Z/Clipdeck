@@ -114,6 +114,8 @@ DeckController::DeckController(const QString &databasePath, DeckImageProvider *i
         capture_.pipeline()->refreshRecent();
         capture_.pipeline()->requestHistory(QString(), QString(), 100, 0, [this](QVector<ClipboardItem> items) {
             store_.replaceItems(items, true);
+            // Link metadata never travels with sync (§7): fetch it here, as on start.
+            refreshLinkMetadata(items.mid(0, 20));
         });
     });
 
@@ -305,8 +307,8 @@ void DeckController::onCaptured(quint64 sequence) {
 void DeckController::openSyncPanel() { Q_EMIT syncPanelRequested(); }
 
 void DeckController::refreshLinkMetadata(const QVector<ClipboardItem> &items) {
-    // AppCoordinator.refreshLinkMetadata: links never fetched, or still
-    // without an icon or a page title.
+    // ClipboardItem.needsLinkMetadata on macOS: links never fetched, or still
+    // without an icon or a page title, go to the fetcher's queue.
     for (const ClipboardItem &item : items) {
         const QUrl url = DeckPresentation::webUrl(item);
         if (!url.isValid()) continue;

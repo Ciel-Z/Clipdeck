@@ -79,4 +79,45 @@ final class LinkMetadataServiceTests: XCTestCase {
         XCTAssertEqual(link.linkHost, "example.com")
         XCTAssertNil(sentence.webURL)
     }
+
+    @MainActor
+    func testQueueFetchesEachLinkOnceAFewAtATimeInOrder() async {
+        let source = SourceApplication(bundleIdentifier: nil, name: "Test", iconData: nil)
+        let links = (0 ..< 5).map {
+            ClipboardItem(payload: .text(plainText: "https://example.com/\($0)", rtfData: nil), sourceApplication: source)
+        }
+        let fetched = Box<[ClipboardItem.ID]>([])
+        let started = Box<[URL]>([])
+        let concurrent = Box(0)
+        let peak = Box(0)
+        let done = expectation(description: "all fetched")
+        done.expectedFulfillmentCount = links.count
+        let queue = LinkMetadataQueue(fetch: { url in
+            await MainActor.run {
+                started.value.append(url)
+                concurrent.value += 1
+                peak.value = max(peak.value, concurrent.value)
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            await MainActor.run { concurrent.value -= 1 }
+            return LinkMetadata(title: nil, iconData: nil, previewData: nil)
+        }, onFetched: { id, _ in
+            fetched.value.append(id)
+            done.fulfill()
+        })
+        let sentence = ClipboardItem(payload: .text(plainText: "not a link", rtfData: nil), sourceApplication: source)
+        queue.enqueue(links + [sentence])
+        queue.enqueue(links) // a synced batch repeating the same cards
+        await fulfillment(of: [done], timeout: 5)
+
+        XCTAssertEqual(Set(fetched.value), Set(links.map(\.id)))
+        XCTAssertEqual(started.value, links.compactMap(\.webURL))
+        XCTAssertLessThanOrEqual(peak.value, LinkMetadataQueue.maximumConcurrentFetches)
+    }
+}
+
+@MainActor
+private final class Box<Value> {
+    var value: Value
+    init(_ value: Value) { self.value = value }
 }

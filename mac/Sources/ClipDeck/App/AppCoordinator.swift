@@ -14,8 +14,17 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         onCapture: { [weak self] in
             self?.feedbackSoundPlayer.playCopy()
             self?.sync?.notifyLocalChange()
-        }
+        },
+        onPersisted: { [weak self] item in self?.linkMetadata.enqueue([item]) }
     )
+    private lazy var linkMetadata = LinkMetadataQueue { [weak self] itemID, metadata in
+        self?.store.updateLinkMetadata(
+            itemID: itemID,
+            title: metadata.title,
+            iconData: metadata.iconData,
+            previewData: metadata.previewData
+        )
+    }
     private var sync: SyncService?
     private var syncPanelController: SyncPanelController?
     private var syncObservers: Set<AnyCancellable> = []
@@ -147,7 +156,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     store?.replaceItems(priorityItems)
-                    self?.refreshLinkMetadata(for: priorityItems)
+                    // Launch and cards synced from another device (§7) alike.
+                    self?.linkMetadata.enqueue(priorityItems)
                 }
 
                 Task.detached(priority: .background) { [weak store] in
@@ -163,26 +173,6 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 }
             } catch {
                 NSLog("ClipDeck failed to load persisted history: %@", String(describing: error))
-            }
-        }
-    }
-
-    private func refreshLinkMetadata(for items: [ClipboardItem]) {
-        let historyStore = store
-        for item in items where item.webURL != nil
-            && (!item.hasFetchedLinkPreview || item.linkIconData == nil || item.title == "文本") {
-            guard let url = item.webURL else { continue }
-            let itemID = item.id
-            Task.detached(priority: .utility) { [weak historyStore] in
-                let metadata = await LinkMetadataService.fetch(for: url)
-                await MainActor.run {
-                    historyStore?.updateLinkMetadata(
-                        itemID: itemID,
-                        title: metadata.title,
-                        iconData: metadata.iconData,
-                        previewData: metadata.previewData
-                    )
-                }
             }
         }
     }

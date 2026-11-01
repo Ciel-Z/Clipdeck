@@ -134,6 +134,11 @@ struct ClipboardItem: Identifiable, Equatable, Sendable {
 }
 
 extension ClipboardItem {
+    /// A link never fetched, or still without an icon or a page title.
+    var needsLinkMetadata: Bool {
+        webURL != nil && (!hasFetchedLinkPreview || linkIconData == nil || title == "文本")
+    }
+
     var webURL: URL? {
         guard case let .text(plainText, _) = payload else { return nil }
         let candidate = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -151,7 +156,7 @@ extension ClipboardItem {
     }
 }
 
-private extension ClipboardPayload {
+extension ClipboardPayload {
     var defaultTitle: String {
         switch self {
         case .text: "文本"

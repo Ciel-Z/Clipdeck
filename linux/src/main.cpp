@@ -1453,7 +1453,7 @@ public:
         reload();
         QTimer::singleShot(0, this, [this] {
             const int count = std::min(20, static_cast<int>(items_.size()));
-            for (int index = 0; index < count; ++index) fetchLinkMetadataIfNeeded(items_[index]);
+            for (int index = 0; index < count; ++index) enqueueLinkMetadata(items_[index]);
         });
     }
 
@@ -3766,6 +3766,7 @@ private:
         request.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
         request.setRawHeader("User-Agent", "ClipDeck/0.3 (UOS; Linux)");
         QNetworkReply *reply = network_.get(request);
+        QTimer::singleShot(8000, reply, [reply] { reply->abort(); }); // finished() still follows
         QObject::connect(reply, &QNetworkReply::finished, this,
                          [reply, maximumBytes, completion = std::move(completion)]() mutable {
             QByteArray data;
@@ -3777,7 +3778,11 @@ private:
         });
     }
 
-    void fetchLinkMetadataIfNeeded(const ClipboardItem &item) {
+    // The link queue (LinkMetadataQueue in mac ClipboardMonitor.swift): fresh
+    // copies, history loaded at start and cards synced from another device are
+    // all just enqueued. Each item is fetched at most once per run, a few at a
+    // time, in the order they were enqueued.
+    void enqueueLinkMetadata(const ClipboardItem &item) {
         if (!item.isText() || item.databaseID < 0
             || (item.hasFetchedLinkPreview && !item.linkIconData.isEmpty()
                 && item.title != QStringLiteral("文本"))) return;
@@ -3786,12 +3791,32 @@ private:
                               && url.scheme() != QStringLiteral("https"))
             || url.host().isEmpty()
             || item.text.contains(QRegularExpression(QStringLiteral("\\s")))) return;
+        if (metadataRequested_.contains(item.databaseID)) return;
+        metadataRequested_.insert(item.databaseID);
+        metadataWaiting_.append({item.databaseID, url});
+        startWaitingLinkMetadata();
+    }
 
+    void startWaitingLinkMetadata() {
+        while (metadataRunning_ < kMaximumConcurrentLinkFetches && !metadataWaiting_.isEmpty()) {
+            const auto next = metadataWaiting_.takeFirst();
+            ++metadataRunning_;
+            fetchLinkMetadata(next.first, next.second);
+        }
+    }
+
+    void linkMetadataFinished() {
+        --metadataRunning_;
+        startWaitingLinkMetadata();
+    }
+
+    void fetchLinkMetadata(qint64 databaseID, const QUrl &url) {
         QNetworkRequest request(url);
         request.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
         request.setRawHeader("User-Agent", "ClipDeck/0.3 (UOS; Linux)");
         QNetworkReply *reply = network_.get(request);
-        const qint64 databaseID = item.databaseID;
+        // A stalled page must not hold a queue slot; finished() still follows the abort.
+        QTimer::singleShot(8000, reply, [reply] { reply->abort(); });
         QObject::connect(reply, &QNetworkReply::finished, this, [this, reply, databaseID, url] {
             QByteArray pageData;
             if (reply->error() == QNetworkReply::NoError) pageData = reply->readAll();
@@ -3802,6 +3827,7 @@ private:
                 repository_->updateLinkMetadata(databaseID, finalURL.host(), QByteArray(), QByteArray());
                 if (pipeline_) pipeline_->refreshRecent();
                 reload();
+                linkMetadataFinished();
                 return;
             }
 
@@ -3829,6 +3855,7 @@ private:
                                                 state->icon, state->preview);
                 if (pipeline_) pipeline_->refreshRecent();
                 reload();
+                linkMetadataFinished();
             };
             downloadLinkImage(iconURL, 2 * 1024 * 1024,
                               [state, finish](QByteArray data) mutable {
@@ -4342,12 +4369,7 @@ private:
         if (isVisible()) reload();
         // Metadata requests remain asynchronous network operations; the
         // capture callback itself never performs them or creates card widgets.
-        for (const auto &item : pipeline_->recentItems()) {
-            if (!metadataRequested_.contains(item.databaseID)) {
-                metadataRequested_.insert(item.databaseID);
-                fetchLinkMetadataIfNeeded(item);
-            }
-        }
+        for (const auto &item : pipeline_->recentItems()) enqueueLinkMetadata(item);
     }
 
     void reload() {
@@ -4422,6 +4444,9 @@ private:
     quint64 payloadRequestGeneration_ = 0;
     quint64 latestCaptureSequence_ = 0;
     QSet<qint64> metadataRequested_;
+    static constexpr int kMaximumConcurrentLinkFetches = 3;
+    QList<QPair<qint64, QUrl>> metadataWaiting_;
+    int metadataRunning_ = 0;
     QNetworkAccessManager network_;
     Window pasteTarget_ = None;
     Window pasteTargetInputWindow_ = None;

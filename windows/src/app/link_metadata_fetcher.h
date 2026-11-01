@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QList>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QSet>
@@ -28,7 +29,11 @@ public:
 
     explicit LinkMetadataFetcher(QObject *parent = nullptr);
 
-    // One fetch per item at a time; a repeated request while one runs is ignored.
+    // The link queue (LinkMetadataQueue in mac ClipboardMonitor.swift): fresh
+    // copies, history loaded at start and cards synced from another device
+    // are all just enqueued. Each item is fetched at most once per run, a few
+    // at a time, in the order they were enqueued.
+    static constexpr int kMaximumConcurrentFetches = 3;
     void fetch(const QUuid &itemId, const QUrl &url, Completion completion);
 
     // HTML parsing, exposed for tests.
@@ -41,7 +46,16 @@ private:
                   std::function<void(QByteArray, QUrl)> completion);
     void fetchFirstIcon(QList<QUrl> candidates, std::function<void(QByteArray)> completion);
     void fetchPreview(const QUrl &url, std::function<void(QByteArray)> completion);
+    void startWaiting();
+    void start(const QUrl &url, Completion completion);
+
+    struct Waiting {
+        QUrl url;
+        Completion completion;
+    };
 
     QNetworkAccessManager network_;
-    QSet<QUuid> pending_;
+    QSet<QUuid> requested_;
+    QList<Waiting> waiting_;
+    int running_ = 0;
 };
