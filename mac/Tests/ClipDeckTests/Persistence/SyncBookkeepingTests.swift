@@ -91,6 +91,24 @@ final class SyncBookkeepingTests: XCTestCase {
         XCTAssertEqual(try repository.fetchRecent().first?.databaseID, databaseID)
     }
 
+    func testRecentHistoryOrdersSameMillisecondCopiesByClock() throws {
+        let database = try ClipDeckDatabase(path: ":memory:")
+        let repository = HistoryRepository(database: database)
+        let first = try repository.save(ClipboardItem(payload: .text(plainText: "first", rtfData: nil), sourceApplication: source))
+        let second = try repository.save(ClipboardItem(payload: .text(plainText: "second", rtfData: nil), sourceApplication: source))
+        // Force the timestamp tie instead of relying on execution speed.
+        try database.writer.write { db in
+            try db.execute(sql: "UPDATE content SET last_copied_at = 1000")
+        }
+        XCTAssertEqual(try repository.fetchRecent().first?.databaseID, second.databaseID)
+
+        try repository.touch(first)
+        try database.writer.write { db in
+            try db.execute(sql: "UPDATE content SET last_copied_at = 1000")
+        }
+        XCTAssertEqual(try repository.fetchRecent().first?.databaseID, first.databaseID)
+    }
+
     func testDeletingRemembersTheSyncIdentity() throws {
         let repository = try makeRepository()
         let deleted = try repository.save(ClipboardItem(payload: .text(plainText: "a", rtfData: nil), sourceApplication: source))

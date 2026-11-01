@@ -254,7 +254,7 @@ final class HistoryRepository: @unchecked Sendable {
                            category.preview_language, category.sort_order
                     FROM content LEFT JOIN application ON application.id = content.application_id
                     LEFT JOIN category ON category.id = content.category_id
-                    ORDER BY content.last_copied_at DESC LIMIT ?
+                    ORDER BY content.last_copied_at DESC, content.updated_hlc DESC, content.id DESC LIMIT ?
                     """,
                 arguments: [limit]
             )
