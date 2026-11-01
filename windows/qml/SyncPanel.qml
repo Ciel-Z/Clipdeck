@@ -329,9 +329,10 @@ Window {
                                 width: parent.width
                                 height: 46
                                 Column {
-                                    x: 14
-                                    anchors.right: pairButton.left
-                                    anchors.rightMargin: 8
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 14
+                                    anchors.right: pairButton.visible ? pairButton.left : parent.right
+                                    anchors.rightMargin: pairButton.visible ? 8 : 14
                                     anchors.verticalCenter: parent.verticalCenter
                                     Text {
                                         width: parent.width

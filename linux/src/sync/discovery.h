@@ -20,6 +20,9 @@ public:
 
     bool start();
     void stop();
+    // Joins the group again on every eligible interface; the OS can drop a
+    // membership without telling us.
+    void rejoin();
     bool isListening() const { return socket_.state() == QAbstractSocket::BoundState; }
 
     // While visible, queries are answered with `tag` and `tcpPort`.

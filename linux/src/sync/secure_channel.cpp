@@ -1,6 +1,8 @@
 #include "secure_channel.h"
 #include "sync_protocol.h"
 
+#include <QNetworkProxy>
+
 namespace {
 
 const QByteArray kHeaderMagic = QByteArrayLiteral("CDK1");
@@ -36,6 +38,9 @@ SecureChannel *SecureChannel::connectTo(const QString &host, quint16 port, Kind 
                                         const SyncCrypto::KeyPair &localStatic, const Candidate &peer,
                                         QObject *parent) {
     auto *socket = new QTcpSocket;
+    // A direct LAN connection: a system HTTP proxy (Clash and the like) cannot
+    // carry it, and Qt would otherwise apply one and fail at once.
+    socket->setProxy(QNetworkProxy::NoProxy);
     auto *channel = new SecureChannel(socket, true, localStatic, parent);
     channel->kind_ = kind;
     channel->peer_ = peer;
@@ -45,7 +50,10 @@ SecureChannel *SecureChannel::connectTo(const QString &host, quint16 port, Kind 
         channel->writeFrame(header);
         channel->startHandshake();
     });
-    socket->connectToHost(host, port);
+    // Next turn of the event loop, so an error raised at once still reaches
+    // the caller's `closed` handler, which it connects after this returns.
+    QMetaObject::invokeMethod(socket, [socket, host, port] { socket->connectToHost(host, port); },
+                              Qt::QueuedConnection);
     return channel;
 }
 

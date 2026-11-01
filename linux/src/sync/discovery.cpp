@@ -3,9 +3,12 @@
 
 #include <QDateTime>
 #include <QNetworkDatagram>
+#include <QNetworkProxy>
 #include <QTimer>
 
 SyncDiscovery::SyncDiscovery(QObject *parent) : QObject(parent) {
+    socket_.setProxy(QNetworkProxy::NoProxy);
+    querySocket_.setProxy(QNetworkProxy::NoProxy);
     connect(&socket_, &QUdpSocket::readyRead, this, &SyncDiscovery::onReadyRead);
     connect(&querySocket_, &QUdpSocket::readyRead, this, &SyncDiscovery::onQueryReplies);
 }
@@ -32,14 +35,20 @@ bool SyncDiscovery::start() {
     }
     socket_.setSocketOption(QAbstractSocket::MulticastTtlOption, 1);
     socket_.setSocketOption(QAbstractSocket::MulticastLoopbackOption, includeLoopback_ ? 1 : 0);
-    for (const SyncNetwork::Interface &candidate : interfaces())
-        socket_.joinMulticastGroup(SyncProtocol::discoveryGroup(), candidate.networkInterface);
+    rejoin();
     if (querySocket_.state() != QAbstractSocket::BoundState) {
         querySocket_.bind(QHostAddress(QHostAddress::AnyIPv4), 0);
         querySocket_.setSocketOption(QAbstractSocket::MulticastTtlOption, 1);
         querySocket_.setSocketOption(QAbstractSocket::MulticastLoopbackOption, includeLoopback_ ? 1 : 0);
     }
     return true;
+}
+
+void SyncDiscovery::rejoin() {
+    if (!isListening()) return;
+    // Fails harmlessly on interfaces whose group we are still in.
+    for (const SyncNetwork::Interface &candidate : interfaces())
+        socket_.joinMulticastGroup(SyncProtocol::discoveryGroup(), candidate.networkInterface);
 }
 
 void SyncDiscovery::stop() {
@@ -56,6 +65,7 @@ void SyncDiscovery::setVisible(bool visible, const QByteArray &tag, quint16 tcpP
 
 void SyncDiscovery::query() {
     if (!start()) return;
+    rejoin();
     sendQueryRound();
     QTimer::singleShot(1000, this, &SyncDiscovery::sendQueryRound);
     QTimer::singleShot(3000, this, &SyncDiscovery::sendQueryRound);

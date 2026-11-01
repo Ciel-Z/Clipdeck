@@ -200,4 +200,5 @@ private:
     QTimer syncingOffTimer_;
     QElapsedTimer sinceTick_;
     QStringList interfaceSignature_;
+    bool networkChecked_ = false;
 };

@@ -95,15 +95,22 @@ final class SyncDiscovery {
             stop()
             return false
         }
+        rejoin()
+        listen(on: sharedSocket, isQuerySocket: false)
+        listen(on: querySocket, isQuerySocket: true)
+        return true
+    }
+
+    /// Joins the group again on every eligible interface; the OS can drop a
+    /// membership without telling us. Fails harmlessly where we are still in.
+    func rejoin() {
+        guard sharedSocket >= 0 else { return }
         var group = in_addr()
         inet_pton(AF_INET, SyncProtocol.discoveryGroup, &group)
         for interface in SyncInterfaces.eligible() {
             var request = ip_mreq(imr_multiaddr: group, imr_interface: in_addr(s_addr: interface.address))
             setsockopt(sharedSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &request, socklen_t(MemoryLayout<ip_mreq>.size))
         }
-        listen(on: sharedSocket, isQuerySocket: false)
-        listen(on: querySocket, isQuerySocket: true)
-        return true
     }
 
     func stop() {
@@ -124,6 +131,7 @@ final class SyncDiscovery {
 
     func query() {
         guard start() else { return }
+        rejoin()
         sendQueryRound()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self.sendQueryRound() } }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { MainActor.assumeIsolated { self.sendQueryRound() } }
@@ -275,8 +283,11 @@ final class SyncChannel {
 
     static func connect(host: String, port: UInt16, kind: Kind, localStatic: SyncCrypto.KeyPair,
                         peer: Candidate) -> SyncChannel {
+        // A direct LAN connection, never through a system proxy.
+        let parameters = NWParameters.tcp
+        parameters.preferNoProxies = true
         let connection = NWConnection(
-            host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port) ?? 47821, using: .tcp)
+            host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port) ?? 47821, using: parameters)
         let channel = SyncChannel(connection: connection, initiator: true, localStatic: localStatic)
         channel.kind = kind
         channel.peer = peer

@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRandomGenerator>
+#include <QNetworkProxy>
 #include <QSettings>
 #include <QSysInfo>
 #include <QTcpSocket>
@@ -95,6 +96,7 @@ void SyncService::loadIdentity() {
 bool SyncService::start() {
     if (!SyncCrypto::initialize() || !repository_ || !repository_->isOpen()) return false;
     loadIdentity();
+    server_.setProxy(QNetworkProxy::NoProxy);
     if (!server_.listen(QHostAddress(QHostAddress::AnyIPv4), options_.preferredPort)
         && !server_.listen(QHostAddress(QHostAddress::AnyIPv4), 0)) {
         return false;
@@ -289,8 +291,16 @@ void SyncService::checkNetwork() {
         networkHint_ = hint;
         Q_EMIT stateChanged();
     }
-    if (signature == interfaceSignature_) return;
-    const bool firstCheck = interfaceSignature_.isEmpty();
+    // Windows can drop a group membership without any address change (Wi-Fi
+    // power saving, a proxy's TUN adapter resetting the stack): join again
+    // every check; joining a group we are already in is a no-op.
+    if (options_.enableDiscovery) discovery_.rejoin();
+    if (networkChecked_ && signature == interfaceSignature_) return;
+    // The first check only records the networks. Starting with none (launched
+    // at login before Wi-Fi is up) still counts, so the network that appears
+    // next is handled as a change.
+    const bool firstCheck = !networkChecked_;
+    networkChecked_ = true;
     interfaceSignature_ = signature;
     if (firstCheck) return;
     // A new or lost network: rejoin the multicast group and reconnect now.
@@ -693,6 +703,12 @@ void SyncService::searchNearby() {
     // Keep devices still being identified; drop stale ones.
     nearby_.erase(std::remove_if(nearby_.begin(), nearby_.end(), [](const Nearby &device) { return !device.infoChannel; }),
                   nearby_.end());
+    // Searching means pairing is under way: a visible device stays visible
+    // for another full period instead of running out mid-pairing.
+    if (visible_) {
+        visibleUntilMs_ = std::max(visibleUntilMs_, nowMs() + SyncProtocol::kVisibilitySeconds * 1000LL);
+        Q_EMIT stateChanged();
+    }
     discovery_.query();
     searchTimer_.start();
     Q_EMIT devicesChanged();

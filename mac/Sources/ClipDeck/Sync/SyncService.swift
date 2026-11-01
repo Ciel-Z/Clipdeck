@@ -159,6 +159,9 @@ final class SyncService: ObservableObject {
 
     private var peers: [String: Peer] = [:]
     private var nearbyDevices: [Nearby] = []
+    /// Accepted connections, held until they close: nothing else owns one
+    /// until it is attached to a peer or pairing (its handlers hold it weakly).
+    private var incomingChannels: [SyncChannel] = []
     private var pairingChannel: SyncChannel?
     private var pairingPeerID = ""
     private var pairingPeerMessage = Data()
@@ -225,6 +228,7 @@ final class SyncService: ObservableObject {
             let parameters = NWParameters.tcp
             (parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = .v4
             parameters.allowLocalEndpointReuse = true
+            parameters.preferNoProxies = true
             return try? NWListener(using: parameters, on: port)
         }
         guard let listener = make(47821) ?? make(.any) else { return false }
@@ -370,6 +374,9 @@ final class SyncService: ObservableObject {
         let hint = interfaces.isEmpty ? "未连接到局域网" : ""
         if hint != networkHint { networkHint = hint }
         defer { interfaceSignature = signature }
+        // The OS can drop a group membership without an address change: join
+        // again every check; joining a group we are already in is a no-op.
+        discovery.rejoin()
         guard let previous = interfaceSignature, previous != signature else { return }
         // A new or lost network: rejoin the multicast group and reconnect now.
         discovery.stop()
@@ -410,6 +417,7 @@ final class SyncService: ObservableObject {
             self.attach(peer, channel)
         }
         wire(channel)
+        incomingChannels.append(channel)
     }
 
     private func wire(_ channel: SyncChannel) {
@@ -496,6 +504,7 @@ final class SyncService: ObservableObject {
     }
 
     private func closed(_ channel: SyncChannel) {
+        incomingChannels.removeAll { $0 === channel }
         if pairingChannel === channel, pairing.stage != .done, pairing.stage != .failed {
             failPairing("连接已断开")
         }
@@ -727,6 +736,11 @@ final class SyncService: ObservableObject {
     func searchNearby() {
         guard isAvailable else { return }
         nearbyDevices.removeAll { $0.infoChannel == nil }
+        // Searching means pairing is under way: a visible device stays visible
+        // for another full period instead of running out mid-pairing.
+        if isVisible {
+            visibleUntil = max(visibleUntil, Date().addingTimeInterval(TimeInterval(SyncProtocol.visibilitySeconds)))
+        }
         discovery.query()
         isSearching = true
         searchWork?.cancel()
