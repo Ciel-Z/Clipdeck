@@ -75,7 +75,9 @@ public:
     QVariantMap pairing() const;
 
     Q_INVOKABLE void syncNow();
-    Q_INVOKABLE void searchNearby();
+    // `fromUser`: an explicit search (the Refresh button), which also makes
+    // this device visible; the panel's own search on opening does not.
+    Q_INVOKABLE void searchNearby(bool fromUser = false);
     Q_INVOKABLE void pair(const QString &nearbyKey);
     // Tests and manual entry: pair with an address directly.
     void pairWithAddress(const QString &host, quint16 port);

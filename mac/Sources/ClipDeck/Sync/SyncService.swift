@@ -61,6 +61,37 @@ struct SyncKeyStore {
     }
 }
 
+/// Connection and sync events, for working out why two devices do not sync:
+/// ~/Library/Application Support/ClipDeck/sync.log, started afresh past
+/// 512 KB, as linux/src/sync/sync_service.cpp. No content is written.
+@MainActor
+enum SyncLog {
+    private static let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appending(path: "ClipDeck/sync.log")
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    static func write(_ event: String) {
+        let line = Data("\(formatter.string(from: Date())) \(event)\n".utf8)
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        if size > 512 * 1_024 || size == 0 {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? line.write(to: url)
+            return
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: line)
+    }
+
+    /// Device IDs cut to 8 characters.
+    static func id(_ deviceID: String) -> String { String(deviceID.prefix(8)) }
+}
+
 /// LAN sync on macOS (docs/lan-sync-design.md), the same protocol and rules
 /// as linux/src/sync/sync_service.cpp: on-demand discovery, CPace pairing over
 /// Noise NN, and one Noise KK connection per paired device exchanging the
@@ -219,6 +250,9 @@ final class SyncService: ObservableObject {
             MainActor.assumeIsolated { self?.tick() }
         }
         checkNetwork()
+        let paired = peers.values.map { "\(SyncLog.id($0.stored.deviceID)) \($0.stored.addresses.joined(separator: ","))" }
+        SyncLog.write("started: device \(SyncLog.id(deviceID)), port \(listeningPort), "
+            + "LAN \(SyncInterfaces.eligible().map(\.addressText).joined(separator: ",")), paired [\(paired.joined(separator: "; "))]")
         if !isPaused { peers.values.forEach(connect) }
         publish()
     }
@@ -404,8 +438,13 @@ final class SyncService: ObservableObject {
             guard let self, channel.kind == .sync else { return }
             // Only the LAN interfaces sync uses (no VPN or public address).
             let allowed = SyncInterfaces.eligible().contains { $0.addressText == channel.localAddress }
-            guard allowed else { return channel.close() }
+            guard allowed else {
+                SyncLog.write("incoming sync from \(channel.peerAddress) refused: local address \(channel.localAddress) "
+                    + "is not one of \(SyncInterfaces.eligible().map(\.addressText))")
+                return channel.close()
+            }
             let id = channel.peer.deviceID
+            SyncLog.write("incoming sync from \(channel.peerAddress) established, device \(SyncLog.id(id))")
             if self.keyStore.unpairedKeys[id] != nil {
                 self.send(["type": "unpair"], on: channel)
                 self.keyStore.unpairedKeys[id] = nil
@@ -413,7 +452,10 @@ final class SyncService: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { channel.close() } }
                 return
             }
-            guard let peer = self.peers[id], !self.isPaused else { return channel.close() }
+            guard let peer = self.peers[id], !self.isPaused else {
+                SyncLog.write("incoming sync from \(channel.peerAddress) closed: \(self.isPaused ? "sync paused" : "not a paired device")")
+                return channel.close()
+            }
             self.attach(peer, channel)
         }
         wire(channel)
@@ -422,13 +464,21 @@ final class SyncService: ObservableObject {
 
     private func wire(_ channel: SyncChannel) {
         channel.onReceive = { [weak self] channel, plaintext in self?.received(plaintext, on: channel) }
-        channel.onClose = { [weak self] channel, _ in self?.closed(channel) }
+        channel.onClose = { [weak self] channel, reason in
+            if channel.kind == .sync || !channel.isEstablished {
+                let peer = channel.peer.deviceID.isEmpty ? "" : " (\(SyncLog.id(channel.peer.deviceID)))"
+                SyncLog.write("\(channel.initiator ? "connection to" : "incoming connection from") "
+                    + "\(channel.peerAddress)\(peer) closed: \(reason)")
+            }
+            self?.closed(channel)
+        }
     }
 
     private func connect(_ peer: Peer) {
         guard !isPaused, isAvailable, weInitiate(peer.stored.deviceID), !peer.isConnected, peer.attempts.isEmpty else { return }
         let addresses = SyncInterfaces.rank(peer.stored.addresses, interfaces: SyncInterfaces.eligible())
         guard !addresses.isEmpty else {
+            SyncLog.write("no address known for \(SyncLog.id(peer.stored.deviceID)): sending locate")
             sendLocate(peer)
             scheduleReconnect(peer)
             return
@@ -442,11 +492,13 @@ final class SyncService: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(index * 250)) { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, let peer = self.peers[id], !self.isPaused, !peer.isConnected else { return }
+                    SyncLog.write("connecting to \(SyncLog.id(id)) at \(host):\(port)")
                     let channel = SyncChannel.connect(
                         host: host, port: port, kind: .sync, localStatic: self.identity,
                         peer: SyncChannel.Candidate(deviceID: id, publicKey: peer.stored.publicKey))
                     peer.attempts.append(channel)
                     channel.onEstablished = { [weak self] channel in
+                        SyncLog.write("outgoing sync to \(SyncLog.id(id)) at \(host) established")
                         guard let self, let peer = self.peers[id] else { return channel.close() }
                         peer.attempts.filter { $0 !== channel }.forEach { $0.close() }
                         peer.attempts.removeAll()
@@ -488,6 +540,7 @@ final class SyncService: ObservableObject {
             guard channel.initiator == weInitiate(peer.stored.deviceID) else { return channel.close() }
             current.close()
         }
+        SyncLog.write("attached \(SyncLog.id(peer.stored.deviceID)), sent cursor \(peer.stored.sentCursor)")
         peer.channel = channel
         peer.failures = 0
         peer.pushedCursor = peer.stored.sentCursor
@@ -561,6 +614,7 @@ final class SyncService: ObservableObject {
             guard let key = keyStore.locateKeys[peer.stored.deviceID] else { continue }
             let matches = (-1 ... 1).contains { SyncProtocol.locateToken(key: key, unixSeconds: seconds + Int64($0) * 30) == token }
             guard matches else { continue }
+            SyncLog.write("locate from \(SyncLog.id(peer.stored.deviceID)) (\(host):\(port))")
             recordAddress(peer, address: host, port: Int(port))
             save(peer)
             guard !isPaused, !peer.isConnected else { return }
@@ -609,7 +663,10 @@ final class SyncService: ObservableObject {
                 updateSyncing()
                 publish()
             }
-            guard let wire = SyncProtocol.decodeItem(message) else { return }
+            guard let wire = SyncProtocol.decodeItem(message) else {
+                SyncLog.write("item from \(SyncLog.id(peer.stored.deviceID)) could not be decoded")
+                return
+            }
             if wire.blobID.isEmpty {
                 importWire(wire, from: peer)
             } else if wire.bodySize <= 64 * 1_024 * 1_024 {
@@ -617,6 +674,8 @@ final class SyncService: ObservableObject {
                 peer.blobData[wire.blobID] = Data()
             }
         case "batch_end":
+            SyncLog.write("batch from \(SyncLog.id(peer.stored.deviceID)) ends at \(message["hlc"] as? String ?? "?"), "
+                + (peer.receivedChanges ? "history changed" : "nothing new"))
             if peer.receivedChanges { onHistoryChanged?() }
             peer.receiving = false
             peer.receivedChanges = false
@@ -625,6 +684,7 @@ final class SyncService: ObservableObject {
             publish()
         case "ack":
             let hlc = UInt64(message["hlc"] as? String ?? "") ?? 0
+            SyncLog.write("ack from \(SyncLog.id(peer.stored.deviceID)) at \(hlc)")
             peer.stored.sentCursor = max(peer.stored.sentCursor, hlc)
             peer.pushInFlight = false
             save(peer)
@@ -686,9 +746,16 @@ final class SyncService: ObservableObject {
 
     private func push(_ peer: Peer) {
         guard !isPaused, peer.isConnected, !peer.pushInFlight, let channel = peer.channel else { return }
-        guard let changes = try? repository.syncChanges(
-            after: peer.pushedCursor, windowMilliseconds: SyncProtocol.syncWindowMilliseconds, limit: Self.batchSize),
-            !changes.isEmpty else { return }
+        let changes: [SyncProtocol.WireItem]
+        do {
+            changes = try repository.syncChanges(
+                after: peer.pushedCursor, windowMilliseconds: SyncProtocol.syncWindowMilliseconds, limit: Self.batchSize)
+        } catch {
+            SyncLog.write("push to \(SyncLog.id(peer.stored.deviceID)) failed to read history: \(error)")
+            return
+        }
+        SyncLog.write("push to \(SyncLog.id(peer.stored.deviceID)) after \(peer.pushedCursor): \(changes.count) item(s)")
+        guard !changes.isEmpty else { return }
         peer.pushInFlight = true
         updateSyncing()
         var last = peer.pushedCursor
@@ -736,9 +803,11 @@ final class SyncService: ObservableObject {
     func searchNearby() {
         guard isAvailable else { return }
         nearbyDevices.removeAll { $0.infoChannel == nil }
-        // Searching means pairing is under way: a visible device stays visible
-        // for another full period instead of running out mid-pairing.
-        if isVisible {
+        // Searching means pairing is under way, and the other side finds us only
+        // while we are visible: turn visibility on, or give it a full period again.
+        if !isVisible {
+            setVisible(true)
+        } else {
             visibleUntil = max(visibleUntil, Date().addingTimeInterval(TimeInterval(SyncProtocol.visibilitySeconds)))
         }
         discovery.query()
@@ -941,6 +1010,7 @@ final class SyncService: ObservableObject {
     }
 
     private func finishPairing(id: String, hostname: String, publicKey: Data, address: String, port: Int) {
+        SyncLog.write("paired with \(SyncLog.id(id)) at \(address):\(port), \(weInitiate(id) ? "this device" : "the other device") connects")
         let peer = peers[id] ?? Peer(SyncPeerRecord(deviceID: id, hostname: hostname, publicKey: publicKey))
         peer.stored.hostname = hostname.isEmpty ? "ClipDeck" : hostname
         peer.stored.publicKey = publicKey

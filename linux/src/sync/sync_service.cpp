@@ -3,11 +3,14 @@
 #include "network_interfaces.h"
 
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRandomGenerator>
 #include <QNetworkProxy>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QSysInfo>
 #include <QTcpSocket>
 
@@ -30,6 +33,24 @@ constexpr qint64 kMaxBlobBytes = 64LL * 1024 * 1024;
 QString b64(const QByteArray &data) { return QString::fromLatin1(data.toBase64()); }
 QByteArray unb64(const QJsonValue &value) { return QByteArray::fromBase64(value.toString().toLatin1()); }
 qint64 nowMs() { return QDateTime::currentMSecsSinceEpoch(); }
+
+// Connection and sync events, for working out why two devices do not sync:
+// sync.log in the app's data folder, started afresh past 512 KB. Device IDs
+// are cut to 8 characters; no content is written.
+void syncLog(const QString &event) {
+    static const QString path = [] {
+        const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        QDir().mkpath(directory);
+        return QDir(directory).filePath(QStringLiteral("sync.log"));
+    }();
+    QFile file(path);
+    const QIODevice::OpenMode mode = file.size() > 512 * 1024 ? QIODevice::Truncate : QIODevice::Append;
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | mode)) return;
+    file.write(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz ")).toUtf8()
+               + event.toUtf8() + '\n');
+}
+
+QString shortId(const QString &deviceID) { return deviceID.left(8); }
 
 QByteArray publicKeyMac(const QByteArray &isk, const QByteArray &publicKey) {
     return SyncCrypto::hmacBlake2b(isk, QByteArrayLiteral("ClipDeck public key") + publicKey);
@@ -107,6 +128,15 @@ bool SyncService::start() {
     }
     if (options_.enableDiscovery) discovery_.start();
     available_ = true;
+    QStringList interfaces;
+    for (const auto &candidate : SyncNetwork::eligibleInterfaces()) interfaces.append(candidate.address.toString());
+    QStringList paired;
+    for (const Peer &peer : std::as_const(peers_))
+        paired.append(QStringLiteral("%1 %2").arg(shortId(peer.stored.deviceID), peer.stored.addresses.join(QLatin1Char(','))));
+    syncLog(QStringLiteral("started: device %1, port %2, discovery %3, LAN %4, paired [%5]")
+                .arg(shortId(deviceID_)).arg(port())
+                .arg(discovery_.isListening() ? QStringLiteral("on") : QStringLiteral("off"),
+                     interfaces.join(QLatin1Char(',')), paired.join(QStringLiteral("; "))));
     sinceTick_.start();
     tickTimer_.start();
     checkNetwork();
@@ -333,15 +363,19 @@ void SyncService::onNewConnection() {
         const QHostAddress local(socket->localAddress().toIPv4Address(&mapped));
         bool allowed = options_.allowLoopback && local.isLoopback();
         for (const auto &candidate : SyncNetwork::eligibleInterfaces()) allowed = allowed || candidate.address == local;
+        const QString from = QHostAddress(socket->peerAddress().toIPv4Address()).toString();
         if (!allowed) {
+            syncLog(QStringLiteral("incoming from %1 refused: local address %2 is not a LAN interface sync uses")
+                        .arg(from, local.toString()));
             socket->abort();
             socket->deleteLater();
             continue;
         }
         SecureChannel *channel = SecureChannel::accept(socket, identity_, syncCandidates(), this);
-        connect(channel, &SecureChannel::established, this, [this, channel] {
+        connect(channel, &SecureChannel::established, this, [this, channel, from] {
             if (channel->kind() == SecureChannel::Kind::Pairing) return; // waits for its first message
             const QString deviceID = channel->peerDeviceID();
+            syncLog(QStringLiteral("incoming sync from %1 established, device %2").arg(from, shortId(deviceID)));
             if (keyStore_.unpairedKeys().contains(deviceID)) {
                 // Unpaired while it was offline: tell it once, then forget it.
                 sendJson(channel, {{QStringLiteral("type"), QStringLiteral("unpair")}});
@@ -352,6 +386,8 @@ void SyncService::onNewConnection() {
             }
             auto it = peers_.find(deviceID);
             if (it == peers_.end() || paused_) {
+                syncLog(QStringLiteral("incoming sync from %1 closed: %2")
+                            .arg(from, paused_ ? QStringLiteral("sync paused") : QStringLiteral("not a paired device")));
                 channel->close();
                 return;
             }
@@ -359,7 +395,11 @@ void SyncService::onNewConnection() {
         });
         connect(channel, &SecureChannel::received, this,
                 [this, channel](const QByteArray &plaintext) { onChannelReceived(channel, plaintext); });
-        connect(channel, &SecureChannel::closed, this, [this, channel] { onChannelClosed(channel); });
+        connect(channel, &SecureChannel::closed, this, [this, channel, from](const QString &reason) {
+            if (channel->kind() == SecureChannel::Kind::Sync || !channel->isEstablished())
+                syncLog(QStringLiteral("incoming connection from %1 closed: %2").arg(from, reason));
+            onChannelClosed(channel);
+        });
     }
 }
 
@@ -371,6 +411,7 @@ void SyncService::connectPeer(Peer &peer) {
     }
     const QStringList addresses = SyncNetwork::rankAddresses(peer.stored.addresses, SyncNetwork::eligibleInterfaces());
     if (addresses.isEmpty()) {
+        syncLog(QStringLiteral("no address known for %1: sending locate").arg(shortId(peer.stored.deviceID)));
         sendLocate(peer);
         scheduleReconnect(peer);
         return;
@@ -384,10 +425,12 @@ void SyncService::connectPeer(Peer &peer) {
         QTimer::singleShot(index * 250, this, [this, deviceID, host, portNumber] {
             auto it = peers_.find(deviceID);
             if (it == peers_.end() || paused_ || (it->channel && it->channel->isEstablished())) return;
+            syncLog(QStringLiteral("connecting to %1 at %2:%3").arg(shortId(deviceID), host).arg(portNumber));
             SecureChannel *channel = SecureChannel::connectTo(host, portNumber, SecureChannel::Kind::Sync, identity_,
                                                               {deviceID, it->stored.publicKey}, this);
             it->attempts.append(channel);
-            connect(channel, &SecureChannel::established, this, [this, channel, deviceID] {
+            connect(channel, &SecureChannel::established, this, [this, channel, deviceID, host] {
+                syncLog(QStringLiteral("outgoing sync to %1 at %2 established").arg(shortId(deviceID), host));
                 auto peer = peers_.find(deviceID);
                 if (peer == peers_.end()) {
                     channel->close();
@@ -401,7 +444,10 @@ void SyncService::connectPeer(Peer &peer) {
             });
             connect(channel, &SecureChannel::received, this,
                     [this, channel](const QByteArray &plaintext) { onChannelReceived(channel, plaintext); });
-            connect(channel, &SecureChannel::closed, this, [this, channel] { onChannelClosed(channel); });
+            connect(channel, &SecureChannel::closed, this, [this, channel, deviceID, host](const QString &reason) {
+                syncLog(QStringLiteral("connection to %1 at %2 closed: %3").arg(shortId(deviceID), host, reason));
+                onChannelClosed(channel);
+            });
         });
     }
 }
@@ -434,6 +480,7 @@ void SyncService::attachSyncChannel(Peer &peer, SecureChannel *channel) {
         }
         peer.channel->close();
     }
+    syncLog(QStringLiteral("attached %1, sent cursor %2").arg(shortId(peer.stored.deviceID)).arg(peer.stored.sentCursor));
     peer.channel = channel;
     peer.failures = 0;
     peer.pushedCursor = peer.stored.sentCursor;
@@ -517,6 +564,7 @@ void SyncService::onLocated(const QHostAddress &from, quint16 portNumber, const 
         for (int slot = -1; slot <= 1; ++slot)
             matches = matches || SyncProtocol::locateToken(key, seconds + slot * 30) == token;
         if (!matches) continue;
+        syncLog(QStringLiteral("locate from %1 (%2:%3)").arg(shortId(peer.stored.deviceID), from.toString()).arg(portNumber));
         recordAddress(peer, from.toString(), portNumber);
         savePeer(peer);
         if (paused_ || (peer.channel && peer.channel->isEstablished())) return;
@@ -582,7 +630,10 @@ void SyncService::handleSyncMessage(Peer &peer, const QJsonObject &message) {
             Q_EMIT devicesChanged();
         }
         const auto wire = SyncProtocol::decodeItem(message);
-        if (!wire) return;
+        if (!wire) {
+            syncLog(QStringLiteral("item from %1 could not be decoded").arg(shortId(peer.stored.deviceID)));
+            return;
+        }
         if (wire->blobId.isEmpty()) {
             importWire(peer, *wire);
         } else if (wire->bodySize <= kMaxBlobBytes) {
@@ -590,6 +641,9 @@ void SyncService::handleSyncMessage(Peer &peer, const QJsonObject &message) {
             peer.blobData.insert(wire->blobId, QByteArray());
         }
     } else if (type == QStringLiteral("batch_end")) {
+        syncLog(QStringLiteral("batch from %1 ends at %2, %3")
+                    .arg(shortId(peer.stored.deviceID), message.value(QStringLiteral("hlc")).toString(),
+                         peer.receivedChanges ? QStringLiteral("history changed") : QStringLiteral("nothing new")));
         if (peer.receivedChanges) Q_EMIT historyChanged();
         peer.receiving = false;
         peer.receivedChanges = false;
@@ -599,6 +653,7 @@ void SyncService::handleSyncMessage(Peer &peer, const QJsonObject &message) {
         Q_EMIT devicesChanged();
     } else if (type == QStringLiteral("ack")) {
         const quint64 hlc = message.value(QStringLiteral("hlc")).toString().toULongLong();
+        syncLog(QStringLiteral("ack from %1 at %2").arg(shortId(peer.stored.deviceID)).arg(hlc));
         peer.stored.sentCursor = std::max(peer.stored.sentCursor, hlc);
         peer.pushInFlight = false;
         savePeer(peer);
@@ -660,6 +715,8 @@ void SyncService::importWire(Peer &peer, const SyncProtocol::WireItem &wire) {
 void SyncService::pushChanges(Peer &peer) {
     if (paused_ || !peer.channel || !peer.channel->isEstablished() || peer.pushInFlight) return;
     const QVector<ClipboardItem> changes = repository_->syncChanges(peer.pushedCursor, SyncProtocol::kSyncWindowMs, kBatchSize);
+    syncLog(QStringLiteral("push to %1 after %2: %3 item(s)")
+                .arg(shortId(peer.stored.deviceID)).arg(peer.pushedCursor).arg(changes.size()));
     if (changes.isEmpty()) return;
     peer.pushInFlight = true;
     updateSyncing();
@@ -698,14 +755,17 @@ void SyncService::updateSyncing() {
 
 // MARK: - Discovery
 
-void SyncService::searchNearby() {
+void SyncService::searchNearby(bool fromUser) {
     if (!available_ || !options_.enableDiscovery) return;
     // Keep devices still being identified; drop stale ones.
     nearby_.erase(std::remove_if(nearby_.begin(), nearby_.end(), [](const Nearby &device) { return !device.infoChannel; }),
                   nearby_.end());
-    // Searching means pairing is under way: a visible device stays visible
-    // for another full period instead of running out mid-pairing.
-    if (visible_) {
+    // An explicit search means pairing is under way, and the other side finds
+    // us only while we are visible: turn visibility on, or give it a full
+    // period again.
+    if (fromUser && !visible_) {
+        setVisible(true);
+    } else if (fromUser) {
         visibleUntilMs_ = std::max(visibleUntilMs_, nowMs() + SyncProtocol::kVisibilitySeconds * 1000LL);
         Q_EMIT stateChanged();
     }
@@ -948,6 +1008,9 @@ void SyncService::submitPairingCode(const QString &code) {
 
 void SyncService::finishPairing(const QString &deviceID, const QString &hostname, const QByteArray &publicKey,
                                 const QString &address, quint16 portNumber) {
+    syncLog(QStringLiteral("paired with %1 at %2:%3, %4 connects")
+                .arg(shortId(deviceID), address).arg(portNumber)
+                .arg(weInitiate(deviceID) ? QStringLiteral("this device") : QStringLiteral("the other device")));
     Peer &peer = peers_[deviceID];
     peer.stored.deviceID = deviceID;
     peer.stored.hostname = hostname.isEmpty() ? QStringLiteral("ClipDeck") : hostname;

@@ -158,7 +158,7 @@ SyncPanel::SyncPanel(SyncService *sync, QWidget *parent) : QWidget(parent), sync
     nearbyHeader->addStretch();
     refresh_ = new QPushButton(QStringLiteral("刷新"), this);
     refresh_->setObjectName(QStringLiteral("link"));
-    connect(refresh_, &QPushButton::clicked, sync_, &SyncService::searchNearby);
+    connect(refresh_, &QPushButton::clicked, sync_, [this] { sync_->searchNearby(true); });
     nearbyHeader->addWidget(refresh_);
     layout->addLayout(nearbyHeader);
     QFrame *nearby = group(this);

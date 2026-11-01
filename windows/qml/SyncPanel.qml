@@ -295,7 +295,7 @@ Window {
                         text: sync.searching ? "正在查找…" : "刷新"
                         color: Qt.rgba(1, 1, 1, 0.7)
                         font { family: panel.uiFont; pixelSize: 12 }
-                        MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: sync.searchNearby() }
+                        MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: sync.searchNearby(true) }
                     }
                 }
             }
