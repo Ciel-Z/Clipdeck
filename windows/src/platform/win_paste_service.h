@@ -47,6 +47,8 @@ public:
 
     Result paste(const ClipboardItem &item, HWND target, HWND deck, bool forcePlainText,
                  const std::function<void()> &dismissDeck);
+    // Writes the item to the clipboard without pasting it ("复制" on a card).
+    bool copy(const ClipboardItem &item, HWND owner);
     bool isPending() const { return poll_.isActive(); }
     void cancel();
 

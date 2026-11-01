@@ -15,11 +15,13 @@
 
 int main(int argc, char *argv[]) {
     bool showOnLaunch = false;
+    bool showSyncPanel = false;
     QString showSettings; // null: do not open
     QString databaseOverride;
     for (int index = 1; index < argc; ++index) {
         const QString argument = QString::fromLocal8Bit(argv[index]);
         if (argument == QLatin1String("--show-on-launch")) showOnLaunch = true;
+        if (argument == QLatin1String("--sync-panel")) showSyncPanel = true;
         if (argument.startsWith(QLatin1String("--settings"))) {
             showSettings = argument.section(QLatin1Char('='), 1); // --settings[=pane]
             if (showSettings.isNull()) showSettings = QLatin1String("");
@@ -62,12 +64,15 @@ int main(int argc, char *argv[]) {
     qmlRegisterType<SyntaxHighlightAttachment>("ClipDeck.Native", 1, 0, "SyntaxHighlight");
     engine.rootContext()->setContextProperty(QStringLiteral("deck"), &controller);
     engine.rootContext()->setContextProperty(QStringLiteral("settings"), controller.settings());
+    engine.rootContext()->setContextProperty(QStringLiteral("sync"), controller.sync());
     engine.loadFromModule(QStringLiteral("ClipDeck"), QStringLiteral("Main"));
     if (engine.rootObjects().isEmpty()) return 2;
     auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
     engine.loadFromModule(QStringLiteral("ClipDeck"), QStringLiteral("SettingsWindow"));
     if (engine.rootObjects().size() < 2) return 3;
     controller.settings()->attachWindow(qobject_cast<QWindow *>(engine.rootObjects().at(1)));
+    engine.loadFromModule(QStringLiteral("ClipDeck"), QStringLiteral("SyncPanel"));
+    if (engine.rootObjects().size() < 3) return 4;
 
     // Every size the tray and title bar use at 100–250 % scaling, so Windows
     // never scales a neighbouring size and blurs it.
@@ -79,6 +84,7 @@ int main(int argc, char *argv[]) {
     controller.start(window, trayIcon);
 
     if (showOnLaunch) QTimer::singleShot(300, &controller, [&controller] { controller.showDeck(QStringLiteral("launch")); });
+    if (showSyncPanel) QTimer::singleShot(300, &controller, &DeckController::openSyncPanel);
     if (!showSettings.isNull()) QTimer::singleShot(300, &controller, [&controller, showSettings] { controller.openSettings(showSettings); });
     return application.exec();
 }

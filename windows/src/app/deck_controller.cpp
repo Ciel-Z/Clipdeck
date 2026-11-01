@@ -13,6 +13,8 @@
 #include <QCursor>
 #include <QDebug>
 #include <QDesktopServices>
+#include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QRegularExpression>
 #include <QScreen>
@@ -97,7 +99,23 @@ DeckController::DeckController(const QString &databasePath, DeckImageProvider *i
         if (item.hasFetchedLinkPreview) {
             repository_.updateLinkMetadata(item.databaseID, item.title, item.linkIconData, item.linkPreviewData);
         }
+        if (sync_) sync_->notifyLocalChange();
     };
+
+    // LAN sync (docs/lan-sync-design.md) shares this GUI-thread connection.
+    SyncService::Options syncOptions;
+    syncOptions.keyStorePath = QDir(QFileInfo(databasePath).absolutePath()).filePath(QStringLiteral("sync-keys.bin"));
+    sync_ = std::make_unique<SyncService>(&repository_, syncOptions);
+    connect(sync_.get(), &SyncService::syncingChanged, this, &DeckController::syncingChanged);
+    connect(sync_.get(), &SyncService::devicesChanged, this, &DeckController::syncingChanged);
+    connect(sync_.get(), &SyncService::pairingRequested, this, &DeckController::openSyncPanel);
+    connect(sync_.get(), &SyncService::historyChanged, this, [this] {
+        // Items from another device: reload the strip, keeping the selection.
+        capture_.pipeline()->refreshRecent();
+        capture_.pipeline()->requestHistory(QString(), QString(), 100, 0, [this](QVector<ClipboardItem> items) {
+            store_.replaceItems(items, true);
+        });
+    });
 
     connect(&store_, &HistoryStore::itemsChanged, this, &DeckController::refreshModel);
     connect(&store_, &HistoryStore::searchResultsChanged, this, &DeckController::refreshModel);
@@ -188,6 +206,19 @@ bool DeckController::start(QQuickWindow *window, const QIcon &trayIcon) {
     tray_->setBlurChecked(backdropBlur_);
     tray_->show();
 
+    if (!sync_->start()) qWarning() << "[ClipDeck][Sync] LAN sync is unavailable";
+    model_.setLocalDeviceId(sync_->deviceID());
+    auto showSyncState = [this] {
+        tray_->setSyncState(sync_->statusText(), sync_->isVisible(), sync_->visibleSecondsLeft(), sync_->isPaused(),
+                            sync_->isAvailable());
+    };
+    showSyncState();
+    connect(sync_.get(), &SyncService::stateChanged, this, showSyncState);
+    connect(tray_.get(), &WinTray::syncVisibilityToggled, sync_.get(), &SyncService::setVisible);
+    connect(tray_.get(), &WinTray::syncPauseToggled, sync_.get(), &SyncService::setPaused);
+    connect(tray_.get(), &WinTray::syncNowRequested, sync_.get(), &SyncService::syncNow);
+    connect(tray_.get(), &WinTray::syncPanelRequested, this, &DeckController::openSyncPanel);
+
     registerHotkey();
     tray_->showFirstRunHintIfNeeded(HotkeySpec::load().toString());
 
@@ -268,7 +299,10 @@ void DeckController::onCaptured(quint64 sequence) {
     store_.insert(recent.first());
     if (deckVisible()) store_.revealSelection();
     refreshLinkMetadata({recent.first()});
+    sync_->notifyLocalChange();
 }
+
+void DeckController::openSyncPanel() { Q_EMIT syncPanelRequested(); }
 
 void DeckController::refreshLinkMetadata(const QVector<ClipboardItem> &items) {
     // AppCoordinator.refreshLinkMetadata: links never fetched, or still
@@ -353,8 +387,36 @@ void DeckController::pasteItem(const ClipboardItem &item, bool plainText) {
     deliverPaste(item, plainText);
 }
 
+void DeckController::recordCopy(const ClipboardItem &item) {
+    if (item.databaseID >= 0) repository_.touch(item.databaseID);
+    store_.markCopied(item.id);
+    sync_->notifyLocalChange();
+}
+
+void DeckController::copySelection() {
+    if (store_.isSearchEditing()) return;
+    const auto item = store_.selectedItem();
+    if (!item) return;
+    if (!item->payloadComplete && item->databaseID >= 0) {
+        const QUuid id = item->id;
+        capture_.pipeline()->requestItem(item->databaseID, [this, id](QVector<ClipboardItem> rows) {
+            if (rows.isEmpty()) return;
+            ClipboardItem full = rows.first();
+            full.id = id;
+            if (paste_.copy(full, deckWindow())) recordCopy(full);
+        });
+        return;
+    }
+    if (paste_.copy(*item, deckWindow())) recordCopy(*item);
+}
+
+void DeckController::copyItem(int index) {
+    if (selectIndex(index)) copySelection();
+}
+
 void DeckController::deliverPaste(const ClipboardItem &item, bool plainText) {
     const auto result = paste_.paste(item, target_, deckWindow(), plainText, [this] { hideDeck(QStringLiteral("paste")); });
+    if (result != WinPasteService::Result::Failed) recordCopy(item);
     if (result == WinPasteService::Result::CopiedOnlyElevatedTarget && tray_) {
         tray_->showCopiedOnlyMessage(QStringLiteral("目标应用以管理员身份运行，请手动按 Ctrl + V。"));
     } else if (result == WinPasteService::Result::Failed && tray_) {

@@ -47,10 +47,27 @@ struct ClipboardItem {
     QString previewLanguage;
     QDateTime copiedAt;
     int copyCount = 1;
+    // LAN sync bookkeeping (docs/lan-sync-design.md §3): the item's identity
+    // on every device, the device it came from (empty: this one) and the
+    // hybrid logical clock value of its last synced change.
+    QString syncID;
+    QString originDevice;
+    quint64 updatedHlc = 0;
 
     bool isText() const { return type == ClipboardPayloadType::Text; }
     bool isImage() const { return type == ClipboardPayloadType::Image; }
     bool isFiles() const { return type == ClipboardPayloadType::Files; }
+};
+
+// A paired device (docs/lan-sync-design.md §3). Its secrets (the locate key)
+// live in the platform key store, not here.
+struct SyncPeer {
+    QString deviceID;
+    QString hostname;
+    QByteArray publicKey;
+    QStringList addresses; // "ip:port", most recent first
+    qint64 lastSeenMs = 0;
+    quint64 sentCursor = 0; // highest updated_hlc this peer has acknowledged
 };
 
 struct ClipboardCategory {
@@ -85,7 +102,26 @@ public:
     bool updateImageAngle(qint64 id, int angle);
     bool updateLinkMetadata(qint64 id, const QString &title, const QByteArray &iconData,
                             const QByteArray &previewData);
+    // A paste or copy from the Deck counts as copying the item again: it moves
+    // to the front and, with LAN sync, into the window that is synced.
+    bool touch(qint64 id);
+    // Deleting is local only; the sync ID is remembered for a while so a peer
+    // cannot sync the item straight back.
     bool remove(qint64 id);
+    bool wasDeleted(const QString &syncID) const;
+
+    // LAN sync. Changes to send: non-file items copied within `windowMs`
+    // whose clock is past `afterHlc`, oldest change first, with full payloads.
+    QVector<ClipboardItem> syncChanges(quint64 afterHlc, qint64 windowMs, int limit) const;
+    enum class ImportResult { Inserted, Updated, Merged, Skipped, Failed };
+    // Merges an item from a peer: a newer clock value wins for the same sync
+    // ID; the same content merges into the local row; locally deleted items
+    // are skipped. New text is classified with this device's rules.
+    ImportResult importRemoteItem(const ClipboardItem &remote);
+    QVector<SyncPeer> syncPeers() const;
+    bool saveSyncPeer(const SyncPeer &peer);
+    bool removeSyncPeer(const QString &deviceID);
+    static constexpr qint64 kDeletedRecordRetentionMs = 48LL * 60 * 60 * 1000;
     int clearExpired(int retentionDays);
     int clearExpiredAndReclaim(int retentionDays);
     int clearAll();
@@ -134,6 +170,8 @@ public:
 private:
     bool initialize();
     bool collapseRecentDuplicates();
+    bool migrateSyncColumns();
+    void pruneDeletedRecords();
     static QByteArray contentHash(const ClipboardItem &item);
     static ClipboardItem itemFromQuery(const class QSqlQuery &query, bool decodeImages = true);
     bool execute(const QString &sql) const;

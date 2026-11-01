@@ -1,6 +1,7 @@
 // Runs the shared data-layer checks under Qt 6 on Windows.
 #include "history/file_reference_tests.h"
 #include "history_repository.h"
+#include "history/hybrid_logical_clock.h"
 
 #include <QCoreApplication>
 #include <QApplication>
@@ -93,6 +94,125 @@ void cardTypeTests() {
           "switching-to-code-detects-language");
     check(HistoryRepository::previewLanguageForCardType(QStringLiteral("text"), QStringLiteral("json")) == QStringLiteral("text"),
           "switching-to-text-drops-language");
+}
+
+void hybridClockTests() {
+    qint64 wall = 1'000'000;
+    HybridLogicalClock clock([&wall] { return wall; });
+    const quint64 first = clock.now();
+    check(HybridLogicalClock::milliseconds(first) == wall && HybridLogicalClock::counter(first) == 0,
+          "hlc-reads-as-wall-time");
+    const quint64 sameMillisecond = clock.now();
+    check(sameMillisecond == first + 1, "hlc-counts-within-a-millisecond");
+    wall -= 5000; // the system clock steps back
+    check(clock.now() > sameMillisecond, "hlc-never-goes-backwards");
+    const quint64 remote = HybridLogicalClock::make(wall + 60'000, 7); // a peer a minute ahead
+    const quint64 received = clock.receive(remote);
+    check(received > remote, "hlc-receive-moves-past-the-peer");
+    check(clock.now() > received, "hlc-later-local-change-orders-after-the-peer");
+    wall += 120'000;
+    check(HybridLogicalClock::counter(clock.now()) == 0, "hlc-returns-to-wall-time-when-it-catches-up");
+    HybridLogicalClock full([] { return qint64(5); });
+    full.observe(HybridLogicalClock::make(5, 0xFFFF));
+    const quint64 carried = full.now();
+    check(HybridLogicalClock::milliseconds(carried) == 6 && HybridLogicalClock::counter(carried) == 0,
+          "hlc-full-counter-carries-into-milliseconds");
+}
+
+void syncBookkeepingTests() {
+    QTemporaryDir directory;
+    const QString path = directory.filePath(QStringLiteral("sync.sqlite"));
+
+    // A database from before sync: the original content table, two rows.
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("presync"));
+        database.setDatabaseName(path);
+        database.open();
+        QSqlQuery query(database);
+        query.exec(QStringLiteral(
+            "CREATE TABLE content (id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,content_type TEXT NOT NULL,"
+            "plain_text TEXT,image_data BLOB,image_width INTEGER,image_height INTEGER,content_hash BLOB NOT NULL,"
+            "source_id TEXT,source_name TEXT NOT NULL,category TEXT,copied_at INTEGER NOT NULL,"
+            "last_copied_at INTEGER NOT NULL,copy_count INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL)"));
+        query.exec(QStringLiteral(
+            "INSERT INTO content(title,content_type,plain_text,content_hash,source_name,copied_at,last_copied_at,updated_at) "
+            "VALUES('文本','text','older','h1','Notepad',1000,1000,1000),"
+            "('文本','text','newer','h2','Notepad',2000,2000,2000)"));
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(QStringLiteral("presync"));
+
+    HistoryRepository repository(path);
+    check(repository.isOpen(), "presync-database-opens");
+    const QVector<ClipboardItem> migrated = repository.fetch();
+    check(migrated.size() == 2 && !migrated[0].syncID.isEmpty() && !migrated[1].syncID.isEmpty()
+              && migrated[0].syncID != migrated[1].syncID,
+          "presync-rows-get-distinct-sync-ids");
+    check(migrated.size() == 2 && HybridLogicalClock::milliseconds(migrated[0].updatedHlc) == 2000
+              && HybridLogicalClock::milliseconds(migrated[1].updatedHlc) == 1000,
+          "presync-rows-keep-their-order-in-the-clock");
+    const QString keptID = migrated.isEmpty() ? QString() : migrated[0].syncID;
+    {
+        HistoryRepository reopened(path);
+        check(reopened.fetch().value(0).syncID == keptID, "sync-ids-survive-reopening");
+    }
+
+    ClipboardItem item;
+    item.text = QStringLiteral("sync me");
+    item.sourceName = QStringLiteral("Notepad");
+    item.copiedAt = QDateTime::currentDateTime();
+    const ClipboardItem saved = repository.save(item);
+    check(!saved.syncID.isEmpty() && saved.originDevice.isEmpty(), "new-item-gets-a-sync-id-from-this-device");
+    check(saved.updatedHlc > migrated.value(0).updatedHlc, "new-item-orders-after-older-changes");
+
+    const ClipboardItem copiedAgain = repository.save(item);
+    check(copiedAgain.databaseID == saved.databaseID && copiedAgain.syncID == saved.syncID,
+          "copying-again-keeps-the-sync-id");
+    check(copiedAgain.updatedHlc > saved.updatedHlc, "copying-again-moves-the-clock");
+
+    auto stored = [&repository](qint64 id) {
+        return repository.fetch(QString(), QString(), 1, 0, id).value(0);
+    };
+    quint64 before = stored(saved.databaseID).updatedHlc;
+    repository.updateTitle(saved.databaseID, QStringLiteral("renamed"));
+    check(stored(saved.databaseID).updatedHlc > before, "rename-moves-the-clock");
+    before = stored(saved.databaseID).updatedHlc;
+    repository.updateText(saved.databaseID, QStringLiteral("edited"), QString());
+    check(stored(saved.databaseID).updatedHlc > before, "edit-moves-the-clock");
+    before = stored(saved.databaseID).updatedHlc;
+    repository.updateLinkMetadata(saved.databaseID, QStringLiteral("Title"), QByteArray(), QByteArray());
+    check(stored(saved.databaseID).updatedHlc == before, "link-metadata-does-not-sync");
+
+    const ClipboardItem older = stored(migrated.value(1).databaseID);
+    check(repository.touch(older.databaseID), "touch-finds-the-row");
+    const ClipboardItem touched = stored(older.databaseID);
+    check(touched.updatedHlc > before && touched.copiedAt > older.copiedAt
+              && touched.copyCount == older.copyCount + 1,
+          "touch-counts-as-copying-again");
+    check(repository.fetch().value(0).databaseID == older.databaseID, "touched-item-moves-to-the-front");
+
+    check(!repository.wasDeleted(touched.syncID), "live-item-is-not-deleted");
+    check(repository.remove(touched.databaseID) && repository.wasDeleted(touched.syncID),
+          "delete-remembers-the-sync-id");
+    const QString lastID = stored(saved.databaseID).syncID;
+    repository.clearAll();
+    check(repository.wasDeleted(lastID), "clear-all-remembers-the-sync-ids");
+
+    // Records older than the retention are dropped when the database opens.
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("aged"));
+        database.setDatabaseName(path);
+        database.open();
+        QSqlQuery query(database);
+        query.prepare(QStringLiteral("UPDATE sync_deleted SET deleted_at=? WHERE sync_id=?"));
+        query.addBindValue(QDateTime::currentMSecsSinceEpoch() - HistoryRepository::kDeletedRecordRetentionMs - 1000);
+        query.addBindValue(lastID);
+        query.exec();
+        database.close();
+    }
+    QSqlDatabase::removeDatabase(QStringLiteral("aged"));
+    HistoryRepository aged(path);
+    check(!aged.wasDeleted(lastID) && aged.wasDeleted(touched.syncID), "old-deletion-records-are-pruned");
 }
 
 void upgradeTests() {
@@ -189,6 +309,8 @@ int main(int argc, char *argv[]) {
     defaultRuleTests(repository);
     upgradeTests();
     categoryColorTests();
+    hybridClockTests();
+    syncBookkeepingTests();
     cardTypeTests();
     std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "ALL PASSED", failures);
     return failures ? 1 : 0;

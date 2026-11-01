@@ -40,6 +40,10 @@ public:
     QAction *settingsAction() const { return settingsAction_; }
     QAction *quitAction() const { return quitAction_; }
     QAction *blurAction() const { return blurAction_; }
+    QMenu *syncMenu() const { return syncMenu_; }
+    // "局域网同步" submenu (docs/lan-sync-design.md §8): status line, visibility
+    // with its countdown, pause, sync now, and the sync panel.
+    void setSyncState(const QString &status, bool visible, int secondsLeft, bool paused, bool available);
     // Reflects the stored setting without emitting blurToggled.
     void setBlurChecked(bool checked);
 
@@ -48,6 +52,10 @@ Q_SIGNALS:
     void settingsRequested();
     void quitRequested();
     void blurToggled(bool enabled);
+    void syncVisibilityToggled(bool visible);
+    void syncPauseToggled(bool paused);
+    void syncNowRequested();
+    void syncPanelRequested();
 
 private:
     void onActivated(QSystemTrayIcon::ActivationReason reason);
@@ -57,4 +65,10 @@ private:
     QAction *settingsAction_ = nullptr;
     QAction *quitAction_ = nullptr;
     QAction *blurAction_ = nullptr;
+    QMenu *syncMenu_ = nullptr;
+    QAction *syncStatusAction_ = nullptr;
+    QAction *syncVisibleAction_ = nullptr;
+    QAction *syncPauseAction_ = nullptr;
+    QAction *syncNowAction_ = nullptr;
+    QAction *syncPanelAction_ = nullptr;
 };

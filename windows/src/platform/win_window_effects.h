@@ -32,5 +32,7 @@ void setDarkTitleBar(HWND window);
 // Windows 11 rounded corners and the DWM shadow for a frameless window that
 // draws its own chrome (DWMWA_WINDOW_CORNER_PREFERENCE + a 1 px frame).
 void setFramelessChrome(HWND window);
+// Popup menus: Windows 11 small rounded corners with the system shadow.
+void setRoundedPopup(HWND window);
 
 } // namespace WinEffects

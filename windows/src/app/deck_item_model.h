@@ -36,6 +36,7 @@ public:
         ColorTextRole,
         ImmersiveRole,
         HighlightedTextRole,
+        FromOtherDeviceRole,
     };
 
     explicit DeckItemModel(DeckImageProvider *images, QObject *parent = nullptr);
@@ -48,6 +49,8 @@ public:
     // does not jump; otherwise resets.
     void setItems(const QVector<ClipboardItem> &items);
     const QVector<ClipboardItem> &items() const { return items_; }
+    // This device's LAN sync ID: items whose origin is another device get the sync badge.
+    void setLocalDeviceId(const QString &deviceId) { localDeviceId_ = deviceId; }
     int indexOf(const QUuid &id) const;
     // Relative times ("3 分钟") age while the Deck is open.
     void refreshTimes();
@@ -57,6 +60,7 @@ private:
 
     DeckImageProvider *images_;
     QVector<ClipboardItem> items_;
+    QString localDeviceId_;
     QDateTime now_ = QDateTime::currentDateTime();
     // Highlighted card HTML by item id + text hash (mac SyntaxHighlighter cache).
     mutable QHash<QString, QString> highlighted_;

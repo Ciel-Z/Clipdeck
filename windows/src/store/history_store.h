@@ -100,6 +100,9 @@ public:
 
     // Capture
     void insert(const ClipboardItem &item);
+    // A paste or copy from the Deck counts as copying the item again: it moves
+    // to the front with a fresh copy time. Selection and category stay.
+    void markCopied(const QUuid &itemId);
     CaptureReconciliation reconcileCapturedItem(const ClipboardItem &item);
 
     // Selection and categories

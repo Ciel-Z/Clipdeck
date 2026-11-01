@@ -120,6 +120,14 @@ Window {
             anchors.rightMargin: 24
             height: 51
 
+            // LAN sync in progress (docs/lan-sync-design.md §8): shown in the
+            // top-left corner only while items are sent or received.
+            SyncLoader {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                running: deck.syncing
+            }
+
             Row {
                 id: toolbarCenter
                 anchors.centerIn: parent
@@ -347,6 +355,7 @@ Window {
                 required files
                 required sourceIconUrl
                 required sourceName
+                required fromOtherDevice
                 required linkTitle
                 required linkHost
                 required linkIconUrl
@@ -560,6 +569,8 @@ Window {
             deck.moveCategory(categoryDirection)
         } else if (ctrl && event.key === Qt.Key_O) {
             deck.openSelection()
+        } else if (ctrl && event.key === Qt.Key_C && !fromSearchField && !deck.searchEditing) {
+            deck.copySelection()
         } else if (ctrl && event.key === Qt.Key_E) {
             deck.editSelection()
         } else if (ctrl && event.key === Qt.Key_R) {

@@ -254,6 +254,24 @@ void HistoryStore::insert(const ClipboardItem &item) {
     setSelectedItemId(item.id);
 }
 
+void HistoryStore::markCopied(const QUuid &itemId) {
+    const std::optional<ClipboardItem> current = find(items_, itemId);
+    if (!current) return;
+    ClipboardItem updated = *current;
+    updated.copiedAt = QDateTime::currentDateTime();
+    updated.copyCount += 1;
+    QVector<ClipboardItem> next = items_;
+    next.erase(std::remove_if(next.begin(), next.end(),
+                              [&](const ClipboardItem &existing) { return existing.id == itemId; }),
+               next.end());
+    next.prepend(updated);
+    setItems(std::move(next));
+    if (find(searchResults_, itemId)) {
+        replace(*current, updated, searchResults_);
+        Q_EMIT searchResultsChanged();
+    }
+}
+
 CaptureReconciliation HistoryStore::reconcileCapturedItem(const ClipboardItem &item) {
     const auto index = std::find_if(items_.begin(), items_.end(),
                                     [&](const ClipboardItem &existing) { return existing.id == item.id; });

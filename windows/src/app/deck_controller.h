@@ -3,6 +3,7 @@
 #include "deck_item_model.h"
 #include "history_store.h"
 #include "link_metadata_fetcher.h"
+#include "sync/sync_service.h"
 #include "settings_controller.h"
 #include "win_capture_service.h"
 #include "win_global_hotkey.h"
@@ -48,6 +49,9 @@ class DeckController final : public QObject {
     Q_PROPERTY(bool backdropBlur READ backdropBlur WRITE setBackdropBlur NOTIFY backdropChanged)
     // Preview / edit / rename popover: {kind: "" | "preview" | "edit" | "rename", index, …}
     Q_PROPERTY(QVariantMap popover READ popover NOTIFY popoverChanged)
+    // LAN sync is running (the refresh animation left of the category bar).
+    Q_PROPERTY(bool syncing READ syncing NOTIFY syncingChanged)
+    Q_PROPERTY(bool syncPaired READ syncPaired NOTIFY syncingChanged)
     // Configurable in Settings → 键盘快捷键 (Qt::KeyboardModifier / Qt::Key values).
     Q_PROPERTY(int quickPasteModifier READ quickPasteModifier NOTIFY shortcutsChanged)
     Q_PROPERTY(int quickPasteModifierKey READ quickPasteModifierKey NOTIFY shortcutsChanged)
@@ -95,6 +99,12 @@ public:
     Q_INVOKABLE void selectCategoryKey(const QString &key);
     Q_INVOKABLE void paste(int index, bool plainText);
     Q_INVOKABLE void pasteSelection();
+    Q_INVOKABLE void openSyncPanel();
+    SyncService *sync() const { return sync_.get(); }
+    bool syncing() const { return sync_ && sync_->isSyncing(); }
+    bool syncPaired() const { return sync_ && !sync_->devices().isEmpty(); }
+    Q_INVOKABLE void copySelection();
+    Q_INVOKABLE void copyItem(int index);
     Q_INVOKABLE void quickPaste(int index);
     Q_INVOKABLE void deleteSelection();
     Q_INVOKABLE void openSelection();
@@ -136,6 +146,8 @@ public:
     Q_INVOKABLE void activateDeck();
 
 Q_SIGNALS:
+    void syncingChanged();
+    void syncPanelRequested();
     void selectionChanged();
     void revealRequested();
     void categoriesChanged();
@@ -165,6 +177,8 @@ private:
     void refreshLinkMetadata(const QVector<ClipboardItem> &items);
     void performSearch(const QString &query);
     void pasteItem(const ClipboardItem &item, bool plainText);
+    // Pasting or copying a card counts as copying it again (row and strip).
+    void recordCopy(const ClipboardItem &item);
     void deliverPaste(const ClipboardItem &item, bool plainText);
     void captureBackdrop(QScreen *screen, const QRect &frame);
     void updateRegion();
@@ -192,6 +206,7 @@ private:
     WinPasteService paste_;
     WinGlobalHotkey hotkey_;
     std::unique_ptr<WinTray> tray_;
+    std::unique_ptr<SyncService> sync_;
     std::unique_ptr<FilePasteController> filePaste_;
     DeckImageProvider *images_;
     DeckItemModel model_;

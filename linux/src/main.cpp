@@ -10,6 +10,8 @@
 #include "ui/file_card_view.h"
 #include "ui/linux_icons.h"
 #include "ui/script_editor_widget.h"
+#include "ui/sync_panel.h"
+#include "sync/sync_service.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -121,6 +123,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <QtMath>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -1536,35 +1539,58 @@ public:
         pasteItem(selectedItem, forcePlainText, quickPaste);
     }
 
+    // Puts a history item on CLIPBOARD; returns the image as written (rotated).
+    QImage writeItemToClipboard(const ClipboardItem &selectedItem, bool forcePlainText) {
+        // Only this explicit history action may replace CLIPBOARD. Do not
+        // suppress external copies/cuts for an arbitrary time afterwards.
+        QScopedValueRollback<bool> writing(writingHistoryClipboard_, true);
+        QImage image;
+        if (selectedItem.isFiles()) {
+            QApplication::clipboard()->setMimeData(FileReferences::mimeData(selectedItem.files));
+        } else if (selectedItem.isImage()) {
+            image = imageAtAngle(selectedItem.image, selectedItem.imageAngle);
+            QApplication::clipboard()->setImage(image, QClipboard::Clipboard);
+        } else {
+            QSettings settings;
+            const bool preserveFormatting = !forcePlainText && settings.value(
+                QStringLiteral("paste/preserveFormatting"), false).toBool();
+            if (preserveFormatting && !selectedItem.richTextHtml.isEmpty()) {
+                auto *mimeData = new QMimeData;
+                mimeData->setText(selectedItem.text);
+                mimeData->setHtml(selectedItem.richTextHtml);
+                QApplication::clipboard()->setMimeData(mimeData, QClipboard::Clipboard);
+            } else {
+                QApplication::clipboard()->setText(selectedItem.text, QClipboard::Clipboard);
+            }
+        }
+        return image;
+    }
+
+    // Pasting or copying a card counts as copying it again: its row moves to
+    // the front and, with LAN sync, into the synced window. The capture
+    // pipeline skips ClipDeck's own clipboard writes, so record it here.
+    void recordCopy(const ClipboardItem &item) {
+        if (item.databaseID < 0 || !repository_->touch(item.databaseID)) return;
+        if (pipeline_) pipeline_->refreshRecent();
+    }
+
+    void copySelected() {
+        if (selectedIndex_ < 0 || selectedIndex_ >= static_cast<int>(items_.size())) return;
+        if (ensureSelectedPayload([this] { copySelected(); })) return;
+        const ClipboardItem item = items_[selectedIndex_];
+        writeItemToClipboard(item, false);
+        recordCopy(item);
+        reload();
+    }
+
     void pasteItem(const ClipboardItem &selectedItem, bool forcePlainText, bool quickPaste) {
         const auto request = std::make_shared<PasteRequest>();
         request->generation = ++pasteRequestGeneration_;
         request->isImage = selectedItem.isImage();
         request->text = selectedItem.text;
         request->files = selectedItem.files;
-        {
-            // Only this explicit history action may replace CLIPBOARD. Do not
-            // suppress external copies/cuts for an arbitrary time afterwards.
-            QScopedValueRollback<bool> writing(writingHistoryClipboard_, true);
-            if (selectedItem.isFiles()) {
-                QApplication::clipboard()->setMimeData(FileReferences::mimeData(selectedItem.files));
-            } else if (selectedItem.isImage()) {
-                request->image = imageAtAngle(selectedItem.image, selectedItem.imageAngle);
-                QApplication::clipboard()->setImage(request->image, QClipboard::Clipboard);
-            } else {
-                QSettings settings;
-                const bool preserveFormatting = !forcePlainText && settings.value(
-                    QStringLiteral("paste/preserveFormatting"), false).toBool();
-                if (preserveFormatting && !selectedItem.richTextHtml.isEmpty()) {
-                    auto *mimeData = new QMimeData;
-                    mimeData->setText(selectedItem.text);
-                    mimeData->setHtml(selectedItem.richTextHtml);
-                    QApplication::clipboard()->setMimeData(mimeData, QClipboard::Clipboard);
-                } else {
-                    QApplication::clipboard()->setText(selectedItem.text, QClipboard::Clipboard);
-                }
-            }
-        }
+        request->image = writeItemToClipboard(selectedItem, forcePlainText);
+        recordCopy(selectedItem);
         request->clipboardRevision = clipboardRevision_;
         // In non-activating presentation the source application's input
         // focus is intentionally left untouched. Remember that state before
@@ -1618,6 +1644,32 @@ public:
     }
 
     bool isWritingHistoryClipboard() const { return writingHistoryClipboard_; }
+
+    // LAN sync (docs/lan-sync-design.md §8): a grey loader in the top-left
+    // corner, shown only while items are exchanged and faded in and out.
+    void setSyncState(bool syncing, bool paired) {
+        Q_UNUSED(paired)
+        if (syncing == syncing_) return;
+        syncing_ = syncing;
+        if (!syncSpinTimer_) {
+            syncSpinTimer_ = new QTimer(this);
+            syncSpinTimer_->setInterval(16);
+            QObject::connect(syncSpinTimer_, &QTimer::timeout, this, [this] {
+                const qreal step = 16.0 / 220.0;
+                syncOpacity_ = syncing_ ? std::min(1.0, syncOpacity_ + step) : std::max(0.0, syncOpacity_ - step);
+                if (!syncing_ && syncOpacity_ <= 0) syncSpinTimer_->stop();
+                update(syncMarkRect().adjusted(-3, -3, 3, 3));
+            });
+            syncClock_.start();
+        }
+        syncSpinTimer_->start();
+    }
+
+    // Items synced from another device show the sync tile instead of their source icon.
+    void setLocalDeviceId(const QString &deviceId) {
+        localDeviceId_ = deviceId;
+        update();
+    }
 
     const DeckMaterial &material() const { return material_; }
     void setMaterial(const DeckMaterial &material) {
@@ -1926,6 +1978,10 @@ protected:
             search();
             return;
         }
+        if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_C) {
+            copySelected();
+            return;
+        }
         if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_E) {
             editSelected();
             return;
@@ -2207,6 +2263,7 @@ protected:
             return action;
         };
         QAction *pasteAction = addShortcutAction(QStringLiteral("粘贴"), QKeySequence(Qt::Key_Return));
+        QAction *copyAction = addShortcutAction(QStringLiteral("复制"), QKeySequence(Qt::CTRL | Qt::Key_C));
         QAction *previewAction = addShortcutAction(QStringLiteral("预览"), QKeySequence(Qt::Key_Space));
         QAction *openAction = nullptr;
         if (items_[index].isText()) {
@@ -2238,6 +2295,7 @@ protected:
         popoverOpen_ = false;
         restoreDeckKeyboard();
         if (chosen == pasteAction) pasteSelected();
+        else if (chosen == copyAction) copySelected();
         else if (chosen == previewAction) previewSelected();
         else if (chosen == openAction) QDesktopServices::openUrl(QUrl(items_[index].text.trimmed()));
         else if (chosen == editAction) editSelected();
@@ -2344,6 +2402,7 @@ private:
         const QStringList &categories = categoryValues();
         const DeckSymbol symbols[] = {DeckSymbol::History, DeckSymbol::Text, DeckSymbol::Image, DeckSymbol::Folder};
         const QString labels[] = {QStringLiteral("History"),QStringLiteral("文本"),QStringLiteral("图片"),QStringLiteral("文件")};
+        if (syncOpacity_ > 0) paintSyncLoader(painter);
         for (int index=0; index<4; ++index) {
             const QRect area=fixedTypeRect(index);
             const bool selected=categories.value(index)==selectedCategory_;
@@ -2748,10 +2807,9 @@ private:
             const QImage sourceIcon = clipDeckSource
                 ? shadowFreeClipDeckIcon()
                 : renderedSourceIcon(item, sourceSize);
-            if (item.isFiles()) {
-                const int side = expanded ? 30 : 18;
-                const QRect fileBadge=expanded?QRect(card.right()-44,card.y()+(headerHeight-side)/2,side,side):sourceRect;
-                drawDeckSymbol(painter,fileBadge,DeckSymbol::Folder,Qt::white);
+            const bool fromOtherDevice = !item.originDevice.isEmpty() && item.originDevice != localDeviceId_;
+            if (item.isFiles() || fromOtherDevice) {
+                paintGlyphSourceTile(painter, sourceRect, item.isFiles());
             } else if (!sourceIcon.isNull()) {
                 painter.drawImage(sourceRect, sourceIcon);
             } else {
@@ -2965,13 +3023,81 @@ private:
         return 39+((index==0 || categoryValues().value(index)==selectedCategory_)
             ? 6+QFontMetrics(categoryFont()).horizontalAdvance(labels[index]) : 0);
     }
+    int syncSlotWidth() const { return 0; }
+    QRect syncMarkRect() const { return QRect(kContentInset + 2, 24, 22, 22); }
+
+    // Same geometry as windows/qml/SyncLoader.qml: a grey arc on a 24-unit
+    // grid (radius 7, stroke 2.6) whose head breaks off into a 22° dash and
+    // joins it again (1.8 s), the whole mark turning once per 1.1 s.
+    void paintSyncLoader(QPainter &painter) const {
+        const qreal ms = syncClock_.isValid() ? qreal(syncClock_.elapsed()) : 0;
+        const qreal breath = (1 - std::cos(std::fmod(ms, 1800.0) / 1800.0 * 2 * M_PI)) / 2;
+        const qreal mainSweep = 245 - 90 * breath;
+        const qreal gap = (245 - mainSweep) * 0.6;
+        const QRectF box(syncMarkRect());
+        const qreal unit = box.width() / 24;
+        const QRectF circle(box.x() + 5 * unit, box.y() + 5 * unit, 14 * unit, 14 * unit);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setOpacity(syncOpacity_);
+        painter.translate(box.center());
+        painter.rotate(std::fmod(ms, 1100.0) / 1100.0 * 360);
+        painter.translate(-box.center());
+        painter.setBrush(Qt::NoBrush);
+        // QPainter angles run counter-clockwise from 3 o'clock; draw clockwise from 12.
+        painter.setPen(QPen(QColor(0xD3, 0xD1, 0xC7), 2.6 * unit, Qt::SolidLine, Qt::RoundCap));
+        painter.drawArc(circle, 90 * 16, int(-mainSweep * 16));
+        painter.setPen(QPen(QColor(0x88, 0x87, 0x80), 2.6 * unit, Qt::SolidLine, Qt::RoundCap));
+        painter.drawArc(circle, int((90 - mainSweep - gap) * 16), -22 * 16);
+        painter.restore();
+    }
+
+    // A white glyph on a coloured tile in place of the source icon (same
+    // geometry as SourceBadge.qml): teal arrows for items synced from another
+    // device, an amber folder for file cards.
+    static void paintGlyphSourceTile(QPainter &painter, const QRect &iconRect, bool files) {
+        const qreal tile = std::round(iconRect.width() * 0.84);
+        const QRectF tileRect(QPointF(iconRect.center()) + QPointF(0.5, 0.5) - QPointF(tile / 2, tile / 2),
+                              QSizeF(tile, tile));
+        const bool small = tile < 20;
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(files ? QColor(0xE5, 0xA4, 0x3A) : QColor(0x1D, 0x9E, 0x75));
+        const qreal radius = std::max<qreal>(4, iconRect.width() * 0.20);
+        painter.drawRoundedRect(tileRect, radius, radius);
+        const qreal scale = tile * (small ? 0.86 : files ? 0.75 : 0.66) / 24;
+        painter.translate(tileRect.center() - QPointF(12 * scale, 12 * scale));
+        painter.scale(scale, scale);
+        QPainterPath glyph;
+        if (files) {
+            // Folder with its tab line.
+            glyph.moveTo(3.5, 8); glyph.lineTo(3.5, 17.5);
+            glyph.quadTo(3.5, 19, 5, 19); glyph.lineTo(19, 19);
+            glyph.quadTo(20.5, 19, 20.5, 17.5); glyph.lineTo(20.5, 9.5);
+            glyph.quadTo(20.5, 8, 19, 8); glyph.lineTo(11.5, 8);
+            glyph.lineTo(9.8, 5.8); glyph.quadTo(9.4, 5.3, 8.8, 5.3);
+            glyph.lineTo(5, 5.3); glyph.quadTo(3.5, 5.3, 3.5, 6.8);
+            glyph.closeSubpath();
+            glyph.moveTo(3.5, 9.5); glyph.lineTo(20.5, 9.5);
+        } else {
+            glyph.moveTo(5, 8.5); glyph.lineTo(18, 8.5);
+            glyph.moveTo(14.5, 5); glyph.lineTo(18, 8.5); glyph.lineTo(14.5, 12);
+            glyph.moveTo(19, 15.5); glyph.lineTo(6, 15.5);
+            glyph.moveTo(9.5, 12); glyph.lineTo(6, 15.5); glyph.lineTo(9.5, 19);
+        }
+        painter.setPen(QPen(Qt::white, small ? 2.9 : files ? 2.4 : 2.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(glyph);
+        painter.restore();
+    }
     int fixedTypesWidth() const {
-        int total=12;
+        int total=12+syncSlotWidth();
         for(int index=0;index<4;++index) total+=fixedTypeWidth(index);
         return total;
     }
     QRect fixedTypeRect(int index) const {
-        int x=toolbarStartX()+searchControlWidth()+20;
+        int x=toolbarStartX()+searchControlWidth()+20+syncSlotWidth();
         for(int i=0;i<index;++i) x+=fixedTypeWidth(i)+4;
         return QRect(x,18,fixedTypeWidth(index),35);
     }
@@ -4220,6 +4346,11 @@ private:
     std::function<void(QKeyEvent *)> previewKeyHandler_;
     std::vector<ClipboardItem> items_;
     QStringList categoryValuesCache_;
+    bool syncing_ = false;
+    qreal syncOpacity_ = 0;
+    QElapsedTimer syncClock_;
+    QString localDeviceId_;
+    QTimer *syncSpinTimer_ = nullptr;
     QVector<QColor> categoryColorsCache_; // Automatic categories only, in Deck order.
     QString loadedCategory_;
     int imageLoadLimit_ = kInitialImageCapacity;
@@ -6392,8 +6523,71 @@ int main(int argc, char *argv[]) {
     const QIcon packagedTrayIcon(packagedTrayIconPath);
     QSystemTrayIcon tray(packagedTrayIcon.isNull()
         ? transparentTrayIcon(DisplayScale::factor()) : packagedTrayIcon);
+    // LAN sync (docs/lan-sync-design.md), sharing the Deck's GUI-thread
+    // repository connection.
+    SyncService::Options syncOptions;
+    syncOptions.keyStorePath = QDir(QFileInfo(repository.databasePath()).absolutePath())
+        .filePath(QStringLiteral("sync-keys.bin"));
+    SyncService sync(&repository, syncOptions);
+    if (!sync.start()) qWarning() << "[ClipDeck][Sync] LAN sync is unavailable";
+    deck.setLocalDeviceId(sync.deviceID());
+    SyncPanel syncPanel(&sync);
+    auto showDeckSyncState = [&] { deck.setSyncState(sync.isSyncing(), !sync.devices().isEmpty()); };
+    showDeckSyncState();
+    QObject::connect(&sync, &SyncService::syncingChanged, showDeckSyncState);
+    QObject::connect(&sync, &SyncService::devicesChanged, showDeckSyncState);
+    QObject::connect(&pipeline, &ClipboardPipeline::recentChanged, &sync, [&sync] { sync.notifyLocalChange(); });
+    QObject::connect(&sync, &SyncService::historyChanged, [&] {
+        pipeline.refreshRecent();
+        deck.refresh();
+    });
+    QObject::connect(&sync, &SyncService::pairingRequested, [&] { syncPanel.openNear(QCursor::pos()); });
+
     QMenu trayMenu;
+    // The menu style shared with macOS and Windows (§8.1). DDE draws menus
+    // given to setContextMenu itself, so by default the tray only lists the
+    // same items; "tray/styledMenu" pops up this styled menu at the pointer
+    // instead, once verified on the target UOS release.
+    trayMenu.setStyleSheet(QStringLiteral(
+        "QMenu{background:#2b2b2e;color:#eeeeef;border:1px solid rgba(255,255,255,30);border-radius:8px;padding:4px;}"
+        "QMenu::item{padding:4px 24px 4px 26px;border-radius:5px;}"
+        "QMenu::item:selected{background:#0a84ff;color:white;}"
+        "QMenu::item:disabled{color:#8e8e93;background:transparent;}"
+        "QMenu::separator{height:1px;background:rgba(255,255,255,30);margin:4px 8px;}"));
     QAction *showAction = trayMenu.addAction(QStringLiteral("显示 Deck"));
+    QMenu *syncMenu = trayMenu.addMenu(QStringLiteral("局域网同步"));
+    syncMenu->setStyleSheet(trayMenu.styleSheet());
+    QAction *syncStatusAction = syncMenu->addAction(QString());
+    syncStatusAction->setEnabled(false);
+    syncMenu->addSeparator();
+    QAction *syncVisibleAction = syncMenu->addAction(QStringLiteral("局域网可见"));
+    syncVisibleAction->setCheckable(true);
+    QAction *syncPauseAction = syncMenu->addAction(QStringLiteral("暂停同步"));
+    syncPauseAction->setCheckable(true);
+    QAction *syncNowAction = syncMenu->addAction(QStringLiteral("立即同步"));
+    syncMenu->addSeparator();
+    QAction *syncPanelAction = syncMenu->addAction(QStringLiteral("同步设备…"));
+    auto showTraySyncState = [&] {
+        syncStatusAction->setText(sync.statusText());
+        const int left = sync.visibleSecondsLeft();
+        const QSignalBlocker visibleBlocker(syncVisibleAction);
+        syncVisibleAction->setChecked(sync.isVisible());
+        syncVisibleAction->setText(sync.isVisible()
+            ? QStringLiteral("局域网可见 (%1:%2)").arg(left / 60).arg(left % 60, 2, 10, QLatin1Char('0'))
+            : QStringLiteral("局域网可见"));
+        const QSignalBlocker pauseBlocker(syncPauseAction);
+        syncPauseAction->setChecked(sync.isPaused());
+        for (QAction *action : {syncVisibleAction, syncPauseAction, syncPanelAction})
+            action->setEnabled(sync.isAvailable());
+        syncNowAction->setEnabled(sync.isAvailable() && !sync.isPaused());
+    };
+    showTraySyncState();
+    QObject::connect(&sync, &SyncService::stateChanged, showTraySyncState);
+    QObject::connect(syncVisibleAction, &QAction::toggled, &sync, &SyncService::setVisible);
+    QObject::connect(syncPauseAction, &QAction::toggled, &sync, &SyncService::setPaused);
+    QObject::connect(syncNowAction, &QAction::triggered, &sync, &SyncService::syncNow);
+    QObject::connect(syncPanelAction, &QAction::triggered, [&] { syncPanel.openNear(QCursor::pos()); });
+    trayMenu.addSeparator();
     QAction *settingsAction = trayMenu.addAction(QStringLiteral("设置…"));
     QAction *blurAction = trayMenu.addAction(QStringLiteral("背景模糊"));
     blurAction->setCheckable(true);
@@ -6406,7 +6600,8 @@ int main(int argc, char *argv[]) {
     quitAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Q));
     quitAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
     quitAction->setShortcutVisibleInContextMenu(true);
-    tray.setContextMenu(&trayMenu);
+    const bool styledTrayMenu = QSettings().value(QStringLiteral("tray/styledMenu"), false).toBool();
+    if (!styledTrayMenu) tray.setContextMenu(&trayMenu);
     GlobalShortcutFilter shortcut(
         [&deck] { deck.toggleNearPointer(); },
         [&deck](const xcb_key_press_event_t *event) {
@@ -6502,9 +6697,11 @@ int main(int argc, char *argv[]) {
     deck.setSettingsCallback([&](int page) { openSettingsProcess(page); });
     QObject::connect(quitAction, &QAction::triggered, &app, &QApplication::quit);
     QObject::connect(&tray, &QSystemTrayIcon::activated,
-                     [&deck](QSystemTrayIcon::ActivationReason reason) {
+                     [&deck, &trayMenu, styledTrayMenu](QSystemTrayIcon::ActivationReason reason) {
                          if (reason == QSystemTrayIcon::Trigger) {
                              deck.toggleNearPointer();
+                         } else if (reason == QSystemTrayIcon::Context && styledTrayMenu) {
+                             trayMenu.popup(QCursor::pos());
                          }
                      });
     tray.show();
