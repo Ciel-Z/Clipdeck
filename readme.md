@@ -181,8 +181,7 @@ macOS 顶栏以 History、文本、图片、文件四个固定图标入口导航
 
 ```bash
 cd mac
-swift build
-swift run ClipDeck
+./scripts/run-debug.sh
 ```
 
 运行测试：
@@ -192,7 +191,7 @@ cd mac
 swift test
 ```
 
-macOS 通过 Swift Package Manager 获取 [swift-sodium](https://github.com/jedisct1/swift-sodium) 中的 libsodium，用于局域网同步加密。
+macOS 通过 Swift Package Manager 获取 [swift-sodium](https://github.com/jedisct1/swift-sodium) 0.11 中的完整 libsodium（包含配对所需的 Ristretto255），用于局域网同步加密。应用必须通过 Xcode 或上述脚本以 `.app` 形式启动；详细说明见 [mac/RUNNING.md](mac/RUNNING.md)。
 
 Windows 使用 Qt 自带或 WinLibs 的 MinGW 工具链构建（将 Qt、MinGW、CMake 与 Ninja 加入 `PATH`）。局域网同步需要 libsodium 官方 MinGW 构建（`libsodium-1.0.20-mingw.tar.gz`，解压后取 `libsodium-win64`）：
 

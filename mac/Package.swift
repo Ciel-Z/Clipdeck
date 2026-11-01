@@ -10,7 +10,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.10.0"),
-        .package(url: "https://github.com/jedisct1/swift-sodium.git", from: "0.9.1")
+        // 0.11 includes full libsodium with Ristretto255, required by CPace pairing.
+        .package(url: "https://github.com/jedisct1/swift-sodium.git", .upToNextMinor(from: "0.11.0"))
     ],
     targets: [
         .executableTarget(
