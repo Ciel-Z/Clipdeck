@@ -386,7 +386,9 @@ struct HistoryPanelView: View {
                         }
                     }
                 }
-                .frame(minWidth: 240, idealWidth: 760, maxWidth: 760)
+                // As wide as its capsules (96 pt, 12 apart) within 240…760, so
+                // the + follows the last one, as in windows/qml/Main.qml.
+                .frame(width: categoryStripWidth)
 
                 if categoryValues.count > 6 {
                     HStack(spacing: 0) {
@@ -422,6 +424,11 @@ struct HistoryPanelView: View {
                 scrollCategoryPage(using: proxy)
             }
         }
+    }
+
+    private var categoryStripWidth: CGFloat {
+        let count = CGFloat(store.automaticCategories.count)
+        return min(760, max(240, count * 96 + max(0, count - 1) * 12))
     }
 
     private var categoryValues: [HistoryCategory] {

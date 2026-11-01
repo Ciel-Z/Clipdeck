@@ -1062,25 +1062,7 @@ private struct CategoryManagementView: View {
                                     .buttonStyle(.plain)
                                     .focusEffectDisabled()
                                 }
-                                // Any other colour, from the system colour panel.
-                                ColorPicker(
-                                    "自定义颜色",
-                                    selection: Binding(
-                                        get: { CategoryColor.color(manager.icon) },
-                                        set: { manager.icon = CategoryColor.hex($0) }
-                                    ),
-                                    supportsOpacity: false
-                                )
-                                .labelsHidden()
-                                .help("自定义颜色")
-                                .padding(2)
-                                .overlay {
-                                    Circle().stroke(
-                                        CategoryColor.isPreset(manager.icon) ? Color.clear : .white,
-                                        lineWidth: 2
-                                    )
-                                    .allowsHitTesting(false)
-                                }
+                                CustomColorSwatch(hex: $manager.icon)
                             }
                         }
                     }
@@ -2197,9 +2179,9 @@ enum CategoryColor {
         color(hex(icon: icon, position: position))
     }
 
-    /// "#RRGGBB" for a colour from the system colour panel (sRGB, opaque).
-    static func hex(_ color: Color) -> String {
-        guard let rgb = NSColor(color).usingColorSpace(.sRGB) else { return palette[0] }
+    /// "#RRGGBB" for a hue, saturation and brightness in 0…1 (sRGB).
+    static func hex(hue: Double, saturation: Double, brightness: Double) -> String {
+        let rgb = NSColor(colorSpace: .sRGB, hue: hue, saturation: saturation, brightness: brightness, alpha: 1)
         let channel = { (value: CGFloat) in Int((min(max(value, 0), 1) * 255).rounded()) }
         return String(
             format: "#%02X%02X%02X",
@@ -2207,8 +2189,165 @@ enum CategoryColor {
         )
     }
 
+    /// Hue, saturation and brightness of "#RRGGBB"; nil for anything else.
+    static func hsb(_ hex: String) -> (hue: Double, saturation: Double, brightness: Double)? {
+        guard hex.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil,
+              let value = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        let rgb = NSColor(
+            srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
+        var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0
+        rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
+        return (hue, saturation, brightness)
+    }
+
     static func isPreset(_ hex: String) -> Bool {
         palette.contains { $0.caseInsensitiveCompare(hex) == .orderedSame }
+    }
+}
+
+/// The custom-colour swatch after the presets: a hue wheel until a colour
+/// outside them is chosen, then that colour. It opens CategoryColorPicker just
+/// below itself, as windows/qml/CategorySettings.qml does.
+struct CustomColorSwatch: View {
+    @Binding var hex: String
+    @State private var isPicking = false
+
+    private static let wheel = AngularGradient(
+        colors: [.red, Color(red: 1, green: 0, blue: 1), .blue, .cyan, .green, .yellow, .red],
+        center: .center
+    )
+
+    var body: some View {
+        let chosen = !CategoryColor.isPreset(hex)
+        Button {
+            isPicking = true
+        } label: {
+            Circle()
+                .fill(chosen ? AnyShapeStyle(CategoryColor.color(hex)) : AnyShapeStyle(Self.wheel))
+                .frame(width: 16, height: 16)
+                .padding(4)
+                .overlay { Circle().stroke(chosen ? Color.white : .clear, lineWidth: 2) }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .help("自定义颜色")
+        .popover(isPresented: $isPicking, arrowEdge: .bottom) {
+            CategoryColorPicker(hex: $hex)
+        }
+    }
+}
+
+/// windows/qml/ColorPicker.qml: a saturation/brightness square, a hue strip
+/// and a hex field. Every change is applied at once.
+struct CategoryColorPicker: View {
+    @Binding var hex: String
+    @State private var hue = 0.0
+    @State private var saturation = 1.0
+    @State private var brightness = 1.0
+    @State private var hexText = ""
+    @FocusState private var hexFocused: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    private var current: Color { Color(hue: hue, saturation: saturation, brightness: brightness) }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            field
+            hueStrip
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(current)
+                    .overlay { RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.15)) }
+                    .frame(width: 28, height: 28)
+                TextField("", text: $hexText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+                    .focused($hexFocused)
+                    .onChange(of: hexText) { _, text in typed(text) }
+                    .onSubmit { dismiss() }
+            }
+        }
+        .padding(12)
+        .frame(width: 240)
+        .onAppear {
+            if let value = CategoryColor.hsb(hex) {
+                if value.saturation > 0 { hue = value.hue }
+                saturation = value.saturation
+                brightness = value.brightness
+            }
+            hexText = hex.uppercased()
+        }
+    }
+
+    // Saturation (x) and brightness (y) for the current hue.
+    private var field: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(LinearGradient(colors: [.white, Color(hue: hue, saturation: 1, brightness: 1)],
+                                         startPoint: .leading, endPoint: .trailing))
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom))
+                Circle()
+                    .fill(current)
+                    .overlay { Circle().stroke(.white, lineWidth: 2) }
+                    .frame(width: 14, height: 14)
+                    .position(x: saturation * size.width, y: (1 - brightness) * size.height)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                saturation = min(max(drag.location.x / size.width, 0), 1)
+                brightness = 1 - min(max(drag.location.y / size.height, 0), 1)
+                apply()
+            })
+        }
+        .frame(height: 150)
+    }
+
+    private var hueStrip: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(LinearGradient(
+                        colors: (0 ... 6).map { Color(hue: Double($0) / 6, saturation: 1, brightness: 1) },
+                        startPoint: .leading, endPoint: .trailing
+                    ))
+                    .frame(height: 12)
+                Circle()
+                    .fill(Color(hue: hue, saturation: 1, brightness: 1))
+                    .overlay { Circle().stroke(.white, lineWidth: 2) }
+                    .frame(width: 16, height: 16)
+                    .position(x: hue * width, y: 8)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                hue = min(max(drag.location.x / width, 0), 0.999)
+                apply()
+            })
+        }
+        .frame(height: 16)
+    }
+
+    private func apply() {
+        hex = CategoryColor.hex(hue: hue, saturation: saturation, brightness: brightness)
+        if !hexFocused { hexText = hex }
+    }
+
+    private func typed(_ text: String) {
+        guard hexFocused else { return }
+        let value = (text.hasPrefix("#") ? text : "#" + text).uppercased()
+        guard let hsb = CategoryColor.hsb(value) else { return }
+        if hsb.saturation > 0 { hue = hsb.hue }
+        saturation = hsb.saturation
+        brightness = hsb.brightness
+        hex = value
     }
 }
 
@@ -2228,7 +2367,7 @@ struct CardDisplayChoice: Identifiable {
         CardDisplayChoice(value: "text", label: "纯文本", detail: "按原样显示文字"),
         CardDisplayChoice(value: "code", label: "代码", detail: "自动识别语言并着色"),
         CardDisplayChoice(value: "url", label: "链接", detail: "显示网页标题和缩略图"),
-        CardDisplayChoice(value: "color", label: "色彩", detail: "显示为对应颜色的色块"),
+        CardDisplayChoice(value: "color", label: "色彩", detail: "显示为对应类型的卡片"),
     ]
 
     /// "text", "code", "url" or "color" for a stored preview_language value.

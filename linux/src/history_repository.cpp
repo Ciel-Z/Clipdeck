@@ -1603,7 +1603,7 @@ QVector<HistoryRepository::DisplayChoice> HistoryRepository::cardTypeChoices() {
         {QStringLiteral("text"), QStringLiteral("纯文本"), QStringLiteral("按原样显示文字")},
         {QStringLiteral("code"), QStringLiteral("代码"), QStringLiteral("自动识别语言并着色")},
         {QStringLiteral("url"), QStringLiteral("链接"), QStringLiteral("显示网页标题和缩略图")},
-        {QStringLiteral("color"), QStringLiteral("色彩"), QStringLiteral("显示为对应颜色的色块")},
+        {QStringLiteral("color"), QStringLiteral("色彩"), QStringLiteral("显示为对应类型的卡片")},
     };
 }
 

@@ -8,8 +8,10 @@ final class CategoryAppearanceTests: XCTestCase {
         XCTAssertEqual(CategoryColor.hex(icon: nil, position: 0), CategoryColor.palette[0])
     }
 
-    func testCustomColourRoundTripsThroughHex() {
-        XCTAssertEqual(CategoryColor.hex(CategoryColor.color("#12AB9F")), "#12AB9F")
+    func testCustomColourRoundTripsThroughHex() throws {
+        let hsb = try XCTUnwrap(CategoryColor.hsb("#12AB9F"))
+        XCTAssertEqual(CategoryColor.hex(hue: hsb.hue, saturation: hsb.saturation, brightness: hsb.brightness), "#12AB9F")
+        XCTAssertNil(CategoryColor.hsb("curlybraces"))
         XCTAssertFalse(CategoryColor.isPreset("#12AB9F"))
         XCTAssertTrue(CategoryColor.isPreset("#bf5af2"))
     }
