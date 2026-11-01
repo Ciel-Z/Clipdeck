@@ -3,6 +3,7 @@
 #include "deck_image_provider.h"
 #include "deck_item_model.h"
 #include "deck_presentation.h"
+#include "ui/header_tone.h"
 #include "app_preferences.h"
 #include "deck_backdrop.h"
 #include "code_highlight.h"
@@ -108,6 +109,32 @@ void colorTests() {
     color.previewLanguage = QStringLiteral("color");
     check(DeckPresentation::cardKind(color) == QStringLiteral("color"), "color-category-renders-color-card");
     check(DeckPresentation::usesImmersiveHeader(color), "color-card-header-is-immersive");
+    {
+        QImage white(400, 300, QImage::Format_RGB32);
+        white.fill(QColor(250, 250, 248));
+        QImage night(400, 300, QImage::Format_RGB32);
+        night.fill(QColor(20, 24, 30));
+        QImage stripes(400, 300, QImage::Format_RGB32);
+        for (int x = 0; x < stripes.width(); ++x)
+            for (int y = 0; y < stripes.height(); ++y) stripes.setPixel(x, y, (x / 20) % 2 ? qRgb(255, 255, 255) : qRgb(10, 10, 10));
+        QImage wideWhite(1200, 380, QImage::Format_RGB32);
+        wideWhite.fill(Qt::white);
+        QImage darkTopWhiteBottom(300, 400, QImage::Format_RGB32);
+        darkTopWhiteBottom.fill(Qt::white);
+        for (int y = 0; y < 200; ++y)
+            for (int x = 0; x < 300; ++x) darkTopWhiteBottom.setPixel(x, y, qRgb(15, 15, 20));
+        check(HeaderTone::forImage(white, 0) == HeaderTone::Light, "header-tone-light-image");
+        check(HeaderTone::forImage(night, 0) == HeaderTone::Dark, "header-tone-dark-image");
+        check(HeaderTone::forImage(stripes, 0) == HeaderTone::Mixed, "header-tone-busy-image");
+        check(HeaderTone::forImage(wideWhite, 0) == HeaderTone::Dark, "header-tone-fitted-wide-image-sits-on-backdrop");
+        check(HeaderTone::forImage(darkTopWhiteBottom, 0) == HeaderTone::Dark
+                  && HeaderTone::forImage(darkTopWhiteBottom, 180) == HeaderTone::Light,
+              "header-tone-follows-rotation");
+    }
+    ClipboardItem link = textItem(QStringLiteral("https://example.com/page"));
+    check(DeckPresentation::cardKind(link) == QStringLiteral("link") && DeckPresentation::usesImmersiveHeader(link),
+          "link-card-header-is-immersive");
+    check(!DeckPresentation::usesImmersiveHeader(textItem(QStringLiteral("plain words"))), "text-card-header-is-solid");
     ClipboardItem notColor = textItem(QStringLiteral("not a colour"));
     notColor.previewLanguage = QStringLiteral("color");
     check(DeckPresentation::cardKind(notColor) == QStringLiteral("text"), "unparsable-color-falls-back-to-text");

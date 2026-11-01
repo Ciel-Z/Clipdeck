@@ -22,6 +22,8 @@ Item {
     property string sourceIconUrl: ""
     property string sourceName: ""
     property bool fromOtherDevice: false
+    // Image cards: "light" | "dark" | "mixed" (linux/src/ui/header_tone.h).
+    property string headerTone: ""
     property string linkTitle: ""
     property string linkHost: ""
     property string linkIconUrl: ""
@@ -39,6 +41,18 @@ Item {
     readonly property real radius: expanded ? 18 : 15
     readonly property real headerHeight: Math.min(58, Math.max(48, side * 0.20))
     readonly property string uiFont: "Segoe UI"
+    // Header text is mostly Chinese, which Segoe UI lacks: the fallback font
+    // has no matching weight and draws "文本" thin. YaHei UI has a real bold
+    // for both scripts (its Latin is Segoe-like).
+    readonly property string headerFont: "Microsoft YaHei UI"
+    // Floating headers: over a light colour swatch (white, yellow, pastels) or a
+    // calm light image top the header text turns dark, since no shadow keeps
+    // white text legible there; over darker swatches a tight halo.
+    readonly property color swatch: kind === "color" && colorValue !== undefined ? Qt.darker(colorValue, 1.0) : "black"
+    readonly property bool darkHeaderText: (kind === "color" && (0.2126 * swatch.r + 0.7152 * swatch.g + 0.0722 * swatch.b) > 0.62)
+        || (kind === "image" && headerTone === "light")
+    readonly property color headerShadow: kind === "color" ? Qt.rgba(0, 0, 0, 0.78) : Qt.rgba(0, 0, 0, 0.55)
+    function headerInk(alpha) { return darkHeaderText ? Qt.rgba(0.07, 0.07, 0.08, alpha) : Qt.rgba(1, 1, 1, alpha) }
     readonly property string monoFont: "Consolas"
 
     width: side
@@ -91,6 +105,19 @@ Item {
                 : textBody
         }
 
+        // Only under a busy image top: a short, faint gradient that carries the
+        // white header line. Calm light tops get dark text instead and calm
+        // dark tops need nothing (link cards draw their own over page images).
+        Rectangle {
+            visible: card.immersive && card.kind === "image" && card.headerTone === "mixed"
+            width: card.width
+            height: card.expanded ? card.headerHeight + 8 : 36
+            gradient: Gradient {
+                GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0.40) }
+                GradientStop { position: 1; color: "transparent" }
+            }
+        }
+
         Shape {
             id: headerBackground
             visible: card.expanded && !card.immersive
@@ -123,13 +150,13 @@ Item {
             visible: card.expanded
             width: card.width
             height: card.headerHeight
-            layer.enabled: card.immersive && card.shadowsEnabled
+            layer.enabled: card.immersive && card.shadowsEnabled && !card.darkHeaderText
             layer.effect: MultiEffect {
                 shadowEnabled: true
-                shadowColor: Qt.rgba(0, 0, 0, 0.42)
-                blurMax: 6
+                shadowColor: card.headerShadow
+                blurMax: card.kind === "color" ? 3 : 6
                 shadowBlur: 1.0
-                shadowVerticalOffset: 1
+                shadowVerticalOffset: card.kind === "color" ? 0 : 1
             }
 
             Column {
@@ -145,25 +172,25 @@ Item {
                     Text {
                         id: headerTitle
                         text: card.title
-                        color: "white"
-                        font { family: card.uiFont; pixelSize: 14; weight: Font.Bold }
+                        color: card.headerInk(1)
+                        font { family: card.headerFont; pixelSize: 15; weight: Font.Bold }
                         elide: Text.ElideRight
                         width: Math.min(implicitWidth, parent.width * 0.65)
                     }
                     Text {
                         visible: card.categoryLabel !== ""
                         text: card.categoryLabel
-                        color: Qt.rgba(1, 1, 1, 0.72)
-                        font { family: card.uiFont; pixelSize: 12; weight: Font.DemiBold }
-                        topPadding: 2
+                        color: card.headerInk(0.78)
+                        font { family: card.headerFont; pixelSize: 12; weight: Font.Bold }
+                        topPadding: 3
                         elide: Text.ElideRight
                         width: Math.min(implicitWidth, parent.width - headerTitle.width - 7)
                     }
                 }
                 Text {
                     text: card.time
-                    color: Qt.rgba(1, 1, 1, 0.78)
-                    font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.DemiBold }
+                    color: card.headerInk(0.82)
+                    font { family: card.headerFont; pixelSize: 12 }
                 }
             }
 
@@ -196,33 +223,33 @@ Item {
             anchors.rightMargin: 11 + 18 + 6
             anchors.topMargin: 10
             spacing: 5
-            layer.enabled: card.immersive && card.shadowsEnabled
+            layer.enabled: card.immersive && card.shadowsEnabled && !card.darkHeaderText
             layer.effect: MultiEffect {
                 shadowEnabled: true
-                shadowColor: Qt.rgba(0, 0, 0, 0.55)
-                blurMax: 6
+                shadowColor: card.headerShadow
+                blurMax: card.kind === "color" ? 3 : 6
                 shadowBlur: 1.0
-                shadowVerticalOffset: 1
+                shadowVerticalOffset: card.kind === "color" ? 0 : 1
             }
             Text {
                 text: card.title
-                color: Qt.rgba(1, 1, 1, 0.90)
-                font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.Bold }
+                color: card.headerInk(0.94)
+                font { family: card.headerFont; pixelSize: 12; weight: Font.Bold }
                 elide: Text.ElideRight
                 width: Math.min(implicitWidth, compactHeader.width * 0.45)
             }
             Text {
                 visible: card.categoryLabel !== ""
                 text: card.categoryLabel
-                color: Qt.rgba(1, 1, 1, 0.70)
-                font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.DemiBold }
+                color: card.headerInk(0.76)
+                font { family: card.headerFont; pixelSize: 12; weight: Font.Bold }
                 elide: Text.ElideRight
                 width: Math.min(implicitWidth, compactHeader.width * 0.3)
             }
             Text {
                 text: card.time
-                color: Qt.rgba(1, 1, 1, 0.62)
-                font { family: card.uiFont; pointSize: 11.5 * 0.75; weight: Font.DemiBold }
+                color: card.headerInk(0.72)
+                font { family: card.headerFont; pixelSize: 12 }
             }
         }
         SourceBadge {
@@ -329,10 +356,8 @@ Item {
     Component {
         id: imageBody
         Item {
-            Checkerboard { anchors.fill: parent }
-            RotatedImage {
+            CardImage {
                 anchors.fill: parent
-                anchors.margins: 8
                 source: card.imageUrl
                 angle: card.imageAngle
             }
@@ -360,27 +385,43 @@ Item {
         id: linkBody
         Item {
             readonly property real footerHeight: Math.min(88, Math.max(72, card.side * 0.23))
-            // As on mac (VStack): the preview fills the area above the footer,
-            // never behind it, so the og:image is not cropped by the footer.
+            readonly property real previewHeight: card.expanded ? height - footerHeight : height
+            // The header floats over the preview (as on image cards), so the
+            // og:image gets the whole area above the footer.
             Image {
                 id: preview
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
-                height: card.expanded ? parent.height - parent.footerHeight : parent.height
+                height: parent.previewHeight
                 clip: true
                 visible: card.linkPreviewUrl !== ""
                 source: card.linkPreviewUrl
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
             }
+            // Keeps the white header text readable over light page images.
+            Rectangle {
+                visible: preview.visible
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: Math.min(parent.previewHeight, card.headerHeight + 18)
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0.42) }
+                    GradientStop { position: 1; color: "transparent" }
+                }
+            }
+            // No page image: the site icon (or its initial tile), centred in
+            // the space below the floating header.
             LinkIcon {
                 visible: card.linkPreviewUrl === ""
-                size: card.expanded ? Math.min(58, Math.max(42, card.side * 0.25)) : 36
+                size: card.expanded ? Math.round(Math.min(84, Math.max(48, card.side * 0.28))) : 36
                 iconUrl: card.linkIconUrl
+                host: card.linkHost
                 anchors.horizontalCenter: parent.horizontalCenter
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.verticalCenterOffset: card.expanded ? -parent.footerHeight / 2 : 9
+                y: card.expanded ? card.headerHeight + (parent.previewHeight - card.headerHeight - height) / 2
+                                 : (parent.height - height) / 2 + 9
             }
             Rectangle {
                 visible: card.expanded
@@ -388,13 +429,13 @@ Item {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: parent.footerHeight
-                color: "transparent"
+                color: "#131315"
                 Row {
                     anchors.fill: parent
                     anchors.leftMargin: 12
                     anchors.rightMargin: 12
                     spacing: 10
-                    LinkIcon { size: 32; iconUrl: card.linkIconUrl; anchors.verticalCenter: parent.verticalCenter }
+                    LinkIcon { size: 32; iconUrl: card.linkIconUrl; host: card.linkHost; anchors.verticalCenter: parent.verticalCenter }
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 2

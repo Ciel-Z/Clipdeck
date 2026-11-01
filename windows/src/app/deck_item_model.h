@@ -37,6 +37,7 @@ public:
         ImmersiveRole,
         HighlightedTextRole,
         FromOtherDeviceRole,
+        HeaderToneRole,
     };
 
     explicit DeckItemModel(DeckImageProvider *images, QObject *parent = nullptr);
@@ -61,6 +62,8 @@ private:
     DeckImageProvider *images_;
     QVector<ClipboardItem> items_;
     QString localDeviceId_;
+    // Image cards: HeaderTone of the thumbnail, by "<id>/<angle>".
+    mutable QHash<QString, int> headerTones_;
     QDateTime now_ = QDateTime::currentDateTime();
     // Highlighted card HTML by item id + text hash (mac SyntaxHighlighter cache).
     mutable QHash<QString, QString> highlighted_;

@@ -4,6 +4,7 @@
 #include "history/hybrid_logical_clock.h"
 
 #include <QCoreApplication>
+#include <QThread>
 #include <QApplication>
 #include <QSqlDatabase>
 #include <QSqlQuery>
@@ -184,6 +185,7 @@ void syncBookkeepingTests() {
     check(stored(saved.databaseID).updatedHlc == before, "link-metadata-does-not-sync");
 
     const ClipboardItem older = stored(migrated.value(1).databaseID);
+    QThread::msleep(2); // rows saved above may share this millisecond and win the tie on id
     check(repository.touch(older.databaseID), "touch-finds-the-row");
     const ClipboardItem touched = stored(older.databaseID);
     check(touched.updatedHlc > before && touched.copiedAt > older.copiedAt

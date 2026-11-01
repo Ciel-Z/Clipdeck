@@ -31,6 +31,11 @@ void DeckImageProvider::insertEncoded(const QString &key, const QByteArray &data
     if (image.loadFromData(data)) insert(key, image);
 }
 
+QImage DeckImageProvider::image(const QString &key) const {
+    QMutexLocker locker(&mutex_);
+    return images_.value(key);
+}
+
 bool DeckImageProvider::contains(const QString &key) const {
     QMutexLocker locker(&mutex_);
     return images_.contains(key);

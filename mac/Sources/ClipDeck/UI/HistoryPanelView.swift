@@ -613,11 +613,11 @@ private struct ClipboardCardView: View {
             Spacer(minLength: 8)
             sourceBadge(size: sourceIconSize)
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(headerInk)
         .padding(.leading, 14)
         .padding(.trailing, 10)
         .frame(height: headerHeight)
-        .shadow(color: usesImmersiveHeader ? .black.opacity(0.42) : .clear, radius: 3, y: 1)
+        .shadow(color: usesImmersiveHeader && !darkHeaderText ? .black.opacity(0.42) : .clear, radius: 3, y: 1)
     }
 
     private var compactHeader: some View {
@@ -627,19 +627,19 @@ private struct ClipboardCardView: View {
                 .lineLimit(1)
             if let categoryLabel {
                 Text(categoryLabel)
-                    .foregroundStyle(.white.opacity(0.70))
+                    .foregroundStyle(headerInk.opacity(0.70))
                     .lineLimit(1)
             }
             Text(relativeTimeText)
-                .foregroundStyle(.white.opacity(0.62))
+                .foregroundStyle(headerInk.opacity(0.62))
             Spacer(minLength: 6)
             sourceBadge(size: 18)
         }
         .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-        .foregroundStyle(.white.opacity(0.90))
+        .foregroundStyle(headerInk.opacity(0.90))
         .padding(.horizontal, 11)
         .padding(.top, 10)
-        .shadow(color: usesImmersiveHeader ? .black.opacity(0.55) : .clear, radius: 3, y: 1)
+        .shadow(color: usesImmersiveHeader && !darkHeaderText ? .black.opacity(0.55) : .clear, radius: 3, y: 1)
     }
 
     @ViewBuilder
@@ -676,10 +676,18 @@ private struct ClipboardCardView: View {
 
         case let .image(data, width, height, _):
             ZStack(alignment: .bottom) {
-                ImageCheckerboard()
                 if let image = ClipboardImageCache.image(key: item.id.uuidString, data: data) {
-                    RotatedImageView(image: image, angle: item.imageAngle)
-                        .padding(8)
+                    CardImageView(image: image, angle: item.imageAngle, pixelWidth: width, pixelHeight: height)
+                        .overlay(alignment: .top) {
+                            // Only under a busy image top: a short, faint gradient
+                            // that carries the white header line.
+                            if headerTone == .mixed {
+                                LinearGradient(colors: [.black.opacity(0.40), .clear], startPoint: .top, endPoint: .bottom)
+                                    .frame(height: showFooter ? headerHeight + 8 : 36)
+                            }
+                        }
+                } else {
+                    ImageCheckerboard()
                 }
                 if showFooter {
                     Text(item.imageAngle.isMultiple(of: 180)
@@ -722,6 +730,8 @@ private struct ClipboardCardView: View {
     private func linkContent(showFooter: Bool) -> some View {
         if showFooter {
             VStack(spacing: 0) {
+                // The header floats over this area (usesImmersiveHeader), so the
+                // page image gets everything above the footer.
                 GeometryReader { geometry in
                     if let data = item.linkPreviewData,
                        let image = ClipboardImageCache.image(key: "preview:\(item.id)", data: data) {
@@ -730,9 +740,15 @@ private struct ClipboardCardView: View {
                             .scaledToFill()
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
+                            .overlay(alignment: .top) {
+                                // Keeps the white header text readable over light page images.
+                                LinearGradient(colors: [.black.opacity(0.42), .clear], startPoint: .top, endPoint: .bottom)
+                                    .frame(height: min(geometry.size.height, headerHeight + 18))
+                            }
                     } else {
-                        linkIcon(size: min(58, max(42, height * 0.25)))
+                        linkIcon(size: min(84, max(48, height * 0.28)))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(.top, headerHeight)
                     }
                 }
 
@@ -777,27 +793,36 @@ private struct ClipboardCardView: View {
         min(88, max(72, height * 0.23))
     }
 
+    /// The site icon on a white tile; without a favicon, a flat coloured tile
+    /// with the site's initial, the colour picked from the host so a site
+    /// always looks the same (same rule as windows/qml/LinkIcon.qml).
     private func linkIcon(size: CGFloat) -> some View {
-        Group {
-            if let data = item.linkIconData,
-               let image = ClipboardImageCache.image(key: "link:\(item.id)", data: data) {
-                Image(nsImage: image)
+        let site = (item.linkHost ?? item.webURL?.host ?? "").replacingOccurrences(
+            of: "^www\\.", with: "", options: [.regularExpression, .caseInsensitive])
+        let palette: [Color] = [
+            Color(red: 0.231, green: 0.490, blue: 0.847), Color(red: 0.114, green: 0.620, blue: 0.459),
+            Color(red: 0.498, green: 0.353, blue: 0.839), Color(red: 0.847, green: 0.380, blue: 0.231),
+            Color(red: 0.788, green: 0.541, blue: 0.106), Color(red: 0.761, green: 0.271, blue: 0.478),
+        ]
+        let hash = site.unicodeScalars.reduce(UInt32(0)) { $0 &* 31 &+ $1.value }
+        let iconImage = item.linkIconData.flatMap { ClipboardImageCache.image(key: "link:\(item.id)", data: $0) }
+        return Group {
+            if let iconImage {
+                Image(nsImage: iconImage)
                     .resizable()
                     .scaledToFit()
                     .padding(size * 0.13)
+                    .frame(width: size, height: size)
+                    .background(.white.opacity(0.94), in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
             } else {
-                Image(systemName: "safari")
-                    .font(.system(size: size * 0.55, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.42))
+                Text(site.first.map { String($0).uppercased() } ?? "#")
+                    .font(.system(size: size * 0.52, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(width: size, height: size)
+                    .background(palette[Int(hash % UInt32(palette.count))],
+                                in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
             }
         }
-        .frame(width: size, height: size)
-        .background(.white.opacity(0.94), in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: size * 0.23, style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.24), radius: 5, y: 2)
     }
 
     private var linkDisplayTitle: String {
@@ -844,8 +869,30 @@ private struct ClipboardCardView: View {
         return CodeHighlightService.displayName(for: detected)
     }
 
+    /// What sits under a floating header (CardHeaderTone; linux/src/ui/header_tone.h).
+    private var headerTone: CardHeaderTone.Tone {
+        guard case let .image(data, _, _, _) = item.payload,
+              let image = ClipboardImageCache.image(key: item.id.uuidString, data: data) else { return .dark }
+        return CardHeaderTone.tone(for: image, key: "\(item.id.uuidString)/\(item.imageAngle)", angle: item.imageAngle)
+    }
+
+    /// Dark header text over a calm light image top or a light colour swatch,
+    /// where no shadow keeps white text legible.
+    private var darkHeaderText: Bool {
+        if case .image = item.payload { return headerTone == .light }
+        if case let .text(plainText, _) = item.payload, item.category?.previewLanguage?.lowercased() == "color",
+           let color = ClipboardColorParser.color(from: plainText)?.usingColorSpace(.sRGB) {
+            return 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent > 0.62
+        }
+        return false
+    }
+
+    private var headerInk: Color { darkHeaderText ? Color(white: 0.07) : .white }
+
     private var usesImmersiveHeader: Bool {
         if case .image = item.payload { return true }
+        // Links too: the page image fills the card under a floating header.
+        if item.webURL != nil { return true }
         return item.category?.previewLanguage?.lowercased() == "color"
     }
 
@@ -958,6 +1005,124 @@ private struct RotatedImageView: View {
                 .rotationEffect(.degrees(Double(angle)))
                 .frame(width: geometry.size.width, height: geometry.size.height)
         }
+    }
+}
+
+/// What sits under the floating header of an image card, so the header adapts
+/// instead of always laying a gradient over the image. Same rule and
+/// thresholds as linux/src/ui/header_tone.h (shared by Windows and Linux).
+@MainActor
+enum CardHeaderTone {
+    enum Tone { case dark, light, mixed }
+    private static var cache: [String: Tone] = [:]
+
+    static func tone(for image: NSImage, key: String, angle: Int) -> Tone {
+        if let cached = cache[key] { return cached }
+        let tone = compute(image, angle: angle)
+        if cache.count > 512 { cache.removeAll() }
+        cache[key] = tone
+        return tone
+    }
+
+    private static func compute(_ image: NSImage, angle: Int) -> Tone {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              cgImage.width > 0, cgImage.height > 0 else { return .dark }
+        let quarterTurn = !angle.isMultiple(of: 180)
+        let sourceAspect = Double(cgImage.width) / Double(cgImage.height)
+        let aspect = quarterTurn ? 1 / sourceAspect : sourceAspect
+        // Fitted wide or tall images: the header sits on the dimmed backdrop.
+        if max(aspect, 1 / aspect) > 1.34 { return .dark }
+        // Draw the turned image at 64 px, then read the top quarter of the square the card shows.
+        let width = aspect >= 1 ? 64 : max(1, Int((64 * aspect).rounded()))
+        let height = aspect >= 1 ? max(1, Int((64 / aspect).rounded())) : 64
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return .dark }
+        context.translateBy(x: CGFloat(width) / 2, y: CGFloat(height) / 2)
+        context.rotate(by: -CGFloat(angle) * .pi / 180)
+        let drawWidth = quarterTurn ? CGFloat(height) : CGFloat(width)
+        let drawHeight = quarterTurn ? CGFloat(width) : CGFloat(height)
+        context.draw(cgImage, in: CGRect(x: -drawWidth / 2, y: -drawHeight / 2, width: drawWidth, height: drawHeight))
+        guard let pixels = context.data?.assumingMemoryBound(to: UInt8.self) else { return .dark }
+        let side = min(width, height)
+        let left = (width - side) / 2
+        let top = (height - side) / 2
+        let band = max(1, Int((Double(side) * 0.24).rounded()))
+        var sum = 0.0, sumSquares = 0.0, count = 0.0
+        // CGContext rows start at the top of the image in memory.
+        for y in top ..< top + band {
+            for x in left ..< left + side {
+                let offset = (y * width + x) * 4
+                let alpha = Double(pixels[offset + 3]) / 255
+                let luminance = alpha > 0
+                    ? (0.2126 * Double(pixels[offset]) + 0.7152 * Double(pixels[offset + 1]) + 0.0722 * Double(pixels[offset + 2]))
+                        / 255 / alpha
+                    : 0
+                let shown = luminance * alpha + 0.11 * (1 - alpha) // transparent parts show the dark checkerboard
+                sum += shown
+                sumSquares += shown * shown
+                count += 1
+            }
+        }
+        guard count > 0 else { return .dark }
+        let mean = sum / count
+        let spread = sqrt(max(0, sumSquares / count - mean * mean))
+        if mean > 0.68 && spread < 0.20 { return .light }
+        if mean < 0.45 && spread < 0.22 { return .dark }
+        return .mixed
+    }
+}
+
+/// The image on an image card. Close to the card's shape (within 1.34×, so 4:3,
+/// 3:4 and squarish images) it fills the card and loses a little at the edges;
+/// otherwise the whole image is fitted edge to edge over a dimmed, blurred copy
+/// of itself. The checkerboard sits only behind the image. Same rule as
+/// windows/qml/CardImage.qml; the preview still shows the whole image.
+private struct CardImageView: View {
+    let image: NSImage
+    let angle: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let quarterTurn = !angle.isMultiple(of: 180)
+            let frameAspect = size.width / max(1, size.height)
+            let imageAspect: CGFloat = pixelWidth > 0 && pixelHeight > 0
+                ? (quarterTurn ? CGFloat(pixelHeight) / CGFloat(pixelWidth) : CGFloat(pixelWidth) / CGFloat(pixelHeight))
+                : frameAspect
+            let fills = max(imageAspect / frameAspect, frameAspect / imageAspect) <= 1.34
+            let fitted = imageAspect > frameAspect
+                ? CGSize(width: size.width, height: size.width / imageAspect)
+                : CGSize(width: size.height * imageAspect, height: size.height)
+            ZStack {
+                if fills {
+                    ImageCheckerboard()
+                    rotated(.fill, in: size)
+                } else {
+                    rotated(.fill, in: size)
+                        .blur(radius: 18)
+                        .overlay(Color(red: 0.07, green: 0.07, blue: 0.08).opacity(0.55))
+                    ImageCheckerboard()
+                        .frame(width: fitted.width, height: fitted.height)
+                    rotated(.fit, in: size)
+                }
+            }
+            .frame(width: size.width, height: size.height)
+            .clipped()
+        }
+    }
+
+    private func rotated(_ mode: ContentMode, in size: CGSize) -> some View {
+        let quarterTurn = !angle.isMultiple(of: 180)
+        return Image(nsImage: image)
+            .resizable()
+            .aspectRatio(contentMode: mode)
+            .frame(width: quarterTurn ? size.height : size.width, height: quarterTurn ? size.width : size.height)
+            .clipped()
+            .rotationEffect(.degrees(Double(angle)))
+            .frame(width: size.width, height: size.height)
     }
 }
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(ClipDeckWindows VERSION 0.1.0 LANGUAGES CXX RC)
+project(ClipDeckWindows VERSION 0.9.5 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -131,6 +131,7 @@ qt_add_qml_module(clipdeck
     qml/SegmentedControl.qml
     qml/SyncPanel.qml
     qml/SyncLoader.qml
+    qml/CardImage.qml
 )
 # Windows icons stand on a transparent background (the mac AppIcon is a tile).
 set(APP_ICONS "${CMAKE_CURRENT_SOURCE_DIR}/../shared/assets/windows")

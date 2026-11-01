@@ -124,6 +124,8 @@
 #include <algorithm>
 #include <cmath>
 #include <QtMath>
+
+#include "ui/header_tone.h"
 #include <functional>
 #include <limits>
 #include <memory>
@@ -2487,6 +2489,17 @@ private:
                          QStringLiteral("复制的文本、图片和文件会显示在这里"));
     }
 
+    HeaderTone::Tone cardHeaderTone(const ClipboardItem &item) {
+        // The thumbnail is already turned by the image angle.
+        const qint64 key = item.databaseID * 4 + ((item.imageAngle / 90) & 3);
+        const auto found = headerToneCache_.constFind(key);
+        if (found != headerToneCache_.constEnd()) return HeaderTone::Tone(found.value());
+        const HeaderTone::Tone tone = HeaderTone::forImage(cardThumbnail(item), 0);
+        if (headerToneCache_.size() > 512) headerToneCache_.clear();
+        headerToneCache_.insert(key, int(tone));
+        return tone;
+    }
+
     QImage cardThumbnail(const ClipboardItem &item) {
         const auto found = imageThumbnailCache_.constFind(item.databaseID);
         if (found != imageThumbnailCache_.constEnd()) return found.value();
@@ -2594,7 +2607,15 @@ private:
                 }
                 parsedColor = QColor(value);
             }
-            const bool immersive = item.isImage() || parsedColor.isValid();
+            // Links too: the page image fills the card under a floating header.
+            const bool immersive = item.isImage() || parsedColor.isValid() || isLink;
+            // Floating headers adapt to what is under them (ui/header_tone.h): dark
+            // text over a calm light image top or a light colour swatch, a short
+            // faint gradient only under a busy image top.
+            const HeaderTone::Tone imageTone = item.isImage() ? cardHeaderTone(item) : HeaderTone::Dark;
+            const bool darkHeaderText = (item.isImage() && imageTone == HeaderTone::Light)
+                || (parsedColor.isValid()
+                    && 0.2126 * parsedColor.redF() + 0.7152 * parsedColor.greenF() + 0.0722 * parsedColor.blueF() > 0.62);
 
             QPainterPath path;
             path.addRoundedRect(card, cornerRadius, cornerRadius);
@@ -2622,22 +2643,69 @@ private:
                 if (filePaste_->feedback().itemID == item.databaseID) feedback = filePaste_->feedback();
                 paintFileCard(painter, fileContentRect(index), item.files, true, feedback);
             } else if (item.isImage()) {
-                const int checkerSize = 12;
-                painter.fillRect(contentArea, QColor(26, 26, 28));
-                for (int y = contentArea.y(); y < contentArea.bottom(); y += checkerSize) {
-                    for (int x = contentArea.x(); x < contentArea.right(); x += checkerSize) {
-                        painter.fillRect(QRect(x, y, checkerSize, checkerSize),
-                            ((x / checkerSize + y / checkerSize) % 2 == 0)
-                                ? QColor(255, 255, 255, 14) : QColor(0, 0, 0, 30));
-                    }
-                }
+                // Same rule as windows/qml/CardImage.qml: close to the card's
+                // shape (within 1.34x) the image fills the card and loses a little
+                // at the edges; otherwise it is fitted edge to edge over a dimmed,
+                // softened copy of itself. The checkerboard sits only behind it.
                 const QImage thumbnail = cardThumbnail(item);
-                const QSize fitted = thumbnail.size().scaled(
-                    contentArea.adjusted(8, 8, -8, -8).size(), Qt::KeepAspectRatio);
-                const QRect imageRect(contentArea.center().x() - fitted.width() / 2,
-                                      contentArea.center().y() - fitted.height() / 2,
-                                      fitted.width(), fitted.height());
-                painter.drawImage(imageRect, thumbnail, thumbnail.rect());
+                auto paintChecker = [&painter](const QRect &area) {
+                    const int checkerSize = 12;
+                    painter.fillRect(area, QColor(26, 26, 28));
+                    for (int y = area.y(); y < area.bottom(); y += checkerSize) {
+                        for (int x = area.x(); x < area.right(); x += checkerSize) {
+                            painter.fillRect(QRect(x, y, checkerSize, checkerSize).intersected(area),
+                                ((x / checkerSize + y / checkerSize) % 2 == 0)
+                                    ? QColor(255, 255, 255, 14) : QColor(0, 0, 0, 30));
+                        }
+                    }
+                };
+                auto coverSource = [](const QImage &image, const QRect &target) {
+                    QRect source = image.rect();
+                    const double targetAspect = target.width() / double(std::max(1, target.height()));
+                    if (image.width() / double(std::max(1, image.height())) > targetAspect) {
+                        const int width = qRound(image.height() * targetAspect);
+                        source.setLeft((image.width() - width) / 2);
+                        source.setWidth(width);
+                    } else {
+                        const int height = qRound(image.width() / targetAspect);
+                        source.setTop((image.height() - height) / 2);
+                        source.setHeight(height);
+                    }
+                    return source;
+                };
+                const double frameAspect = contentArea.width() / double(std::max(1, contentArea.height()));
+                const double imageAspect = thumbnail.isNull() ? frameAspect
+                    : thumbnail.width() / double(std::max(1, thumbnail.height()));
+                const bool fills = std::max(imageAspect / frameAspect, frameAspect / imageAspect) <= 1.34;
+                painter.save();
+                painter.setRenderHint(QPainter::SmoothPixmapTransform);
+                if (thumbnail.isNull()) {
+                    paintChecker(contentArea);
+                } else if (fills) {
+                    paintChecker(contentArea);
+                    painter.drawImage(contentArea, thumbnail, coverSource(thumbnail, contentArea));
+                } else {
+                    // A 16 px copy scaled up: a soft backdrop without a blur pass.
+                    const QImage backdrop = thumbnail.scaled(qRound(16 * std::max(1.0, imageAspect)),
+                                                       qRound(16 * std::max(1.0, 1 / imageAspect)),
+                                                       Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                    painter.drawImage(contentArea, backdrop, coverSource(backdrop, contentArea));
+                    painter.fillRect(contentArea, QColor(18, 18, 20, 140));
+                    const QSize fitted = thumbnail.size().scaled(contentArea.size(), Qt::KeepAspectRatio);
+                    const QRect imageRect(contentArea.center().x() - fitted.width() / 2 + 1,
+                                          contentArea.center().y() - fitted.height() / 2 + 1,
+                                          fitted.width(), fitted.height());
+                    paintChecker(imageRect);
+                    painter.drawImage(imageRect, thumbnail, thumbnail.rect());
+                }
+                if (imageTone == HeaderTone::Mixed) {
+                    const int scrimHeight = expanded ? headerHeight + 8 : 36;
+                    QLinearGradient scrim(contentArea.topLeft(), QPoint(contentArea.x(), contentArea.y() + scrimHeight));
+                    scrim.setColorAt(0, QColor(0, 0, 0, 102));
+                    scrim.setColorAt(1, QColor(0, 0, 0, 0));
+                    painter.fillRect(QRect(contentArea.x(), contentArea.y(), contentArea.width(), scrimHeight), scrim);
+                }
+                painter.restore();
             } else if (parsedColor.isValid()) {
                 painter.fillRect(contentArea, parsedColor);
             } else if (isLink) {
@@ -2660,47 +2728,29 @@ private:
                         source.setHeight(height);
                     }
                     painter.drawImage(previewArea, linkPreview, source);
-                    painter.fillRect(previewArea, QColor(0, 0, 0, 18));
+                    // Keeps the white header text readable over light page images.
+                    QLinearGradient scrim(previewArea.topLeft(),
+                                          QPoint(previewArea.x(), previewArea.y() + headerHeight + 18));
+                    scrim.setColorAt(0, QColor(0, 0, 0, 107));
+                    scrim.setColorAt(1, QColor(0, 0, 0, 0));
+                    painter.fillRect(QRect(previewArea.x(), previewArea.y(), previewArea.width(),
+                                           std::min(previewArea.height(), headerHeight + 18)), scrim);
                 }
-                const int iconSize = expanded ? std::min(58, std::max(42, qRound(card.height() * 0.25))) : 36;
-                const QRect iconRect(previewArea.center().x() - iconSize / 2,
-                                     previewArea.center().y() - iconSize / 2 + (expanded ? 0 : 10),
-                                     iconSize, iconSize);
-                if (!expanded || linkPreview.isNull()) {
-                    painter.setPen(Qt::NoPen);
-                    painter.setBrush(QColor(245, 245, 247, 245));
-                    painter.drawRoundedRect(iconRect, qRound(iconSize * 0.23), qRound(iconSize * 0.23));
-                    const QImage linkIcon = decodedLinkAsset(item, true);
-                    if (!linkIcon.isNull()) {
-                        painter.drawImage(iconRect.adjusted(5, 5, -5, -5), linkIcon);
-                    } else {
-                        QFont linkIconFont = font();
-                        linkIconFont.setPointSizeF(iconSize * 0.46);
-                        linkIconFont.setBold(true);
-                        painter.setFont(linkIconFont);
-                        painter.setPen(QColor(90, 95, 105, 180));
-                        painter.drawText(iconRect, Qt::AlignCenter, QStringLiteral("↗"));
-                    }
-                }
+                // No page image: the site icon (or its initial tile), centred in
+                // the space below the floating header.
+                const int iconSize = expanded ? std::min(84, std::max(48, qRound(card.height() * 0.28))) : 36;
+                const int iconTop = expanded
+                    ? previewArea.y() + headerHeight + (previewArea.height() - headerHeight - iconSize) / 2
+                    : previewArea.center().y() - iconSize / 2 + 10;
+                const QRect iconRect(previewArea.center().x() - iconSize / 2, iconTop, iconSize, iconSize);
+                if (!expanded || linkPreview.isNull())
+                    paintLinkSiteTile(painter, iconRect, decodedLinkAsset(item, true), webURL.host());
                 if (expanded) {
                     const QRect footer(contentArea.x(), contentArea.bottom() - footerHeight + 1,
                                        contentArea.width(), footerHeight);
                     painter.fillRect(footer, QColor(19, 19, 21, 255));
                     const QRect smallIcon(footer.x() + 12, footer.center().y() - 16, 32, 32);
-                    painter.setBrush(QColor(245, 245, 247, 245));
-                    painter.setPen(Qt::NoPen);
-                    painter.drawRoundedRect(smallIcon, 7, 7);
-                    const QImage linkIcon = decodedLinkAsset(item, true);
-                    if (!linkIcon.isNull()) {
-                        painter.drawImage(smallIcon.adjusted(4, 4, -4, -4), linkIcon);
-                    } else {
-                        QFont footerIconFont = font();
-                        footerIconFont.setPointSize(13);
-                        footerIconFont.setBold(true);
-                        painter.setFont(footerIconFont);
-                        painter.setPen(QColor(90, 95, 105, 180));
-                        painter.drawText(smallIcon, Qt::AlignCenter, QStringLiteral("↗"));
-                    }
+                    paintLinkSiteTile(painter, smallIcon, decodedLinkAsset(item, true), webURL.host());
                     QFont titleFont = font();
                     titleFont.setPointSizeF(11.5);
                     titleFont.setBold(true);
@@ -2766,9 +2816,14 @@ private:
             }
             auto drawHeaderText = [&](const QRect &target, int flags, const QString &text,
                                       const QColor &foreground) {
-                if (parsedColor.isValid()) {
-                    // Match macOS colour swatches: a compact dark halo keeps
-                    // white metadata readable over yellow/white/pastel fills.
+                if (darkHeaderText) {
+                    painter.setPen(QColor(18, 18, 20, foreground.alpha()));
+                    painter.drawText(target, flags, text);
+                    return;
+                }
+                if (parsedColor.isValid() || item.isImage()) {
+                    // A compact dark halo keeps white metadata readable over
+                    // darker swatches and image tops.
                     painter.setPen(QColor(0, 0, 0, 118));
                     for (const QPoint &offset : {QPoint(-1, 0), QPoint(1, 0),
                                                   QPoint(0, -1), QPoint(0, 2)}) {
@@ -3049,6 +3104,37 @@ private:
         painter.drawArc(circle, 90 * 16, int(-mainSweep * 16));
         painter.setPen(QPen(QColor(0x88, 0x87, 0x80), 2.6 * unit, Qt::SolidLine, Qt::RoundCap));
         painter.drawArc(circle, int((90 - mainSweep - gap) * 16), -22 * 16);
+        painter.restore();
+    }
+
+    // A link's site icon on a white tile; without a favicon, a flat coloured
+    // tile with the site's initial, the colour picked from the host so a site
+    // always looks the same (same rule as windows/qml/LinkIcon.qml).
+    void paintLinkSiteTile(QPainter &painter, const QRect &rect, const QImage &icon, const QString &host) const {
+        QString site = host;
+        if (site.startsWith(QStringLiteral("www."), Qt::CaseInsensitive)) site.remove(0, 4);
+        static const QColor palette[] = {QColor(0x3B, 0x7D, 0xD8), QColor(0x1D, 0x9E, 0x75), QColor(0x7F, 0x5A, 0xD6),
+                                         QColor(0xD8, 0x61, 0x3B), QColor(0xC9, 0x8A, 0x1B), QColor(0xC2, 0x45, 0x7A)};
+        quint32 hash = 0;
+        for (const QChar ch : site) hash = hash * 31 + ch.unicode();
+        const qreal radius = rect.width() * 0.23;
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(icon.isNull() ? palette[hash % 6] : QColor(245, 245, 247, 245));
+        painter.drawRoundedRect(QRectF(rect), radius, radius);
+        if (!icon.isNull()) {
+            const int inset = qRound(rect.width() * 0.13);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            painter.drawImage(rect.adjusted(inset, inset, -inset, -inset), icon);
+        } else {
+            QFont initialFont = font();
+            initialFont.setPixelSize(qRound(rect.width() * 0.52));
+            initialFont.setBold(true);
+            painter.setFont(initialFont);
+            painter.setPen(Qt::white);
+            painter.drawText(rect, Qt::AlignCenter, site.isEmpty() ? QStringLiteral("#") : site.left(1).toUpper());
+        }
         painter.restore();
     }
 
@@ -4397,6 +4483,7 @@ private:
     QHash<qint64, QImage> imageThumbnailCache_;
     QHash<qint64, QImage> linkPreviewCache_;
     QHash<qint64, QImage> linkIconCache_;
+    QHash<qint64, int> headerToneCache_;
     QHash<QString, QImage> sourceIconRenderCache_;
     QHash<QString, QImage> textCardCache_;
     std::function<void(int)> settingsCallback_;

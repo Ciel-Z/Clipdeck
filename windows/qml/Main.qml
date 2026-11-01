@@ -27,6 +27,16 @@ Window {
         return Qt.rect(origin.x, origin.y, item.width, item.height)
     }
 
+    // The basic render loop draws one window at a time; when the preview window
+    // shows in the same instant as a selection change, the Deck's own repaint
+    // can be dropped and the old card stays highlighted on screen while the
+    // preview shows the new one. Ask for one more Deck frame shortly after.
+    Timer {
+        id: repaintNudge
+        interval: 40
+        onTriggered: root.update()
+    }
+
     PopoverWindow { mode: "preview"; anchorRect: root.popoverAnchor }
     PopoverWindow { mode: "editor"; anchorRect: root.popoverAnchor }
     ContextMenuWindow { id: contextMenu }
@@ -38,7 +48,12 @@ Window {
             root.reveal(false)
         }
         function onRevealRequested() { root.reveal(true) }
-        function onSelectionChanged() { root.reveal(true) }
+        function onSelectionChanged() {
+            root.reveal(true)
+            repaintNudge.restart()
+        }
+        // The preview opens in its own window in the same instant; see repaintNudge.
+        function onPopoverChanged() { repaintNudge.restart() }
         function onSearchChanged() {
             if (searchInput.text !== deck.searchQuery) searchInput.text = deck.searchQuery
             if (deck.searchEditing && !searchInput.activeFocus) searchInput.forceActiveFocus()
@@ -356,6 +371,7 @@ Window {
                 required sourceIconUrl
                 required sourceName
                 required fromOtherDevice
+                required headerTone
                 required linkTitle
                 required linkHost
                 required linkIconUrl

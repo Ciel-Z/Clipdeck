@@ -4,6 +4,7 @@
 #include "deck_image_provider.h"
 #include "deck_presentation.h"
 #include "win_source_application.h"
+#include "ui/header_tone.h"
 
 #include <QCryptographicHash>
 #include <QFileInfo>
@@ -51,6 +52,7 @@ QHash<int, QByteArray> DeckItemModel::roleNames() const {
         {ImmersiveRole, "immersive"},
         {HighlightedTextRole, "highlightedText"},
         {FromOtherDeviceRole, "fromOtherDevice"},
+        {HeaderToneRole, "headerTone"},
     };
 }
 
@@ -61,6 +63,20 @@ QVariant DeckItemModel::data(const QModelIndex &index, int role) const {
     switch (role) {
     case IdRole: return id;
     case FromOtherDeviceRole: return !item.originDevice.isEmpty() && item.originDevice != localDeviceId_;
+    case HeaderToneRole: {
+        if (!item.isImage()) return QString();
+        const QString key = id + QLatin1Char('/') + QString::number(item.imageAngle);
+        auto found = headerTones_.constFind(key);
+        if (found == headerTones_.constEnd()) {
+            const QImage thumbnail = item.image.isNull() ? images_->image(QStringLiteral("thumb/") + id) : item.image;
+            if (thumbnail.isNull()) return QStringLiteral("dark");
+            if (headerTones_.size() >= 512) headerTones_.clear();
+            found = headerTones_.insert(key, HeaderTone::forImage(thumbnail, item.imageAngle));
+        }
+        return found.value() == HeaderTone::Light ? QStringLiteral("light")
+            : found.value() == HeaderTone::Mixed  ? QStringLiteral("mixed")
+                                                  : QStringLiteral("dark");
+    }
     case KindRole: return DeckPresentation::cardKind(item);
     case TitleRole: return DeckPresentation::cardHeaderTitle(item);
     case CategoryLabelRole: return DeckPresentation::categoryLabel(item);
