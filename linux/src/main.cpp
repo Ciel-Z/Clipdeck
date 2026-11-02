@@ -481,11 +481,18 @@ protected:
             painter.drawLine(center + QPoint(-6, 0), center + QPoint(6, 0));
             painter.drawLine(center + QPoint(0, -6), center + QPoint(0, 6));
         } else {
-            painter.drawArc(QRect(center.x() - 7, center.y() - 7, 14, 14), 35 * 16, 285 * 16);
+            // windows/qml/DeckIcon.qml "restore" (macOS arrow.counterclockwise)
+            // on its 24-unit grid, drawn 18 px: an L-shaped arrowhead at the
+            // top left and a 320° arc around (12, 12).
+            const qreal scale = 0.75;
+            const QPointF origin = QPointF(center) - QPointF(9, 9);
+            auto at = [&](qreal x, qreal y) { return origin + QPointF(x * scale, y * scale); };
             QPainterPath arrow;
-            arrow.moveTo(center + QPoint(-7, -5));
-            arrow.lineTo(center + QPoint(-8, 1));
-            arrow.lineTo(center + QPoint(-2, -1));
+            arrow.moveTo(at(4, 4));
+            arrow.lineTo(at(4, 9));
+            arrow.lineTo(at(9, 9));
+            arrow.moveTo(at(4.6, 8.6));
+            arrow.arcTo(QRectF(at(4, 4), at(20, 20)), 155.3, -320.7);
             painter.drawPath(arrow);
         }
     }
@@ -1903,6 +1910,13 @@ protected:
                 endSearch();
                 return true;
             }
+            // The field would take Shift+Delete as "cut"; it deletes the card,
+            // the same with or without the field focused.
+            if (keyEvent->key() == Qt::Key_Delete
+                    && standardKeyboardModifiers(keyEvent->modifiers()) == Qt::ShiftModifier) {
+                deleteSelected();
+                return true;
+            }
             const Qt::KeyboardModifiers modifiers = keyEvent->modifiers()
                 & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
             const Qt::KeyboardModifiers quickModifier = configuredModifier(
@@ -2004,11 +2018,13 @@ protected:
             moveSelection(1);
             return;
         }
-        if (event->modifiers() == Qt::ControlModifier
-            && (event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete)) {
+        // Shift+Delete, as on Windows (macOS keeps ⌘⌫).
+        if (standardKeyboardModifiers(event->modifiers()) == Qt::ShiftModifier
+            && event->key() == Qt::Key_Delete) {
             deleteSelected();
             return;
         }
+
         if (event->modifiers() == Qt::ControlModifier && event->key() == Qt::Key_Q) {
             QApplication::quit();
             return;
@@ -2125,7 +2141,10 @@ protected:
             if (previousCategoryRect().contains(event->pos())) { changeCategoryPage(-1); return; }
             if (nextCategoryRect().contains(event->pos())) { changeCategoryPage(1); return; }
             if (addRect().contains(event->pos()) && settingsCallback_) {
-                settingsCallback_(5); // Category page in new-category mode.
+                // Opens the category page, as on macOS and Windows; adding a
+                // category there now stores it at once, so "+" must not.
+                settingsCallback_(3);
+
                 return;
             }
             if (moreRect().contains(event->pos()) && settingsCallback_) {
@@ -2328,7 +2347,7 @@ protected:
         }
         menu.addSeparator();
         QAction *deleteAction = addShortcutAction(QStringLiteral("删除"),
-                                                 QKeySequence(Qt::CTRL | Qt::Key_Delete));
+                                                 QKeySequence(Qt::SHIFT | Qt::Key_Delete));
         popoverOpen_ = true;
         const QAction *chosen = menu.exec(event->globalPos());
         popoverOpen_ = false;
@@ -2420,16 +2439,11 @@ private:
         return card.adjusted(0, header, 0, 0);
     }
 
-    // macOS marks selection with a faint white fill and a soft 4px shadow
-    // (no visible edge); stacked low-alpha rings approximate that blur.
+    // Selection is a faint white fill only, as in windows/qml/Main.qml.  Any
+    // shadow reads as a dark halo over the light translucent Deck material.
     static void paintSelectionPill(QPainter &painter, const QRect &area, int radius, int fillAlpha) {
         painter.save();
         painter.setPen(Qt::NoPen);
-        for (int ring = 4; ring >= 1; --ring) {
-            painter.setBrush(QColor(0, 0, 0, 7));
-            painter.drawRoundedRect(QRectF(area).translated(0, 1).adjusted(-ring, -ring, ring, ring),
-                                    radius + ring, radius + ring);
-        }
         painter.setBrush(QColor(255, 255, 255, fillAlpha));
         painter.drawRoundedRect(area, radius, radius);
         painter.restore();
@@ -2445,7 +2459,7 @@ private:
         for (int index=0; index<4; ++index) {
             const QRect area=fixedTypeRect(index);
             const bool selected=categories.value(index)==selectedCategory_;
-            if (selected) paintSelectionPill(painter,area,9,36);
+            if (selected) paintSelectionPill(painter,area,9,41);
             drawDeckSymbol(painter,QRect(area.x()+10,area.y()+8,19,19),symbols[index],QColor(255,255,255,selected?255:166));
             if (index==0 || selected) {
                 painter.setPen(QColor(255,255,255,selected?255:166));
@@ -2459,7 +2473,7 @@ private:
             const QRect area=categoryRect(index-4);
             if (!area.intersects(customStripRect())) continue;
             const bool selected=categories[index]==selectedCategory_;
-            if (selected) paintSelectionPill(painter,area,16,31);
+            if (selected) paintSelectionPill(painter,area,16,36);
             QFont labelFont=font;
             const int natural=QFontMetrics(labelFont).horizontalAdvance(categories[index]);
             const int available=area.width()-22;
@@ -3107,7 +3121,7 @@ private:
     int visibleCategoryStripWidth() const {
         const int count=std::max(0,categoryValues().size()-4);
         const int preferred=std::min(760,std::max(240,count*108-12));
-        return std::min(preferred,std::max(0,width()-searchControlWidth()-fixedTypesWidth()-20-29-42-54-(count>6?46:0)-48));
+        return std::min(preferred,std::max(0,width()-searchControlWidth()-fixedTypesWidth()-20-29-54-54-(count>6?46:0)-48));
     }
 
     int fixedTypeWidth(int index) const {
@@ -3244,7 +3258,7 @@ private:
     int toolbarStartX() const {
         const int searchWidth = searchControlWidth();
         const int toolbarWidth=searchWidth+20+fixedTypesWidth()+29+visibleCategoryStripWidth()
-            +(categoryValues().size()>10?46:0)+42+54;
+            +(categoryValues().size()>10?46:0)+54+54;
         return std::max(24,(width()-toolbarWidth)/2);
     }
     int categoryStripX() const { return toolbarStartX()+searchControlWidth()+20+fixedTypesWidth()+29; }
@@ -3252,7 +3266,9 @@ private:
         return categoryValues().size()>10 ? QRect(categoryStripX()+visibleCategoryStripWidth()+2,20,23,31) : QRect();
     }
     QRect nextCategoryRect() const { return previousCategoryRect().isEmpty()?QRect():previousCategoryRect().translated(23,0); }
-    QRect addRect() const { return QRect(categoryStripX()+visibleCategoryStripWidth()+(categoryValues().size()>10?48:2)+5,18,34,34); }
+    // 12 more than before: the + sat almost against the last category's name.
+    QRect addRect() const { return QRect(categoryStripX()+visibleCategoryStripWidth()+(categoryValues().size()>10?48:2)+17,18,34,34); }
+
     QRect moreRect() const { return QRect(width() - 68, 18, 42, 35); }
 
     void search() {
@@ -4769,6 +4785,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         "QPushButton#categoryHeaderButton:hover{background:#343437;}"
         "QPushButton#categorySave{background:#087ff5;color:white;font-weight:600;padding:9px 18px;}"
         "QPushButton#categorySave:hover{background:#168cff;}"
+        "QPushButton#categorySave:disabled{background:#2d2d30;color:rgba(255,255,255,90);}"
         "QLabel{color:#dedee1;font-size:14px;} QLabel#title{font-size:30px;font-weight:700;}"
         "QLabel#subtitle{color:#8f8f94;font-size:16px;}"
         "QGroupBox{background:#202022;border:1px solid #2b2b2e;border-radius:14px;margin-top:14px;padding:22px 18px 16px;}"
@@ -4799,9 +4816,32 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QListWidget *sidebar = new QListWidget(&dialog);
     sidebar->setObjectName(QStringLiteral("sidebar"));
     sidebar->setFixedWidth(190);
-    sidebar->addItems({QStringLiteral("⚙  通用"), QStringLiteral("▣  图片"),
-                       QStringLiteral("⌨  键盘快捷键"), QStringLiteral("▦  分类"),
-                       QStringLiteral("▱  数据")});
+    // Each symbol is centred in a fixed 22×22 icon: as leading text, the
+    // glyphs' differing widths in UOS fonts left the labels unaligned.
+    sidebar->setIconSize(QSize(22, 22));
+    const qreal sidebarScale = qApp->devicePixelRatio();
+    const struct { const char *glyph; const char *title; } sidebarEntries[] = {
+        {"⚙", "通用"}, {"▣", "图片"}, {"⌨", "键盘快捷键"}, {"▦", "分类"}, {"▱", "数据"}};
+    for (const auto &entry : sidebarEntries) {
+        QIcon icon;
+        const struct { QIcon::Mode mode; QColor color; } tones[] = {
+            {QIcon::Normal, QColor(207, 207, 211)}, {QIcon::Selected, Qt::white}};
+        for (const auto &tone : tones) {
+            QPixmap pixmap(DisplayScale::rasterSize(QSize(22, 22), sidebarScale));
+            pixmap.setDevicePixelRatio(sidebarScale);
+            pixmap.fill(Qt::transparent);
+            QPainter painter(&pixmap);
+            painter.setRenderHint(QPainter::TextAntialiasing);
+            QFont glyphFont = sidebar->font();
+            glyphFont.setPixelSize(17);
+            painter.setFont(glyphFont);
+            painter.setPen(tone.color);
+            painter.drawText(QRect(0, 0, 22, 22), Qt::AlignCenter, QString::fromUtf8(entry.glyph));
+            painter.end();
+            icon.addPixmap(pixmap, tone.mode);
+        }
+        new QListWidgetItem(icon, QLatin1Char(' ') + QString::fromUtf8(entry.title), sidebar);
+    }
     QStackedWidget *pages = new QStackedWidget(&dialog);
     root->addWidget(sidebar);
     root->addWidget(pages, 1);
@@ -5108,17 +5148,32 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QWidget *categoryEditorWidget = new QWidget(categoryScroll);
     categoryEditorWidget->setObjectName(QStringLiteral("categoryEditor"));
     QVBoxLayout *categoryEditor = new QVBoxLayout(categoryEditorWidget);
-    categoryEditor->setContentsMargins(38, 26, 38, 26);
+    categoryEditor->setContentsMargins(38, 4, 38, 26);
     categoryEditor->setSpacing(10);
 
-    QLabel *editorTitle = new QLabel(QStringLiteral("编辑分类"), categoryEditorWidget);
+    // The title and "保存更改" stay fixed above the scrolling editor; at the
+    // end of the long page the button was out of sight.  It is enabled only
+    // while the editor differs from what is stored.
+    QWidget *editorHeader = new QWidget(categoryPageWidget);
+    editorHeader->setObjectName(QStringLiteral("categoryEditor"));
+    QHBoxLayout *editorHeaderLayout = new QHBoxLayout(editorHeader);
+    editorHeaderLayout->setContentsMargins(38, 26, 38, 14);
+    QVBoxLayout *editorHeaderText = new QVBoxLayout;
+    editorHeaderText->setSpacing(10);
+    QLabel *editorTitle = new QLabel(QStringLiteral("编辑分类"), editorHeader);
     editorTitle->setObjectName(QStringLiteral("categoryEditorTitle"));
     QLabel *editorSubtitle = new QLabel(
-        QStringLiteral("调整名称、颜色、卡片显示方式和自动分类规则"), categoryEditorWidget);
+        QStringLiteral("调整名称、颜色、卡片显示方式和自动分类规则"), editorHeader);
     editorSubtitle->setObjectName(QStringLiteral("subtitle"));
-    categoryEditor->addWidget(editorTitle);
-    categoryEditor->addWidget(editorSubtitle);
-    categoryEditor->addSpacing(14);
+    editorHeaderText->addWidget(editorTitle);
+    editorHeaderText->addWidget(editorSubtitle);
+    editorHeaderLayout->addLayout(editorHeaderText, 1);
+    QPushButton *saveCategory = new QPushButton(QStringLiteral("保存更改"), editorHeader);
+    saveCategory->setObjectName(QStringLiteral("categorySave"));
+    saveCategory->setToolTip(QStringLiteral("Ctrl+S"));
+    editorHeaderLayout->addWidget(saveCategory, 0, Qt::AlignVCenter);
+    auto refreshSaveState = std::make_shared<std::function<void()>>();
+    auto markEdited = [refreshSaveState] { if (*refreshSaveState) (*refreshSaveState)(); };
 
     auto addSectionTitle = [&](const QString &text) {
         QLabel *label = new QLabel(text, categoryEditorWidget);
@@ -5246,10 +5301,14 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     QFrame *cardTypeTrack = new QFrame(displaySection);
     cardTypeTrack->setObjectName(QStringLiteral("cardTypeTrack"));
     cardTypeTrack->setStyleSheet(QStringLiteral(
-        "QFrame#cardTypeTrack{background:rgba(255,255,255,20);border-radius:7px;}"
+        "QFrame#cardTypeTrack{background:rgba(255,255,255,20);border:1px solid rgba(255,255,255,15);border-radius:7px;}"
         "QFrame#cardTypeTrack QPushButton{background:transparent;color:rgba(255,255,255,180);border:0;"
-        "border-radius:5px;min-width:72px;min-height:24px;padding:0;}"
+        "border-radius:5px;padding:0;font-size:13px;}"
+        "QFrame#cardTypeTrack QPushButton:hover{background:rgba(255,255,255,15);}"
         "QFrame#cardTypeTrack QPushButton:checked{background:rgba(255,255,255,51);color:white;font-weight:600;}"));
+    // windows/qml/SegmentedControl.qml: a 28-high track of 72-wide segments.
+    // Fixed, or the two-line row title stretches the track to its height.
+    cardTypeTrack->setFixedHeight(28);
     QHBoxLayout *cardTypeLayout = new QHBoxLayout(cardTypeTrack);
     cardTypeLayout->setContentsMargins(2, 2, 2, 2);
     cardTypeLayout->setSpacing(0);
@@ -5258,13 +5317,14 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     for (const auto &choice : HistoryRepository::cardTypeChoices()) {
         QPushButton *segment = new QPushButton(choice.label, cardTypeTrack);
         segment->setCheckable(true);
+        segment->setFixedSize(72, 22);
         segment->setCursor(Qt::PointingHandCursor);
         segment->setProperty("cardType", choice.value);
         segment->setProperty("detail", choice.detail);
         cardTypeButtons->addButton(segment);
         cardTypeLayout->addWidget(segment);
     }
-    cardTypeRow->addWidget(cardTypeTrack);
+    cardTypeRow->addWidget(cardTypeTrack, 0, Qt::AlignVCenter);
     cardTypeRow->setContentsMargins(0, 8, 0, 8);
     displayLayout->addLayout(cardTypeRow);
 
@@ -5276,6 +5336,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
             button->setChecked(true);
             cardTypeDetail->setText(button->property("detail").toString());
         }
+        markEdited();
     };
     QObject::connect(cardTypeButtons, qOverload<QAbstractButton *>(&QButtonGroup::buttonClicked),
                      [=](QAbstractButton *button) {
@@ -5353,12 +5414,6 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     categoryEditor->addWidget(testSection);
     categoryEditor->addSpacing(14);
 
-    QHBoxLayout *categoryButtons = new QHBoxLayout;
-    QPushButton *saveCategory = new QPushButton(QStringLiteral("保存更改"), categoryEditorWidget);
-    saveCategory->setObjectName(QStringLiteral("categorySave"));
-    categoryButtons->addStretch();
-    categoryButtons->addWidget(saveCategory);
-    categoryEditor->addLayout(categoryButtons);
     categoryEditor->addStretch();
     categoryEditorWidget->setMinimumWidth(620);
     // Centred and at most 1120 wide in a wide (maximised) window; the script
@@ -5378,13 +5433,24 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     Q_UNUSED(scriptHeightWatcher);
     categoryLayout->addWidget(categorySidebar);
     categoryLayout->addWidget(categoryDivider);
-    categoryLayout->addWidget(categoryScroll, 1);
+    QWidget *categoryEditorPane = new QWidget(categoryPageWidget);
+    QVBoxLayout *categoryEditorPaneLayout = new QVBoxLayout(categoryEditorPane);
+    categoryEditorPaneLayout->setContentsMargins(0, 0, 0, 0);
+    categoryEditorPaneLayout->setSpacing(0);
+    categoryEditorPaneLayout->addWidget(editorHeader);
+    categoryEditorPaneLayout->addWidget(categoryScroll, 1);
+    categoryLayout->addWidget(categoryEditorPane, 1);
+
     auto updateCategoryScriptMetrics = [categoryScript, categoryScriptMetrics](const QString &text) {
         categoryScriptMetrics->setText(QStringLiteral("%1 行 · %2 字符")
             .arg(text.isEmpty() ? 1 : text.count(QLatin1Char('\n')) + 1)
             .arg(text.size()));
     };
-    categoryScript->setChangeCallback(updateCategoryScriptMetrics);
+    categoryScript->setChangeCallback([updateCategoryScriptMetrics, markEdited](const QString &text) {
+        updateCategoryScriptMetrics(text);
+        markEdited();
+    });
+
     updateCategoryScriptMetrics(categoryScript->text());
     QVector<ClipboardCategory> editableCategories;
     auto reloadCategories = [&] {
@@ -5415,16 +5481,43 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         showPreviewLanguage(editableCategories[row].previewLanguage);
         categoryScript->setText(editableCategories[row].script);
         updateCategoryScriptMetrics(categoryScript->text());
+        markEdited();
     });
+    *refreshSaveState = [&] {
+        const int row = categoryList->currentRow();
+        if (row < 0 || row >= editableCategories.size()) {
+            saveCategory->setEnabled(!categoryName->text().trimmed().isEmpty());
+            return;
+        }
+        const ClipboardCategory &stored = editableCategories[row];
+        const QString storedLanguage = stored.previewLanguage.isEmpty()
+            ? QStringLiteral("text") : stored.previewLanguage;
+        saveCategory->setEnabled(categoryName->text().trimmed() != stored.name
+            || categoryIcon->text().compare(HistoryRepository::categoryColor(stored.icon, row),
+                                            Qt::CaseInsensitive) != 0
+            || previewLanguageValue() != storedLanguage
+            || categoryScript->text() != stored.script);
+    };
+    QObject::connect(categoryName, &QLineEdit::textChanged, categoryName, markEdited);
+    QObject::connect(categoryIcon, &QLineEdit::textChanged, categoryIcon, markEdited);
+    // As on macOS and Windows: the new category is stored and listed at
+    // once, then edited like any other.
     QObject::connect(newCategory, &QPushButton::clicked, [&] {
-        categoryList->clearSelection();
-        categoryList->setCurrentRow(-1);
-        categoryName->setText(QStringLiteral("新分类"));
         const QStringList palette = HistoryRepository::categoryColorPalette();
-        showCategoryColor(palette.at(editableCategories.size() % palette.size()));
-        showPreviewLanguage(QStringLiteral("text"));
-        categoryScript->setText(QStringLiteral("function classify(item) {\n\n}"));
-        updateCategoryScriptMetrics(categoryScript->text());
+        if (!repository->createCategory(QStringLiteral("新分类"),
+                palette.at(editableCategories.size() % palette.size()),
+                QStringLiteral("function classify(item) {\n    return false;\n}"), QString())) {
+            showClipDeckAlert(&dialog, QStringLiteral("无法新增分类"), repository->lastError(),
+                              QStringLiteral("知道了"), QString(), AlertTone::Warning);
+            return;
+        }
+        qint64 newest = -1;
+        for (const ClipboardCategory &category : repository->categories())
+            newest = std::max(newest, category.databaseID);
+        reloadCategories();
+        for (int row = 0; row < editableCategories.size(); ++row) {
+            if (editableCategories[row].databaseID == newest) categoryList->setCurrentRow(row);
+        }
         categoryName->setFocus();
         categoryName->selectAll();
     });
@@ -5653,6 +5746,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
                 break;
             }
         }
+        markEdited();
     });
     categoryList->setDeleteCallback([&](int row) {
         if (row < 0 || row >= editableCategories.size()) return;
@@ -5664,6 +5758,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         categoryName->clear();
         showCategoryColor(QString());
         categoryScript->clear();
+        markEdited();
     });
     if (!editableCategories.isEmpty()) categoryList->setCurrentRow(0);
     if (beginNewCategory) {

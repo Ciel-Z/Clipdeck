@@ -44,6 +44,8 @@ class SettingsController final : public QObject {
     Q_PROPERTY(QString categoryCardType READ categoryCardType WRITE setCategoryCardType NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString categoryColor READ categoryColor WRITE setCategoryColor NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString categoryScript READ categoryScript WRITE setCategoryScript NOTIFY categoryEditorChanged)
+    // The editor differs from the stored category: enables "保存更改".
+    Q_PROPERTY(bool categoryHasUnsavedChanges READ categoryHasUnsavedChanges NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString testText READ testText WRITE setTestText NOTIFY categoryEditorChanged)
     Q_PROPERTY(QString testResult READ testResult NOTIFY testChanged)
     Q_PROPERTY(QVariantList testConsole READ testConsole NOTIFY testChanged)
@@ -107,6 +109,7 @@ public:
     QString categoryColor() const { return color_; }
     void setCategoryColor(const QString &color);
     QString categoryScript() const { return script_; }
+    bool categoryHasUnsavedChanges() const;
     void setCategoryScript(const QString &script);
     QString testText() const { return testText_; }
     void setTestText(const QString &text);

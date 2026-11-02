@@ -24,7 +24,7 @@ Window {
         { action: "rename", text: "重命名", icon: "cursor", shortcut: "Ctrl+R", visible: true, enabled: true },
         { action: "preview", text: "预览", icon: "eye", shortcut: "Space", visible: true, enabled: true },
         { separator: true, visible: true },
-        { action: "delete", text: "删除", icon: "trash", shortcut: "Ctrl+Backspace", visible: true, enabled: true, destructive: true }
+        { action: "delete", text: "删除", icon: "trash", shortcut: "Shift+Delete", visible: true, enabled: true, destructive: true }
     ].filter(entry => entry.visible)
 
     flags: Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus

@@ -207,6 +207,20 @@ void SettingsController::setCategoryScript(const QString &script) {
     Q_EMIT categoryEditorChanged();
 }
 
+bool SettingsController::categoryHasUnsavedChanges() const {
+    for (int position = 0; position < categories_.size(); ++position) {
+        const ClipboardCategory &stored = categories_.at(position);
+        if (stored.databaseID != selectedId_) continue;
+        const QString storedLanguage = stored.previewLanguage.isEmpty()
+            ? QStringLiteral("text") : stored.previewLanguage;
+        return name_.trimmed() != stored.name
+            || color_.compare(HistoryRepository::categoryColor(stored.icon, position), Qt::CaseInsensitive) != 0
+            || script_ != stored.script
+            || previewLanguage_ != storedLanguage;
+    }
+    return false;
+}
+
 void SettingsController::setTestText(const QString &text) {
     if (text == testText_) return;
     testText_ = text;

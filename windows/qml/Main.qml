@@ -605,13 +605,9 @@ Window {
         } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             deck.pasteSelection()
         } else if (event.key === Qt.Key_Backspace) {
-            if (deck.searchActive) {
-                if (ctrl) deck.deleteSelection()
-                else if (modifiers === 0) deck.resumeSearchAndDeleteBackward()
-            } else if (ctrl) {
-                deck.deleteSelection()
-            }
-        } else if (event.key === Qt.Key_Delete && modifiers === 0) {
+            if (deck.searchActive && modifiers === 0) deck.resumeSearchAndDeleteBackward()
+        } else if (event.key === Qt.Key_Delete && modifiers === Qt.ShiftModifier) {
+            // Shift+Delete deletes the card, also from the search field.
             deck.deleteSelection()
         } else if (modifiers === 0 && (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
             deck.moveSelection(event.key === Qt.Key_Left ? -1 : 1)

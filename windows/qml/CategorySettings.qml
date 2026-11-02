@@ -173,16 +173,55 @@ Item {
         font { family: workspace.uiFont; pixelSize: 17; weight: Font.DemiBold }
     }
 
+    // Title and "保存更改", fixed above the scrolling editor: at the end of
+    // the long page the button was out of sight. Enabled only while the
+    // editor differs from the stored category.
+    Item {
+        id: editorHeader
+        visible: editor.visible
+        x: editor.x
+        width: editor.width
+        height: 26 + headerText.implicitHeight + 14
+        readonly property real columnWidth: Math.min(editor.maximumWidth, width) - 76
+        Column {
+            id: headerText
+            x: Math.max(38, (editorHeader.width - editorHeader.columnWidth) / 2)
+            y: 26
+            spacing: 4
+            Text {
+                text: "编辑分类"
+                color: "white"
+                font { family: workspace.uiFont; pixelSize: 25; weight: Font.Bold }
+            }
+            Text {
+                text: "调整名称、颜色、卡片显示方式和自动分类规则"
+                color: workspace.secondary
+                font { family: workspace.uiFont; pixelSize: 13 }
+            }
+        }
+        PillButton {
+            x: headerText.x + editorHeader.columnWidth - width
+            anchors.verticalCenter: headerText.verticalCenter
+            width: 96
+            accent: true
+            text: "保存更改"
+            enabled: settings.categoryHasUnsavedChanges
+            opacity: enabled ? 1 : 0.4
+            onClicked: settings.saveCategory()
+        }
+    }
+
     SettingsPage {
         id: editor
         visible: settings.selectedCategoryId >= 0
         x: listPane.width + 1
+        y: editorHeader.height
         width: parent.width - x
-        height: parent.height
+        height: parent.height - y
         // Wider than the other panes: the script editor uses the room.
         maximumWidth: 1120
-        title: "编辑分类"
-        subtitle: "调整名称、颜色、卡片显示方式和自动分类规则"
+        showsHeader: false
+        topPadding: 4
 
         SettingsSection {
             title: "基本信息"
@@ -460,17 +499,6 @@ Item {
             font { family: workspace.uiFont; pixelSize: 11 }
         }
 
-        Item {
-            width: parent.width
-            height: 34
-            PillButton {
-                anchors.right: parent.right
-                width: 96
-                accent: true
-                text: "保存更改"
-                onClicked: settings.saveCategory()
-            }
-        }
     }
 
     // Nested in the pane, so its transient parent is the settings window.

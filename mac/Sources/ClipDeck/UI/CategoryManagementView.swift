@@ -47,6 +47,17 @@ final class CategoryManager: ObservableObject {
         }
     }
 
+    /// Whether the editor differs from the stored category; "保存更改" is
+    /// enabled only then.
+    var hasUnsavedChanges: Bool {
+        guard let position = categories.firstIndex(where: { $0.id == selectedID }) else { return false }
+        let stored = categories[position]
+        return name.trimmingCharacters(in: .whitespacesAndNewlines) != stored.name
+            || icon.caseInsensitiveCompare(CategoryColor.hex(icon: stored.icon, position: position)) != .orderedSame
+            || script != stored.script
+            || previewLanguage != (stored.previewLanguage ?? "text")
+    }
+
     func select(_ id: Int64?) {
         selectedID = id
         guard let position = categories.firstIndex(where: { $0.id == id }) else { return }
@@ -1022,16 +1033,39 @@ private struct CategoryManagementView: View {
     }
 
     private var editor: some View {
+        VStack(spacing: 0) {
+            editorHeader
+            editorBody
+        }
+    }
+
+    /// Title and "保存更改", fixed above the scrolling editor: at the end of
+    /// the long page the button was out of sight.
+    private var editorHeader: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("编辑分类")
+                    .font(.system(size: 25, weight: .bold, design: .rounded))
+                Text("调整名称、颜色、卡片显示方式和自动分类规则")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button("保存更改", action: manager.save)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(!manager.hasUnsavedChanges)
+        }
+        .padding(.horizontal, 38)
+        .padding(.top, 26)
+        .padding(.bottom, 14)
+        .frame(maxWidth: 820)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var editorBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("编辑分类")
-                        .font(.system(size: 25, weight: .bold, design: .rounded))
-                    Text("调整名称、颜色、卡片显示方式和自动分类规则")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-
                 settingsSection("基本信息") {
                     VStack(spacing: 0) {
                         settingsRow("分类名称") {
@@ -1176,15 +1210,10 @@ private struct CategoryManagementView: View {
                         .foregroundStyle(.red)
                 }
 
-                HStack {
-                    Spacer()
-                    Button("保存更改", action: manager.save)
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut("s", modifiers: .command)
-                }
             }
             .padding(.horizontal, 38)
-            .padding(.vertical, 26)
+            .padding(.top, 4)
+            .padding(.bottom, 26)
             .frame(maxWidth: 820)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
