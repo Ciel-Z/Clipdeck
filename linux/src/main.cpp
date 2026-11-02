@@ -20,7 +20,6 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QButtonGroup>
-#include <QColorDialog>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QCryptographicHash>
@@ -206,9 +205,28 @@ Qt::KeyboardModifier modifierForKey(int key) {
     return Qt::NoModifier;
 }
 
+// Qt writes modifiers as Ctrl+Alt+Shift; Linux and Windows conventionally
+// show Shift before Alt (Ctrl+Shift+Alt+Meta), as the Windows version does.
+QString shortcutText(const QKeySequence &sequence, const QString &separator = QStringLiteral("+")) {
+    QStringList chords;
+    for (int index = 0; index < static_cast<int>(sequence.count()); ++index) {
+        const int combined = sequence[static_cast<uint>(index)];
+        const int modifiers = combined & static_cast<int>(Qt::KeyboardModifierMask);
+        QStringList parts;
+        if (modifiers & Qt::ControlModifier) parts << QStringLiteral("Ctrl");
+        if (modifiers & Qt::ShiftModifier) parts << QStringLiteral("Shift");
+        if (modifiers & Qt::AltModifier) parts << QStringLiteral("Alt");
+        if (modifiers & Qt::MetaModifier) parts << QStringLiteral("Meta");
+        parts << QKeySequence(combined & ~static_cast<int>(Qt::KeyboardModifierMask))
+                     .toString(QKeySequence::NativeText);
+        chords << parts.join(separator);
+    }
+    return chords.join(QStringLiteral(", "));
+}
+
 QString shortcutLabel(const QKeySequence &sequence) {
     if (sequence.isEmpty()) return QStringLiteral("未设置");
-    return sequence.toString(QKeySequence::NativeText).replace(QStringLiteral("+"), QStringLiteral(" + "));
+    return shortcutText(sequence, QStringLiteral(" + "));
 }
 
 class ShortcutCaptureButton final : public QPushButton {
@@ -893,6 +911,23 @@ private:
                             QStringLiteral("do"), QStringLiteral("done"), QStringLiteral("case"),
                             QStringLiteral("esac"), QStringLiteral("function"), QStringLiteral("export"),
                             QStringLiteral("local"), QStringLiteral("return")};
+            } else if (language == QStringLiteral("java") || language == QStringLiteral("kotlin")
+                       || language == QStringLiteral("csharp") || language == QStringLiteral("cpp")) {
+                keywords = QStringList{QStringLiteral("class"), QStringLiteral("interface"), QStringLiteral("enum"),
+                            QStringLiteral("record"), QStringLiteral("extends"), QStringLiteral("implements"),
+                            QStringLiteral("package"), QStringLiteral("import"), QStringLiteral("public"),
+                            QStringLiteral("private"), QStringLiteral("protected"), QStringLiteral("static"),
+                            QStringLiteral("final"), QStringLiteral("abstract"), QStringLiteral("void"),
+                            QStringLiteral("int"), QStringLiteral("long"), QStringLiteral("double"),
+                            QStringLiteral("float"), QStringLiteral("boolean"), QStringLiteral("char"),
+                            QStringLiteral("byte"), QStringLiteral("short"), QStringLiteral("var"),
+                            QStringLiteral("new"), QStringLiteral("return"), QStringLiteral("if"),
+                            QStringLiteral("else"), QStringLiteral("for"), QStringLiteral("while"),
+                            QStringLiteral("do"), QStringLiteral("switch"), QStringLiteral("case"),
+                            QStringLiteral("default"), QStringLiteral("break"), QStringLiteral("continue"),
+                            QStringLiteral("try"), QStringLiteral("catch"), QStringLiteral("finally"),
+                            QStringLiteral("throw"), QStringLiteral("throws"), QStringLiteral("this"),
+                            QStringLiteral("super"), QStringLiteral("instanceof"), QStringLiteral("synchronized")};
             } else {
                 keywords = QStringList{QStringLiteral("function"), QStringLiteral("return"), QStringLiteral("const"),
                             QStringLiteral("let"), QStringLiteral("var"), QStringLiteral("if"),
@@ -902,17 +937,19 @@ private:
                             QStringLiteral("export"), QStringLiteral("async"), QStringLiteral("await"),
                             QStringLiteral("public"), QStringLiteral("private"), QStringLiteral("static")};
             }
-            add(QStringLiteral("\b(?:%1)\b").arg(keywords.join(QLatin1Char('|'))),
+            // Regex backslashes must be doubled in these C++ literals: "\b"
+            // alone is a backspace character and "\1" an octal escape.
+            add(QStringLiteral("\\b(?:%1)\\b").arg(keywords.join(QLatin1Char('|'))),
                 QColor(191, 132, 255), QRegularExpression::CaseInsensitiveOption);
-            add(QStringLiteral("\b(?:true|false|null|undefined|nil|NULL)\b"), QColor(191, 132, 255));
-            add(QStringLiteral("\b\d+(?:\.\d+)?\b"), QColor(75, 208, 190));
-            add(QStringLiteral("(['\"])(?:\\.|(?!\1).)*\1"), QColor(255, 159, 67));
+            add(QStringLiteral("\\b(?:true|false|null|undefined|nil|NULL)\\b"), QColor(191, 132, 255));
+            add(QStringLiteral("\\b\\d+(?:\\.\\d+)?\\b"), QColor(75, 208, 190));
+            add(QStringLiteral("(['\"])(?:\\\\.|(?!\\1).)*\\1"), QColor(255, 159, 67));
             add(QStringLiteral("//.*|--.*|#(?![# ]).*"), QColor(135, 135, 140));
             if (language == QStringLiteral("json")) {
-                add(QStringLiteral("\"(?:\\.|[^\"])*\"(?=\s*:)"), QColor(82, 168, 255));
+                add(QStringLiteral("\"(?:\\\\.|[^\"])*\"(?=\\s*:)"), QColor(82, 168, 255));
             } else if (language == QStringLiteral("markdown")) {
-                add(QStringLiteral("^#{1,6}\s+.*$"), QColor(82, 168, 255));
-                add(QStringLiteral("`[^`]+`|\*\*[^*]+\*\*"), QColor(255, 159, 67));
+                add(QStringLiteral("^#{1,6}\\s+.*$"), QColor(82, 168, 255));
+                add(QStringLiteral("`[^`]+`|\\*\\*[^*]+\\*\\*"), QColor(255, 159, 67));
             }
         }
         std::shared_ptr<const Rules> shared = std::move(rules);
@@ -3430,12 +3467,12 @@ private:
             if (!item.previewLanguage.isEmpty() && item.previewLanguage != QStringLiteral("text")) {
                 textFont.setFamily(QStringLiteral("monospace"));
                 textFont.setStyleHint(QFont::Monospace);
-                text->setLineWrapMode(QPlainTextEdit::NoWrap);
-            } else {
-                text->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-                text->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-                text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             }
+            // Wrap code too, as macOS does: long lines stay readable in the
+            // fixed 560×360 preview instead of scrolling sideways.
+            text->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+            text->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+            text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             textFont.setPointSize(14);
             text->setFont(textFont);
             new CardSyntaxHighlighter(text->document(), item.previewLanguage);
@@ -4519,6 +4556,166 @@ private:
     int pendingResizeHeight_ = 0;
 };
 
+// Same picker as CategoryColorPicker on macOS and windows/qml/ColorPicker.qml:
+// a saturation/brightness field, a hue strip, a preview and a hex field, 240
+// wide.  Every change applies at once; Enter, Escape or a click elsewhere
+// closes it.  A frameless tool window rather than Qt::Popup, because an X11
+// popup swallows the click that closes it, so "保存更改" needed two clicks.
+class CategoryColorPicker final : public QWidget {
+public:
+    CategoryColorPicker(const QString &hex, std::function<void(const QString &)> changed,
+                        QWidget *anchor)
+        : QWidget(anchor->window(), Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint),
+          changed_(std::move(changed)) {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setFixedSize(240, 242);
+        // Keep focus on the picker, not the hex field, so dragging keeps the
+        // field in step and Escape/Enter reach keyPressEvent.
+        setFocusPolicy(Qt::StrongFocus);
+        const QColor color(hex);
+        if (color.isValid()) {
+            if (color.hsvSaturationF() > 0) hue_ = std::max(0.0, color.hsvHueF());
+            saturation_ = color.hsvSaturationF();
+            brightness_ = color.valueF();
+        }
+        hexEdit_ = new QLineEdit(hex.toUpper(), this);
+        hexEdit_->setGeometry(48, 202, 180, 28);
+        hexEdit_->setFont(QFont(QStringLiteral("monospace"), 10));
+        hexEdit_->setStyleSheet(QStringLiteral(
+            "QLineEdit{background:rgba(0,0,0,64);color:#eeeeef;border:1px solid rgba(255,255,255,30);"
+            "border-radius:6px;padding:2px 8px;selection-background-color:#1683ff;}"
+            "QLineEdit:focus{border-color:#1683ff;}"));
+        QObject::connect(hexEdit_, &QLineEdit::textEdited, this, [this](const QString &text) {
+            const QString value = (text.startsWith(QLatin1Char('#')) ? text : QLatin1Char('#') + text).toUpper();
+            static const QRegularExpression valid(QStringLiteral("^#[0-9A-F]{6}$"));
+            if (!valid.match(value).hasMatch()) return;
+            const QColor typed(value);
+            if (typed.hsvSaturationF() > 0) hue_ = std::max(0.0, typed.hsvHueF());
+            saturation_ = typed.hsvSaturationF();
+            brightness_ = typed.valueF();
+            changed_(value);
+            update();
+        });
+        QObject::connect(hexEdit_, &QLineEdit::returnPressed, this, &QWidget::close);
+        qApp->installEventFilter(this);
+    }
+
+    void showBelow(QWidget *anchor) {
+        QPoint origin = anchor->mapToGlobal(QPoint(anchor->width(), anchor->height() + 8))
+            - QPoint(width(), 0);
+        // QWidget::screen() needs Qt 5.14 and screenAt() can be null on 5.11/X11.
+        QScreen *target = QGuiApplication::primaryScreen();
+        for (QScreen *candidate : QGuiApplication::screens()) {
+            if (candidate->geometry().contains(anchor->mapToGlobal(QPoint()))) target = candidate;
+        }
+        const QRect screen = target ? target->availableGeometry() : QRect(origin, size());
+        origin.setX(std::clamp(origin.x(), screen.left() + 8, screen.right() - width() - 8));
+        if (origin.y() + height() > screen.bottom())
+            origin.setY(anchor->mapToGlobal(QPoint(0, 0)).y() - height() - 8);
+        move(origin);
+        show();
+        activateWindow();
+        setFocus(Qt::PopupFocusReason);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        // Close on a press anywhere else, and let that press through.
+        if (event->type() == QEvent::MouseButtonPress && watched->isWidgetType()
+                && static_cast<QWidget *>(watched)->window() != this) {
+            QTimer::singleShot(0, this, &QWidget::close);
+        }
+        return false;
+    }
+
+    void keyPressEvent(QKeyEvent *event) override {
+        if (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Return
+                || event->key() == Qt::Key_Enter) {
+            close();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(255, 255, 255, 30), 1));
+        painter.setBrush(QColor(46, 46, 50));
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10);
+
+        QPainterPath field;
+        field.addRoundedRect(QRectF(kField), 6, 6);
+        QLinearGradient across(kField.topLeft(), kField.topRight());
+        across.setColorAt(0, Qt::white);
+        across.setColorAt(1, QColor::fromHsvF(hue_, 1, 1));
+        painter.fillPath(field, across);
+        QLinearGradient down(kField.topLeft(), kField.bottomLeft());
+        down.setColorAt(0, Qt::transparent);
+        down.setColorAt(1, Qt::black);
+        painter.fillPath(field, down);
+        const QPointF knob(kField.left() + saturation_ * kField.width(),
+                           kField.top() + (1 - brightness_) * kField.height());
+        painter.setPen(QPen(Qt::white, 2));
+        painter.setBrush(current());
+        painter.drawEllipse(knob, 7, 7);
+
+        QPainterPath strip;
+        strip.addRoundedRect(QRectF(kHue.left(), kHue.center().y() - 6, kHue.width(), 12), 6, 6);
+        QLinearGradient hues(kHue.topLeft(), kHue.topRight());
+        for (int step = 0; step <= 6; ++step)
+            hues.setColorAt(step / 6.0, QColor::fromHsvF(step == 6 ? 0 : step / 6.0, 1, 1));
+        painter.setPen(Qt::NoPen);
+        painter.fillPath(strip, hues);
+        painter.setPen(QPen(Qt::white, 2));
+        painter.setBrush(QColor::fromHsvF(hue_, 1, 1));
+        painter.drawEllipse(QPointF(kHue.left() + hue_ * kHue.width(), kHue.center().y() + 0.5), 8, 8);
+
+        painter.setPen(QPen(QColor(255, 255, 255, 38), 1));
+        painter.setBrush(current());
+        painter.drawRoundedRect(QRectF(12.5, 202.5, 27, 27), 6, 6);
+    }
+
+    void mousePressEvent(QMouseEvent *event) override {
+        setFocus(Qt::MouseFocusReason);
+        dragging_ = kHue.adjusted(0, -4, 0, 4).contains(event->pos()) ? Drag::Hue
+            : kField.adjusted(-6, -6, 6, 6).contains(event->pos()) ? Drag::Field : Drag::Idle;
+        drag(event->pos());
+    }
+    void mouseMoveEvent(QMouseEvent *event) override { drag(event->pos()); }
+    void mouseReleaseEvent(QMouseEvent *) override { dragging_ = Drag::Idle; }
+
+private:
+    enum class Drag { Idle, Field, Hue };
+    static constexpr QRect kField{12, 12, 216, 150};
+    static constexpr QRect kHue{12, 174, 216, 16};
+
+    QColor current() const { return QColor::fromHsvF(hue_, saturation_, brightness_); }
+
+    void drag(const QPoint &position) {
+        if (dragging_ == Drag::Field) {
+            saturation_ = qBound(0.0, (position.x() - kField.left()) / double(kField.width()), 1.0);
+            brightness_ = 1 - qBound(0.0, (position.y() - kField.top()) / double(kField.height()), 1.0);
+        } else if (dragging_ == Drag::Hue) {
+            hue_ = qBound(0.0, (position.x() - kHue.left()) / double(kHue.width()), 0.999);
+        } else {
+            return;
+        }
+        const QString hex = current().name(QColor::HexRgb).toUpper();
+        if (!hexEdit_->hasFocus()) hexEdit_->setText(hex);
+        changed_(hex);
+        update();
+    }
+
+    std::function<void(const QString &)> changed_;
+    QLineEdit *hexEdit_ = nullptr;
+    double hue_ = 0;
+    double saturation_ = 1;
+    double brightness_ = 1;
+    Drag dragging_ = Drag::Idle;
+};
+
 void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPage = 0,
                   std::function<void()> shortcutChanged = {},
                   const QString &renderPath = QString(),
@@ -4545,7 +4742,9 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         "QListWidget#categoryList::item{height:34px;padding-left:8px;}"
         "QListWidget#categoryList::item:selected{background:#176fd1;color:white;}"
         "QMenu{background:#29292c;color:#eee;border:1px solid #444;padding:5px;}"
+        "QMenu::item{color:#eeeeef;}"
         "QMenu::item:selected{background:#176fd1;color:white;}"
+        "QMenu::item:disabled{color:#8e8e93;}"
         "QWidget#page{background:#1d1d1f;}"
         "QWidget#categorySidebar{background:#1b1b1d;}"
         "QWidget#categorySidebar,QWidget#categorySidebar QLabel,QWidget#categorySidebar QListWidget{color:#dedee1;}"
@@ -4559,7 +4758,9 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         "QLabel#categorySectionTitle{font-size:18px;font-weight:700;color:#e8e8ea;}"
         "QLabel#categoryRowLabel{font-size:15px;font-weight:600;color:#e2e2e5;}"
         "QFrame#categorySection{background:#202022;border:1px solid #2b2b2e;border-radius:14px;}"
-        "QFrame#categorySection QFrame{color:#38383c;}"
+        // Only the row dividers: QLabel is a QFrame too, and a bare
+        // "QFrame#categorySection QFrame" rule outranked every label colour.
+        "QFrame#sectionDivider{color:#38383c;}"
         "QFrame#categorySection QPlainTextEdit{background:transparent;border:0;border-radius:0;padding:12px 16px;}"
         "QFrame#categorySection QPlainTextEdit:focus{background:#232326;border:0;}"
         "QFrame#categorySection QLineEdit,QFrame#categorySection QComboBox{color:#eeeeef;}"
@@ -4665,6 +4866,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         if (rows->count() > 0) {
             QFrame *divider = new QFrame(section);
             divider->setFrameShape(QFrame::HLine);
+            divider->setObjectName(QStringLiteral("sectionDivider"));
             rows->addWidget(divider);
         }
         QHBoxLayout *row = new QHBoxLayout;
@@ -4948,6 +5150,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     basicLayout->addLayout(nameRow);
     QFrame *basicDivider = new QFrame(basicSection);
     basicDivider->setFrameShape(QFrame::HLine);
+    basicDivider->setObjectName(QStringLiteral("sectionDivider"));
     basicLayout->addWidget(basicDivider);
     // A row title with a secondary line under it.
     auto makeRowTitle = [](const QString &title, QLabel *detail, QWidget *parent) {
@@ -4993,8 +5196,10 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     customColor->setCursor(Qt::PointingHandCursor);
     customColor->setToolTip(QStringLiteral("自定义颜色"));
     colorRow->addWidget(customColor);
-    auto showCategoryColor = [colorButtons, categoryIcon, customColor](const QString &color) {
+    std::function<void(const QString &)> previewListColor;
+    auto showCategoryColor = [colorButtons, categoryIcon, customColor, &previewListColor](const QString &color) {
         categoryIcon->setText(color);
+        if (previewListColor) previewListColor(color);
         bool preset = false;
         // An exclusive group refuses to uncheck its checked button.
         colorButtons->setExclusive(false);
@@ -5017,41 +5222,10 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
                      [showCategoryColor](QAbstractButton *button) {
         showCategoryColor(button->property("categoryColor").toString());
     });
-    // Qt's colour panel (saturation/brightness field, hue strip, hex field)
-    // embedded in a popover under the swatch, not a separate dialog window.
     QObject::connect(customColor, &QPushButton::clicked, [customColor, categoryIcon, showCategoryColor] {
         showCategoryColor(categoryIcon->text());
-        QFrame *popover = new QFrame(customColor, Qt::Popup | Qt::FramelessWindowHint);
-        popover->setAttribute(Qt::WA_DeleteOnClose);
-        popover->setObjectName(QStringLiteral("colorPopover"));
-        popover->setStyleSheet(QStringLiteral(
-            "QFrame#colorPopover{background:#2e2e32;border:1px solid rgba(255,255,255,30);border-radius:10px;}"
-            "QWidget{color:#eeeeef;}"
-            "QLineEdit,QSpinBox{background:rgba(0,0,0,64);border:1px solid rgba(255,255,255,30);"
-            "border-radius:5px;padding:2px 4px;}"));
-        QVBoxLayout *layout = new QVBoxLayout(popover);
-        layout->setContentsMargins(10, 10, 10, 10);
-        QColorDialog *panel = new QColorDialog(QColor(categoryIcon->text()), popover);
-        panel->setWindowFlags(Qt::Widget);
-        panel->setOptions(QColorDialog::NoButtons | QColorDialog::DontUseNativeDialog);
-        layout->addWidget(panel);
-        QObject::connect(panel, &QColorDialog::currentColorChanged, [showCategoryColor](const QColor &color) {
-            showCategoryColor(color.name(QColor::HexRgb).toUpper());
-        });
-        popover->adjustSize();
-        QPoint origin = customColor->mapToGlobal(QPoint(customColor->width(), customColor->height() + 8))
-            - QPoint(popover->width(), 0);
-        // QWidget::screen() needs Qt 5.14 and screenAt() can be null on 5.11/X11.
-        QScreen *target = QGuiApplication::primaryScreen();
-        for (QScreen *candidate : QGuiApplication::screens()) {
-            if (candidate->geometry().contains(customColor->mapToGlobal(QPoint()))) target = candidate;
-        }
-        const QRect screen = target ? target->availableGeometry() : QRect(origin, popover->size());
-        origin.setX(std::clamp(origin.x(), screen.left() + 8, screen.right() - popover->width() - 8));
-        if (origin.y() + popover->height() > screen.bottom())
-            origin.setY(customColor->mapToGlobal(QPoint(0, 0)).y() - popover->height() - 8);
-        popover->move(origin);
-        popover->show();
+        auto *picker = new CategoryColorPicker(categoryIcon->text(), showCategoryColor, customColor);
+        picker->showBelow(customColor);
     });
     colorRow->setContentsMargins(0, 8, 0, 8);
     basicLayout->addLayout(colorRow);
@@ -5136,6 +5310,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     scriptLayout->addLayout(categoryScriptHeader);
     QFrame *scriptDivider = new QFrame(scriptSection);
     scriptDivider->setFrameShape(QFrame::HLine);
+    scriptDivider->setObjectName(QStringLiteral("sectionDivider"));
     scriptLayout->addWidget(scriptDivider);
     scriptLayout->addWidget(categoryScript, 1);
     QHBoxLayout *categoryScriptStatus = new QHBoxLayout;
@@ -5165,6 +5340,7 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
     testLayout->addWidget(categoryTestText);
     QFrame *testDivider = new QFrame(testSection);
     testDivider->setFrameShape(QFrame::HLine);
+    testDivider->setObjectName(QStringLiteral("sectionDivider"));
     testLayout->addWidget(testDivider);
     QHBoxLayout *categoryTestLayout = new QHBoxLayout;
     QPushButton *testCategory = new QPushButton(QStringLiteral("测试脚本"), testSection);
@@ -5223,6 +5399,15 @@ void showSettings(HistoryRepository *repository, DeckWindow *deck, int initialPa
         refreshDeck();
     };
     reloadCategories();
+    // The selected category's dot follows the colour being picked; the others
+    // keep their stored colour until "保存更改".
+    previewListColor = [&](const QString &color) {
+        const int current = categoryList->currentRow();
+        for (int row = 0; row < categoryList->count() && row < editableCategories.size(); ++row) {
+            categoryList->item(row)->setData(Qt::UserRole + 1,
+                row == current && !color.isEmpty() ? color : editableCategories[row].icon);
+        }
+    };
     QObject::connect(categoryList, &QListWidget::currentRowChanged, [&](int row) {
         if (row < 0 || row >= editableCategories.size()) return;
         categoryName->setText(editableCategories[row].name);
@@ -5608,10 +5793,28 @@ int main(int argc, char *argv[]) {
         && app.arguments().filter(QStringLiteral("--render-check=")).isEmpty()) {
         ScriptEditorWidget::prewarm();
     }
+    // DDE's platform style draws menu text from the palette, not the style
+    // sheet, which left dark text on the dark menu background.  Give every
+    // menu a matching light-on-dark palette as well.
+    QPalette menuPalette = QApplication::palette("QMenu");
+    for (const QPalette::ColorGroup group : {QPalette::Active, QPalette::Inactive}) {
+        menuPalette.setColor(group, QPalette::Window, QColor(41, 41, 44));
+        menuPalette.setColor(group, QPalette::Base, QColor(41, 41, 44));
+        menuPalette.setColor(group, QPalette::WindowText, QColor(238, 238, 239));
+        menuPalette.setColor(group, QPalette::Text, QColor(238, 238, 239));
+        menuPalette.setColor(group, QPalette::ButtonText, QColor(238, 238, 239));
+        menuPalette.setColor(group, QPalette::Highlight, QColor(23, 111, 209));
+        menuPalette.setColor(group, QPalette::HighlightedText, Qt::white);
+    }
+    menuPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(142, 142, 147));
+    menuPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(142, 142, 147));
+    menuPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(142, 142, 147));
+    QApplication::setPalette(menuPalette, "QMenu");
     app.setStyleSheet(QStringLiteral(
         "QMenu{background:#29292c;color:#eee;border:1px solid #444;padding:5px;}"
-        "QMenu::item{padding:7px 24px 7px 12px;border-radius:6px;}"
+        "QMenu::item{color:#eeeeef;padding:7px 24px 7px 12px;border-radius:6px;}"
         "QMenu::item:selected{background:#176fd1;color:white;}"
+        "QMenu::item:disabled{color:#8e8e93;background:transparent;}"
         "QMenu::separator{height:1px;background:#444;margin:5px 8px;}"
         "QDialog{background:#1d1d1f;color:#eee;}"
         "QDialog QLabel{color:#ddd;}"
@@ -6662,7 +6865,7 @@ int main(int argc, char *argv[]) {
     // instead, once verified on the target UOS release.
     trayMenu.setStyleSheet(QStringLiteral(
         "QMenu{background:#2b2b2e;color:#eeeeef;border:1px solid rgba(255,255,255,30);border-radius:8px;padding:4px;}"
-        "QMenu::item{padding:4px 24px 4px 26px;border-radius:5px;}"
+        "QMenu::item{color:#eeeeef;padding:4px 24px 4px 26px;border-radius:5px;}"
         "QMenu::item:selected{background:#0a84ff;color:white;}"
         "QMenu::item:disabled{color:#8e8e93;background:transparent;}"
         "QMenu::separator{height:1px;background:rgba(255,255,255,30);margin:4px 8px;}"));
@@ -6727,11 +6930,11 @@ int main(int argc, char *argv[]) {
     auto updateShortcutPresentation = [&] {
         const QKeySequence sequence = configuredShortcut(
             QStringLiteral("shortcuts/showDeck"), defaultShowDeckShortcut());
-        const QString label = sequence.toString(QKeySequence::NativeText);
-        showAction->setText(QStringLiteral("显示 Deck"));
-        showAction->setShortcut(sequence);
-        showAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-        showAction->setShortcutVisibleInContextMenu(true);
+        const QString label = shortcutText(sequence);
+        // The menu would print setShortcut() in Qt's Ctrl+Alt+Shift order; the
+        // text after a tab fills the same shortcut column.  The global shortcut
+        // itself is handled by GlobalShortcutFilter, not this action.
+        showAction->setText(QStringLiteral("显示 Deck\t") + label);
         tray.setToolTip(QStringLiteral("ClipDeck · %1 呼出").arg(label));
     };
     updateShortcutPresentation();

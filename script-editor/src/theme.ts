@@ -2,9 +2,24 @@ import { EditorView } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
+const monospace = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Noto Sans Mono', 'DejaVu Sans Mono', monospace";
+
+// The math-italic glyphs CodeMirror uses for these icons are missing from
+// many Linux fonts; an italic serif letter looks the same everywhere.
+const letterIcon = (letter: string) => ({
+  "&:after": { content: `'${letter}'`, fontFamily: "Georgia, 'Times New Roman', 'Noto Serif', 'DejaVu Serif', serif", fontStyle: "italic" }
+});
+
 export const clipDeckTheme = EditorView.theme({
   "&": { height: "100%", color: "var(--editor-foreground)", backgroundColor: "var(--editor-background)" },
-  ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", lineHeight: "1.55", overflow: "auto" },
+  ".cm-scroller": { fontFamily: monospace, lineHeight: "1.55", overflow: "auto" },
+  // Chromium 65 (Qt 5.11 WebEngine on UOS) rejects the two-value
+  // `overflow: hidden auto` in CodeMirror's base theme, leaving the list
+  // unclipped; spell out each axis and the font instead of "monospace".
+  ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: monospace, overflowX: "hidden", overflowY: "auto", maxWidth: "700px" },
+  ".cm-completionIcon-variable": letterIcon("x"),
+  ".cm-completionIcon-constant": letterIcon("C"),
+  ".cm-completionIcon-type": letterIcon("t"),
   ".cm-content": { padding: "10px 0", caretColor: "var(--editor-caret)" },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--editor-caret) !important", borderLeftWidth: "2px" },
   ".cm-line": { padding: "0 12px 0 6px" },

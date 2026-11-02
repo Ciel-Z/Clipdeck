@@ -69,9 +69,10 @@ quint32 keyFromName(const QString &name) {
 
 QString HotkeySpec::toString() const {
     QStringList parts;
+    // Windows convention puts Shift before Alt (Ctrl+Shift+Alt+Win).
     if (modifiers & Control) parts << QStringLiteral("Ctrl");
-    if (modifiers & Alt) parts << QStringLiteral("Alt");
     if (modifiers & Shift) parts << QStringLiteral("Shift");
+    if (modifiers & Alt) parts << QStringLiteral("Alt");
     if (modifiers & Win) parts << QStringLiteral("Win");
     parts << keyName(key);
     return parts.join(QLatin1Char('+'));

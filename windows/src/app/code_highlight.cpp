@@ -22,7 +22,7 @@ function clipDeckHighlight(code, requestedLanguage) {
     ].filter(language => hljs.getLanguage(language));
     function hintedLanguage(source) {
         if (/^\s*#include\s*[<"]|\bstd::|\bcout\s*<</m.test(source)) return "cpp";
-        if (/\b(public|private|protected)\s+(class|interface|enum|record)\b|\bSystem\.out\./m.test(source)) return "java";
+        if (/\b(public|private|protected)\s+(class|interface|enum|record)\b|\bSystem\.(out|err)\.|\bimport\s+(static\s+)?\w+(\.[\w*]+)+\s*;|\bpackage\s+\w+(\.\w+)*\s*;|(^|\n)\s*@(Override|Autowired|Test|SuppressWarnings)\b|\b(String|[A-Z]\w*<[^<>\n]*>)(\[\])*\s+[a-z_]\w*\s*(=(?!=)|;)|\bnew\s+[A-Z]\w*<(\s*[A-Z][\w.]*(<[^<>\n]*>)?(\[\])*\s*,?)*>\s*\(/m.test(source)) return "java";
         if (/(^|\n)\s*(def|async\s+def)\s+\w+\s*\([^)]*\)\s*:|(^|\n)\s*from\s+\w+\s+import\s+/m.test(source)) return "python";
         if (/\bimport\s+(Foundation|SwiftUI|AppKit|UIKit|Combine|PackageDescription)\b/m.test(source)) return "swift";
         if (/(^|\n)\s*(?:@(?:State|Binding|ObservedObject|StateObject|Environment|EnvironmentObject|MainActor|ViewBuilder)\b|(?:public|private|internal|fileprivate|open)?\s*(?:func|protocol|extension|actor|struct|enum)\s+\w+)/m.test(source)) return "swift";

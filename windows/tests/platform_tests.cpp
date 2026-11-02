@@ -92,7 +92,7 @@ void formatTests() {
 }
 
 void hotkeyTests() {
-    check(HotkeySpec().toString() == QStringLiteral("Alt+Shift+V"), "hotkey-default-is-alt-shift-v");
+    check(HotkeySpec().toString() == QStringLiteral("Shift+Alt+V"), "hotkey-default-is-alt-shift-v");
     check(HotkeySpec::parse(QStringLiteral("Ctrl+Alt+F12")).key == 0x7B, "hotkey-parse-function-key");
     check(HotkeySpec::parse(QStringLiteral("Ctrl+Shift+V")) == HotkeySpec{HotkeySpec::Control | HotkeySpec::Shift, 'V'},
           "hotkey-parse-modifiers");

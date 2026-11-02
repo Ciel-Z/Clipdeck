@@ -1481,10 +1481,17 @@ QString HistoryRepository::detectedCodeLanguage(const QString &source, int *scor
             {QStringLiteral("@(?:interface|implementation|protocol)\\s+\\w+"), 8},
             {QStringLiteral("#import\\s+[<\"](?:Foundation|UIKit|AppKit)/"), 8}
         }},
+        // Same Java signals as CodeHighlightService on macOS.  Type-shaped
+        // ones are case-sensitive so C++ "vector<int> v =" stays C++.
         {QStringLiteral("java"), 6, {
-            {QStringLiteral("\\b(?:public|protected|private)\\s+(?:abstract\\s+|final\\s+)?(?:class|interface|enum|record)\\s+\\w+[^\\n{]*\\{"), 8},
+            {QStringLiteral("\\b(?:public|protected|private)\\s+(?:abstract\\s+|final\\s+|static\\s+)*(?:class|interface|enum|record)\\s+\\w+[^\\n{]*\\{"), 8},
             {QStringLiteral("\\bpackage\\s+[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*\\s*;"), 7},
-            {QStringLiteral("\\bSystem\\.(?:out|err)\\.\\w+\\s*\\("), 7}
+            {QStringLiteral("\\bimport\\s+(?:static\\s+)?[A-Za-z_]\\w*(?:\\.[A-Za-z_*]\\w*)+\\s*;"), 6},
+            {QStringLiteral("\\bSystem\\.(?:out|err)\\.\\w+\\s*\\("), 7},
+            {QStringLiteral("\\b(?:public|protected|private|static|final)\\s+[A-Za-z_<>,?\\[\\]]+\\s+\\w+\\s*\\([^)]*\\)\\s*(?:throws\\s+[\\w.,\\s]+)?\\{"), 6},
+            {QStringLiteral("(?:^|\\n)\\s*@(?:Override|Autowired|Test|Bean|Component|Service|Repository|Controller|RestController|Data|Getter|Setter|SuppressWarnings|FunctionalInterface|Deprecated)\\b"), 6},
+            {QStringLiteral("(?-i:\\b(?:String|[A-Z]\\w*<[^<>\\n]*(?:<[^<>\\n]*>[^<>\\n]*)?>)(?:\\[\\])*\\s+[a-z_]\\w*\\s*(?:=(?!=)|;))"), 6},
+            {QStringLiteral("(?-i:\\bnew\\s+[A-Z]\\w*<(?:\\s*[A-Z][\\w.]*(?:<[^<>\\n]*>)?(?:\\[\\])*\\s*,?)*>\\s*\\()"), 6}
         }},
         {QStringLiteral("kotlin"), 6, {
             {QStringLiteral("\\bfun\\s+\\w+\\s*\\([^)]*\\)\\s*(?::\\s*[\\w<>,?.]+)?\\s*[={]"), 7},
@@ -1506,7 +1513,7 @@ QString HistoryRepository::detectedCodeLanguage(const QString &source, int *scor
             {QStringLiteral("\\b(?:async\\s+)?function\\s*\\w*\\s*\\([^)]*\\)\\s*\\{"), 7},
             {QStringLiteral("\\b(?:const|let|var)\\s+[A-Za-z_$]\\w*\\s*="), 5},
             {QStringLiteral("(?:\\([^)]*\\)|[A-Za-z_$]\\w*)\\s*=>"), 6},
-            {QStringLiteral("\\b(?:document|window|console)\\.\\w+\\s*\\("), 6}
+            {QStringLiteral("(?-i:\\b(?:document|window|console)\\.\\w+\\s*\\()"), 6}
         }},
         {QStringLiteral("cpp"), 6, {
             {QStringLiteral("^\\s*#include\\s*[<\"][^>\"]+[>\"]"), 8},

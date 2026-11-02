@@ -199,7 +199,7 @@ void settingsLogicTests() {
           "shortcut-from-qt-arrow");
     check(!HotkeySpec::fromQtKey(Qt::Key_V, Qt::NoModifier).isValid(), "shortcut-needs-modifier");
     check(!HotkeySpec::fromQtKey(Qt::Key_Control, Qt::ControlModifier).isValid(), "shortcut-modifier-alone-is-invalid");
-    check(HotkeySpec::fromQtKey(Qt::Key_F5, Qt::AltModifier | Qt::ShiftModifier).toString() == QStringLiteral("Alt+Shift+F5"),
+    check(HotkeySpec::fromQtKey(Qt::Key_F5, Qt::AltModifier | Qt::ShiftModifier).toString() == QStringLiteral("Shift+Alt+F5"),
           "shortcut-function-key");
     check(next.matchesQtKey(Qt::Key_Right, Qt::ControlModifier) && !next.matchesQtKey(Qt::Key_Right, Qt::ShiftModifier),
           "shortcut-matches-exact-modifiers");

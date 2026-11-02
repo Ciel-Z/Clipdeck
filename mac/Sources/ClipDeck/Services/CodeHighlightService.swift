@@ -55,12 +55,17 @@ final class CodeDetectionEngine: @unchecked Sendable {
             Signal(#"#import\s+[<\"](?:Foundation|UIKit|AppKit)/"#, weight: 8),
             Signal(#"\[[A-Za-z_]\w*\s+[A-Za-z_]\w*(?::[^\]]*)?\]"#, weight: 6),
         ]),
+        // Same Java signals as HistoryRepository on Linux and Windows. Type-shaped
+        // ones are case-sensitive so C++ "vector<int> v =" stays C++.
         LanguageRule(language: "java", minimumScore: 6, signals: [
-            Signal(#"\b(?:public|protected|private)\s+(?:abstract\s+|final\s+)?(?:class|interface|enum|record)\s+\w+[^\n{]*\{"#, weight: 8),
-            Signal(#"\bpackage\s+[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*\s*;"#, weight: 7),
-            Signal(#"\bimport\s+(?:static\s+)?[a-zA-Z_]\w*(?:\.[a-zA-Z_*]\w*)+\s*;"#, weight: 6),
+            Signal(#"\b(?:public|protected|private)\s+(?:abstract\s+|final\s+|static\s+)*(?:class|interface|enum|record)\s+\w+[^\n{]*\{"#, weight: 8),
+            Signal(#"\bpackage\s+[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*;"#, weight: 7),
+            Signal(#"\bimport\s+(?:static\s+)?[A-Za-z_]\w*(?:\.[A-Za-z_*]\w*)+\s*;"#, weight: 6),
             Signal(#"\bSystem\.(?:out|err)\.\w+\s*\("#, weight: 7),
-            Signal(#"\b(?:public|protected|private|static|final)\s+[A-Za-z_<>,?\[\]]+\s+\w+\s*\([^)]*\)\s*\{"#, weight: 6),
+            Signal(#"\b(?:public|protected|private|static|final)\s+[A-Za-z_<>,?\[\]]+\s+\w+\s*\([^)]*\)\s*(?:throws\s+[\w.,\s]+)?\{"#, weight: 6),
+            Signal(#"(?:^|\n)\s*@(?:Override|Autowired|Test|Bean|Component|Service|Repository|Controller|RestController|Data|Getter|Setter|SuppressWarnings|FunctionalInterface|Deprecated)\b"#, weight: 6),
+            Signal(#"(?-i:\b(?:String|[A-Z]\w*<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)?>)(?:\[\])*\s+[a-z_]\w*\s*(?:=(?!=)|;))"#, weight: 6),
+            Signal(#"(?-i:\bnew\s+[A-Z]\w*<(?:\s*[A-Z][\w.]*(?:<[^<>\n]*>)?(?:\[\])*\s*,?)*>\s*\()"#, weight: 6),
         ]),
         LanguageRule(language: "kotlin", minimumScore: 6, signals: [
             Signal(#"\bfun\s+\w+\s*\([^)]*\)\s*(?::\s*[\w<>,?.]+)?\s*[={]"#, weight: 7),
@@ -86,7 +91,7 @@ final class CodeDetectionEngine: @unchecked Sendable {
             Signal(#"\b(?:const|let|var)\s+[A-Za-z_$]\w*\s*="#, weight: 5),
             Signal(#"(?:\([^)]*\)|[A-Za-z_$]\w*)\s*=>"#, weight: 6),
             Signal(#"\b(?:import|export)\s+(?:default\s+|\{)[^\n]+"#, weight: 6),
-            Signal(#"\b(?:document|window|console)\.\w+\s*\("#, weight: 6),
+            Signal(#"(?-i:\b(?:document|window|console)\.\w+\s*\()"#, weight: 6),
         ]),
         LanguageRule(language: "cpp", minimumScore: 6, signals: [
             Signal(#"^\s*#include\s*[<\"][^>\"]+[>\"]"#, weight: 8),
@@ -272,7 +277,7 @@ final class CodeHighlightService: @unchecked Sendable {
         ].filter(language => hljs.getLanguage(language));
         function hintedLanguage(source) {
             if (/^\s*#include\s*[<"]|\bstd::|\bcout\s*<</m.test(source)) return "cpp";
-            if (/\b(public|private|protected)\s+(class|interface|enum|record)\b|\bSystem\.out\./m.test(source)) return "java";
+            if (/\b(public|private|protected)\s+(class|interface|enum|record)\b|\bSystem\.(out|err)\.|\bimport\s+(static\s+)?\w+(\.[\w*]+)+\s*;|\bpackage\s+\w+(\.\w+)*\s*;|(^|\n)\s*@(Override|Autowired|Test|SuppressWarnings)\b|\b(String|[A-Z]\w*<[^<>\n]*>)(\[\])*\s+[a-z_]\w*\s*(=(?!=)|;)|\bnew\s+[A-Z]\w*<(\s*[A-Z][\w.]*(<[^<>\n]*>)?(\[\])*\s*,?)*>\s*\(/m.test(source)) return "java";
             if (/(^|\n)\s*(def|async\s+def)\s+\w+\s*\([^)]*\)\s*:|(^|\n)\s*from\s+\w+\s+import\s+/m.test(source)) return "python";
             if (/\bimport\s+(Foundation|SwiftUI|AppKit|UIKit|Combine|PackageDescription)\b/m.test(source)) return "swift";
             if (/(^|\n)\s*(?:@(?:State|Binding|ObservedObject|StateObject|Environment|EnvironmentObject|MainActor|ViewBuilder)\b|(?:public|private|internal|fileprivate|open)?\s*(?:func|protocol|extension|actor|struct|enum)\s+\w+)/m.test(source)) return "swift";

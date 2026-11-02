@@ -5,7 +5,7 @@ import QtQuick
 Rectangle {
     id: recorder
     property string name: ""       // showDeck | nextCategory | previousCategory
-    property string shortcut: ""   // current text, e.g. "Alt+Shift+V"
+    property string shortcut: ""   // current text, e.g. "Shift+Alt+V"
     readonly property bool recording: activeFocus
 
     width: 190
