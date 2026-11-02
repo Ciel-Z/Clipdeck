@@ -193,4 +193,4 @@ bash linux/scripts/build-linux.sh
 
 ## License
 
-macOS 客户端使用 [MIT License](mac/LICENSE)。第三方依赖保留各自许可证；分发安装包前请核对相关许可要求。
+使用 [MIT License](mac/LICENSE)。第三方依赖保留各自许可证；分发安装包前请核对相关许可要求。
