@@ -13,7 +13,7 @@ enum class Accent : int {
     AcrylicBlurBehind = 4,
 };
 
-// Phase 0 candidates for the Deck container. See docs/windows-port-plan.md §3.
+// Experimental Deck effects; see windows/spike/TESTING.md for mode comparisons.
 enum class EffectMode : int {
     AcrylicRegion = 1,     // acrylic + SetWindowRgn rounded corners, no shadow
     BlurRegion = 2,        // classic blur + SetWindowRgn rounded corners

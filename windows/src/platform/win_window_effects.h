@@ -5,8 +5,8 @@
 
 #include <windows.h>
 
-// Deck container material (Phase 0: acrylic + region corners). See
-// docs/windows-port-plan.md §5.2 and windows/spike/TESTING.md.
+// Native window effects used by the Windows client. Historical effect-mode
+// comparisons can still be exercised with windows/spike/TESTING.md.
 namespace WinEffects {
 
 // Undocumented user32 accent states used by Windows 10 for blur materials.
