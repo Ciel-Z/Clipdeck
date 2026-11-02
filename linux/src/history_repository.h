@@ -124,6 +124,7 @@ public:
     static constexpr qint64 kDeletedRecordRetentionMs = 48LL * 60 * 60 * 1000;
     int clearExpired(int retentionDays);
     int clearExpiredAndReclaim(int retentionDays);
+    void reclaimSpace();
     int clearAll();
     qint64 databaseByteCount() const;
 

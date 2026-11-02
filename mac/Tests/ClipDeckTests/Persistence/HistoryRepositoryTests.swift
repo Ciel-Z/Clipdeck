@@ -282,6 +282,27 @@ final class HistoryRepositoryTests: XCTestCase {
         XCTAssertLessThan(byteCountAfterClearing, byteCountBeforeClearing)
     }
 
+    func testClearingShrinksTheFilesOnDisk() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try ClipDeckDatabase(path: directory.appending(path: "history.sqlite").path)
+        let repository = HistoryRepository(database: database)
+        for index in 0 ..< 20 {
+            let pixels = Data((0 ..< 400_000).map { UInt8(truncatingIfNeeded: $0 &* (index + 7)) })
+            _ = try repository.save(ClipboardItem(
+                payload: .image(data: pixels, width: 10, height: 10, format: .png), sourceApplication: source
+            ))
+        }
+        let filled = repository.databaseByteCount()
+
+        // VACUUM in WAL mode copies the database into the log: the log must be
+        // emptied afterwards, or "reclaiming" doubles the size on disk.
+        try repository.clearAllHistoryAndReclaim()
+        XCTAssertGreaterThan(filled, 8_000_000)
+        XCTAssertLessThan(repository.databaseByteCount(), 1_000_000)
+    }
+
     private func makeRepository() throws -> HistoryRepository {
         try HistoryRepository(database: ClipDeckDatabase(path: ":memory:"))
     }

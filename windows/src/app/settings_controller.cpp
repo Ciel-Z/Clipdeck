@@ -373,11 +373,7 @@ void SettingsController::clearAllHistory() {
     Q_EMIT databaseChanged();
     runMaintenance(
         this, repository_->databasePath(),
-        [](HistoryRepository &repository) {
-            const int deleted = repository.clearAll();
-            repository.clearExpiredAndReclaim(0); // checkpoint + VACUUM
-            return deleted;
-        },
+        [](HistoryRepository &repository) { return repository.clearAll(); }, // reclaims space too
         [this](int deleted, const QString &error) {
             maintenanceStatus_ = deleted < 0 ? QStringLiteral("删除失败：") + error
                                              : QStringLiteral("已删除 %1 条历史并回收数据库空间").arg(deleted);

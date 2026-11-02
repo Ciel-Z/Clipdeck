@@ -442,7 +442,7 @@ final class ClipboardMonitor {
         }
         let iconData = application.bundleURL
             .map { NSWorkspace.shared.icon(forFile: $0.path) }
-            .flatMap { $0.tiffRepresentation }
+            .flatMap { $0.compactPNGData(pixels: NSImage.sourceIconPixels) }
         return SourceApplication(
             bundleIdentifier: application.bundleIdentifier,
             name: application.localizedName ?? "Unknown",

@@ -111,7 +111,10 @@ final class LinkMetadataServiceTests: XCTestCase {
         await fulfillment(of: [done], timeout: 5)
 
         XCTAssertEqual(Set(fetched.value), Set(links.map(\.id)))
-        XCTAssertEqual(started.value, links.compactMap(\.webURL))
+        // The first three enqueued start first; later ones as slots free up.
+        let urls = links.compactMap(\.webURL)
+        XCTAssertEqual(Set(started.value.prefix(3)), Set(urls.prefix(3)))
+        XCTAssertEqual(Set(started.value), Set(urls))
         XCTAssertLessThanOrEqual(peak.value, LinkMetadataQueue.maximumConcurrentFetches)
     }
 }

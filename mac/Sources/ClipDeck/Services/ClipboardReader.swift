@@ -2,6 +2,28 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
+extension NSImage {
+    /// Stored icon sizes: the source badge at 2x, as on Windows, and a file
+    /// row's 32 pt icon at 2x.
+    static let sourceIconPixels = 128
+    static let fileIconPixels = 64
+
+    /// A square PNG at most `pixels` wide. Never tiffRepresentation for an
+    /// icon: it keeps every representation uncompressed, ~70 MB for an app.
+    func compactPNGData(pixels: Int) -> Data? {
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.representation(using: .png, properties: [:])
+    }
+}
+
 struct ClipboardReader: Sendable {
     static let maximumPixelCount = 60_000_000
 
@@ -93,13 +115,12 @@ struct ClipboardReader: Sendable {
             let type = values?.contentType ?? (directory ? .folder : UTType(filenameExtension: url.pathExtension))
             // Generic type icons avoid reading file contents or generating thumbnails.
             let icon = NSWorkspace.shared.icon(for: type ?? .data)
-            icon.size = NSSize(width: 32, height: 32)
             return ClipboardFileReference(
                 path: url.path,
                 name: values?.name ?? url.lastPathComponent,
                 typeIdentifier: type?.identifier ?? UTType.data.identifier,
                 isDirectory: directory,
-                iconData: icon.tiffRepresentation
+                iconData: icon.compactPNGData(pixels: NSImage.fileIconPixels)
             )
         }
     }

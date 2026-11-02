@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import GRDB
 
 final class ClipDeckDatabase: @unchecked Sendable {
@@ -13,13 +13,31 @@ final class ClipDeckDatabase: @unchecked Sendable {
         }
         configuration.prepareDatabase { database in
             try database.execute(sql: "PRAGMA foreign_keys = ON")
+            // Any checkpoint that resets the log also shrinks it to this size.
+            try database.execute(sql: "PRAGMA journal_size_limit = 4194304")
         }
         if path == ":memory:" {
             writer = try DatabaseQueue(path: path, configuration: configuration)
         } else {
             writer = try DatabasePool(path: path, configuration: configuration)
         }
+        let compactedBefore = try writer.read { try Self.migrator.appliedIdentifiers($0) }
+            .contains("compactStoredIcons")
         try Self.migrator.migrate(writer)
+        // The space the old icons held is only free pages until a VACUUM.
+        if !compactedBefore, path != ":memory:" { try reclaimSpace() }
+    }
+
+    /// VACUUM, then empty the log. In WAL mode VACUUM writes the whole database
+    /// into the log, so without the final checkpoint the files on disk grow
+    /// instead of shrinking. Readers are paused so the checkpoint can reset it.
+    func reclaimSpace() throws {
+        try writer.barrierWriteWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            try db.execute(sql: "VACUUM")
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+        releaseMemory()
     }
 
     static func applicationDatabase() throws -> ClipDeckDatabase {
@@ -433,6 +451,43 @@ final class ClipDeckDatabase: @unchecked Sendable {
                 table.column("addresses", .text)
                 table.column("last_seen", .integer).notNull().defaults(to: 0)
                 table.column("sent_cursor", .integer).notNull().defaults(to: 0)
+            }
+        }
+        migrator.registerMigration("compactStoredIcons") { database in
+            // Icons were stored as tiffRepresentation: every size, uncompressed,
+            // ~70 MB per app. Keep them as small PNGs, as new captures do.
+            let large = 256 * 1_024
+            let applications = try Int64.fetchAll(
+                database, sql: "SELECT id FROM application WHERE length(icon_data) > ?", arguments: [large]
+            )
+            for id in applications {
+                let data = try Data.fetchOne(database, sql: "SELECT icon_data FROM application WHERE id = ?", arguments: [id])
+                let compact = data.flatMap(NSImage.init(data:))?.compactPNGData(pixels: NSImage.sourceIconPixels)
+                try database.execute(sql: "UPDATE application SET icon_data = ? WHERE id = ?", arguments: [compact, id])
+            }
+            let fileRows = try Int64.fetchAll(
+                database,
+                sql: "SELECT id FROM content WHERE content_type = 'files' AND length(file_references) > ?",
+                arguments: [large]
+            )
+            for id in fileRows {
+                guard let data = try Data.fetchOne(
+                    database, sql: "SELECT file_references FROM content WHERE id = ?", arguments: [id]
+                ), let files = ClipboardFileReference.decoded(data) else { continue }
+                let compact = files.map { file in
+                    ClipboardFileReference(
+                        path: file.path,
+                        name: file.name,
+                        typeIdentifier: file.typeIdentifier,
+                        isDirectory: file.isDirectory,
+                        iconData: file.iconData.flatMap(NSImage.init(data:))?
+                            .compactPNGData(pixels: NSImage.fileIconPixels)
+                    )
+                }
+                try database.execute(
+                    sql: "UPDATE content SET file_references = ? WHERE id = ?",
+                    arguments: [ClipboardFileReference.encoded(compact), id]
+                )
             }
         }
         return migrator

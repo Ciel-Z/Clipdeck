@@ -298,6 +298,8 @@ bool HistoryRepository::initialize() {
     if (!execute(QStringLiteral("PRAGMA busy_timeout = 2000"))
         || !execute(QStringLiteral("PRAGMA foreign_keys = ON"))
         || !execute(QStringLiteral("PRAGMA journal_mode = WAL"))
+        // Any checkpoint that resets the log also shrinks it to this size.
+        || !execute(QStringLiteral("PRAGMA journal_size_limit = 4194304"))
         || !execute(QStringLiteral("PRAGMA synchronous = NORMAL"))) {
         return false;
     }
@@ -1166,9 +1168,16 @@ int HistoryRepository::clearExpired(int retentionDays) {
 
 int HistoryRepository::clearExpiredAndReclaim(int retentionDays) {
     const int removed = clearExpired(retentionDays);
+    reclaimSpace();
+    return removed;
+}
+
+void HistoryRepository::reclaimSpace() {
+    // In WAL mode VACUUM writes the whole database into the log; without the
+    // final checkpoint the files on disk grow instead of shrinking.
     execute(QStringLiteral("PRAGMA wal_checkpoint(TRUNCATE)"));
     execute(QStringLiteral("VACUUM"));
-    return removed;
+    execute(QStringLiteral("PRAGMA wal_checkpoint(TRUNCATE)"));
 }
 
 int HistoryRepository::clearAll() {
@@ -1186,7 +1195,7 @@ int HistoryRepository::clearAll() {
         return 0;
     }
     const int removed = query.numRowsAffected();
-    execute(QStringLiteral("VACUUM"));
+    reclaimSpace();
     return removed;
 }
 

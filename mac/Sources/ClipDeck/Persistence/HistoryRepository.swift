@@ -449,11 +449,7 @@ final class HistoryRepository: @unchecked Sendable {
     }
 
     private func reclaimDatabaseSpace() throws {
-        try database.writer.writeWithoutTransaction { db in
-            try db.execute(sql: "VACUUM")
-            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
-        }
-        database.releaseMemory()
+        try database.reclaimSpace()
     }
 
     fileprivate func upsertApplication(_ application: SourceApplication, at now: Int64, in db: Database) throws -> Int64 {
