@@ -2230,7 +2230,7 @@ enum CategoryColor {
         )
         var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0
         rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-        return (hue, saturation, brightness)
+        return (Double(hue), Double(saturation), Double(brightness))
     }
 
     static func isPreset(_ hex: String) -> Bool {
