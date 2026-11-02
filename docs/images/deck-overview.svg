@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">ClipDeck：代码、链接与文件，一条 Deck 即刻找回</title>
+  <desc id="desc">手工绘制的产品示意图，使用虚构 JSON、example.com 链接与演示文件。不含截图或个人数据。</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101a29"/><stop offset="1" stop-color="#191421"/></linearGradient>
+    <linearGradient id="deck" x2="0" y2="1"><stop stop-color="#34363b"/><stop offset="1" stop-color="#25262a"/></linearGradient>
+    <clipPath id="round"><rect width="1200" height="620" rx="24"/></clipPath>
+    <symbol id="folder" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v12H3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="file" viewBox="0 0 24 24"><path d="M6 2h8l5 5v15H6ZM14 2v6h5M9 12h7M9 16h7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m4 18 6-6 4 4 3-3 4 5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="15" cy="8" r="2" fill="currentColor"/></symbol>
+  </defs>
+  <g clip-path="url(#round)" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+    <path fill="url(#bg)" d="M0 0h1200v620H0z"/>
+    <text x="40" y="43" fill="#83beff" font-size="12" font-weight="700" letter-spacing="2">CLIPDECK / YOUR CLIPBOARD, IN REACH</text>
+    <text x="40" y="91" fill="#f4f6fa" font-size="32" font-weight="650">复制过的灵感，不必再找一次。</text>
+    <text x="40" y="122" fill="#a1acbd" font-size="16">文本 · 图片 · 文件引用　/　本地历史，分类查找，快速粘贴</text>
+    <rect x="897" y="62" width="261" height="36" rx="18" fill="#242d3b" stroke="#425064"/>
+    <text x="1027" y="85" text-anchor="middle" font-size="13" fill="#d3ddec">macOS　·　Windows　·　Linux</text>
+    <rect x="26" y="156" width="1148" height="421" rx="25" fill="#05070a" opacity=".5"/>
+    <rect x="26" y="149" width="1148" height="421" rx="25" fill="url(#deck)" stroke="#60616a"/>
+    <rect x="561" y="156" width="78" height="4" rx="2" fill="#71727a"/>
+    <g fill="none" stroke="#e4e6eb" stroke-width="2"><circle cx="63" cy="189" r="8"/><path d="m69 195 6 6"/></g>
+    <rect x="94" y="173" width="120" height="35" rx="15" fill="#55565c"/>
+    <g fill="none" stroke="#f0f1f4" stroke-width="1.8"><path d="M109 185a8 8 0 1 1-1 8m0-13v7h7M118 184v7l4 2"/></g>
+    <text x="134" y="196" fill="#f4f4f6" font-size="14" font-weight="600">History</text>
+    <text x="235" y="198" fill="#d7dae1" font-size="24" font-family="serif">T</text>
+    <use href="#image" x="279" y="180" width="24" height="24" color="#c3c6ce"/>
+    <use href="#folder" x="327" y="179" width="25" height="25" color="#c3c6ce"/>
+    <path d="M375 176v29" stroke="#61626b"/>
+    <g font-size="14" fill="#d9dce4">
+      <circle cx="408" cy="191" r="5" fill="#b98bff"/><text x="422" y="196">JSON</text>
+      <circle cx="511" cy="191" r="5" fill="#44d990"/><text x="525" y="196">SQL</text>
+      <circle cx="604" cy="191" r="5" fill="#fa728b"/><text x="618" y="196">代码</text>
+      <circle cx="704" cy="191" r="5" fill="#7a9bff"/><text x="718" y="196">Markdown</text>
+      <circle cx="856" cy="191" r="5" fill="#45d2c3"/><text x="870" y="196">色彩</text>
+      <text x="947" y="198" font-size="24">+</text><text x="1120" y="196" letter-spacing="3">···</text>
+    </g>
+    <g>
+      <rect x="48" y="229" width="349" height="295" rx="19" fill="#151619" stroke="#279aff" stroke-width="3"/>
+      <path d="M68 230h309a18 18 0 0 1 18 18v55H50v-55a18 18 0 0 1 18-18" fill="#584676"/>
+      <text x="69" y="259" font-size="18" fill="#fff" font-weight="650">JSON</text><text x="69" y="282" fill="#d0bfed" font-size="12">现在 · 演示编辑器</text>
+      <text x="365" y="264" text-anchor="end" fill="#e5d8ff" font-family="monospace" font-size="21">{ }</text>
+      <g font-family="SFMono-Regular, Consolas, monospace" font-size="15" fill="#e1e5ed">
+        <text x="71" y="337">{</text>
+        <text x="89" y="366"><tspan fill="#a6d7ff">"project"</tspan>: <tspan fill="#b8d998">"Demo"</tspan>,</text>
+        <text x="89" y="395"><tspan fill="#a6d7ff">"status"</tspan>: <tspan fill="#b8d998">"ready"</tspan>,</text>
+        <text x="89" y="424"><tspan fill="#a6d7ff">"items"</tspan>: <tspan fill="#ffc18b">3</tspan></text>
+        <text x="71" y="453">}</text>
+      </g>
+      <text x="69" y="502" fill="#858b96" font-size="12">本地分类 · 语法高亮</text>
+      <rect x="414" y="230" width="348" height="294" rx="19" fill="#151619" stroke="#484b54"/>
+      <path d="M434 231h308a18 18 0 0 1 18 18v54H416v-54a18 18 0 0 1 18-18" fill="#315d64"/>
+      <text x="435" y="259" fill="#fff" font-size="18" font-weight="650">链接</text><text x="435" y="282" fill="#add8dc" font-size="12">2 分钟前 · 演示浏览器</text>
+      <rect x="435" y="324" width="306" height="95" rx="9" fill="#263946"/>
+      <g fill="none" stroke="#82bacb" stroke-width="2"><rect x="560" y="344" width="41" height="35" rx="5"/><path d="M550 356h-10v35h40v-9M574 354l-6 7 6 7m12-14 6 7-6 7"/></g>
+      <text x="436" y="450" font-size="20" font-weight="600" fill="#eef3f8">让片段回到工作流</text>
+      <text x="436" y="478" font-size="13" fill="#a3aab7">一份用于展示的虚构网页标题</text>
+      <text x="436" y="502" font-size="12" fill="#88baca">example.com</text>
+      <rect x="779" y="230" width="371" height="294" rx="19" fill="#151619" stroke="#484b54"/>
+      <path d="M799 231h331a18 18 0 0 1 18 18v54H781v-54a18 18 0 0 1 18-18" fill="#275f9b"/>
+      <text x="800" y="259" fill="#fff" font-size="18" font-weight="650">文件 · 3 项</text><text x="800" y="282" fill="#bedcff" font-size="12">5 分钟前 · 演示文件管理器</text>
+      <use href="#folder" x="1102" y="247" width="27" height="27" color="#e1efff"/>
+      <g fill="#e4e8ee" font-size="16">
+        <use href="#file" x="800" y="324" width="26" height="28" color="#87bdff"/><text x="841" y="345">brief.pdf</text>
+        <use href="#file" x="800" y="373" width="26" height="28" color="#87bdff"/><text x="841" y="394">palette.svg</text>
+        <use href="#folder" x="800" y="423" width="26" height="28" color="#87bdff"/><text x="841" y="443">Demo Assets</text>
+      </g>
+      <text x="800" y="502" font-size="12" fill="#858b96">仅保存引用 · 空格查看全部</text>
+    </g>
+    <text x="49" y="550" fill="#a6aab5" font-size="12">← → 选择　　Space 预览　　Enter 粘贴</text>
+    <text x="1150" y="550" fill="#a6aab5" text-anchor="end" font-size="12">关键词 + 分类，双重筛选</text>
+    <text x="600" y="602" fill="#768294" text-anchor="middle" font-size="11" letter-spacing="1">ILLUSTRATION · FICTIONAL DATA ONLY · NO SCREEN CAPTURE</text>
+  </g>
+</svg>

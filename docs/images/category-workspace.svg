@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="730" viewBox="0 0 1200 730" role="img" aria-labelledby="title desc">
+  <title id="title">分类与 JavaScript 规则工作区</title>
+  <desc id="desc">用虚构 URL 规则绘制的设置页：分类、颜色、卡片类型、代码编辑、样本输入和控制台。不是应用截图。</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#141c28"/><stop offset="1" stop-color="#241d2d"/></linearGradient></defs>
+  <g font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+    <rect width="1200" height="730" rx="24" fill="url(#bg)"/>
+    <text x="36" y="42" fill="#ab9adc" font-size="12" font-weight="700" letter-spacing="2">MAKE IT YOURS / CLASSIFICATION WORKSPACE</text>
+    <rect x="26" y="65" width="1148" height="620" rx="18" fill="#202124" stroke="#555962"/>
+    <path d="M45 66h1110a18 18 0 0 1 18 18v37H27V84a18 18 0 0 1 18-18" fill="#313236"/>
+    <text x="50" y="101" font-size="17" fill="#f1f2f6" font-weight="650">ClipDeck 设置</text>
+    <text x="1147" y="100" font-size="12" text-anchor="end" fill="#a8abb5">界面示意 · 虚构规则</text>
+    <path d="M218 122v562" stroke="#41434c"/>
+    <g font-size="15" fill="#a6a9b5">
+      <text x="56" y="172">通用</text><text x="56" y="224">图片</text><text x="56" y="276">键盘快捷键</text>
+      <rect x="41" y="302" width="162" height="43" rx="10" fill="#3e4050"/><text x="56" y="330" fill="#f2f3fb" font-weight="650">分类</text>
+      <text x="56" y="382">数据</text>
+    </g>
+    <text x="245" y="164" fill="#f4f5f9" font-size="24" font-weight="650">分类</text>
+    <text x="245" y="192" fill="#9ca1ad" font-size="13">按顺序匹配，为内容选择合适的呈现方式。</text>
+    <rect x="245" y="215" width="180" height="440" rx="11" fill="#292a2f" stroke="#40424a"/>
+    <text x="262" y="245" font-size="12" fill="#a6aab5">分类规则</text><text x="401" y="246" font-size="22" fill="#d0d4df">+</text>
+    <rect x="255" y="262" width="160" height="43" rx="8" fill="#484258"/>
+    <g font-size="14" fill="#dce0e9">
+      <circle cx="274" cy="284" r="5" fill="#c18cf4"/><text x="290" y="289">URL</text>
+      <circle cx="274" cy="331" r="5" fill="#79bdf7"/><text x="290" y="336">JSON</text>
+      <circle cx="274" cy="378" r="5" fill="#4cda91"/><text x="290" y="383">SQL</text>
+      <circle cx="274" cy="425" r="5" fill="#8498ff"/><text x="290" y="430">Markdown</text>
+      <circle cx="274" cy="472" r="5" fill="#fa758e"/><text x="290" y="477">代码</text>
+      <circle cx="274" cy="519" r="5" fill="#4bd8ca"/><text x="290" y="524">色彩</text>
+    </g>
+    <text x="263" y="627" font-size="12" fill="#9399a7">拖动调整匹配顺序</text>
+    <text x="449" y="239" font-size="20" fill="#edf0f7" font-weight="600">URL</text>
+    <rect x="1033" y="218" width="112" height="33" rx="8" fill="#277ddd"/><text x="1089" y="240" fill="#fff" font-size="13" text-anchor="middle">保存更改</text>
+    <rect x="448" y="266" width="697" height="96" rx="10" fill="#292a30" stroke="#3d404a"/>
+    <text x="467" y="294" font-size="13" fill="#b5b9c6">名称</text><text x="548" y="294" font-size="14" fill="#eff1f7">URL</text>
+    <text x="467" y="335" font-size="13" fill="#b5b9c6">颜色</text>
+    <g><circle cx="554" cy="329" r="9" fill="#bf5af2" stroke="#fff" stroke-width="2"/><circle cx="584" cy="329" r="8" fill="#64d2ff"/><circle cx="614" cy="329" r="8" fill="#30d158"/><circle cx="644" cy="329" r="8" fill="#ff375f"/><circle cx="674" cy="329" r="8" fill="#5e5ce6"/><circle cx="704" cy="329" r="8" fill="#66d4cf"/></g>
+    <text x="839" y="294" font-size="13" fill="#b5b9c6">卡片类型</text><rect x="934" y="276" width="188" height="29" rx="6" fill="#3b3c44"/><text x="950" y="296" font-size="13" fill="#eff1f7">链接</text><text x="1104" y="295" text-anchor="end" fill="#a7adba">⌄</text>
+    <text x="839" y="336" font-size="12" fill="#969dac">类别样式与 Deck 保持一致</text>
+    <rect x="448" y="381" width="697" height="273" rx="10" fill="#1c1d21" stroke="#41434e"/>
+    <path d="M448 425h697M871 425v228" stroke="#41434e"/>
+    <text x="466" y="409" fill="#b5bdcd" font-size="13" font-weight="600">{ } 分类脚本</text><text x="852" y="409" text-anchor="end" fill="#b5bdcd" font-size="12">格式化</text>
+    <text x="887" y="409" fill="#b5bdcd" font-size="13" font-weight="600">规则测试</text>
+    <g font-family="SFMono-Regular, Consolas, monospace" font-size="12.5">
+      <g fill="#747b89" text-anchor="end"><text x="475" y="454">1</text><text x="475" y="481">2</text><text x="475" y="508">3</text><text x="475" y="535">4</text><text x="475" y="562">5</text></g>
+      <text x="491" y="454" fill="#dec1f6">function <tspan fill="#b1d9f9">classify</tspan><tspan fill="#d6dae6">(item) {</tspan></text>
+      <text x="506" y="481" fill="#d6dae6">const text = item.text.trim();</text>
+      <text x="506" y="508" fill="#d6dae6">console.info(<tspan fill="#b7d994">"URL rule"</tspan>);</text>
+      <text x="506" y="535" fill="#dec1f6">return <tspan fill="#b7d994">/^https?:/i</tspan><tspan fill="#d6dae6">.test(text);</tspan></text>
+      <text x="491" y="562" fill="#d6dae6">}</text>
+      <text x="888" y="454" fill="#e0e6ef">https://example.com/demo</text>
+    </g>
+    <rect x="886" y="477" width="242" height="29" rx="6" fill="#3b3f4a"/><text x="1007" y="497" text-anchor="middle" font-size="12" fill="#e5e9f3">运行测试</text>
+    <text x="887" y="541" font-size="12" fill="#8993a6">控制台输出</text>
+    <text x="887" y="571" font-size="12" fill="#8ec5fa" font-family="monospace">info　URL rule</text>
+    <circle cx="895" cy="600" r="4" fill="#4bd59f"/><text x="908" y="605" font-size="13" fill="#a7dfca">匹配：true</text>
+    <text x="466" y="632" font-size="11" fill="#777f90">Tab 缩进　/　注释快捷键　/　展开编辑</text>
+    <text x="600" y="714" text-anchor="middle" fill="#8990a0" font-size="11" letter-spacing="1">ILLUSTRATION · FICTIONAL SAMPLE · NO SCREEN CAPTURE</text>
+  </g>
+</svg>

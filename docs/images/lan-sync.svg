@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="610" viewBox="0 0 1200 610" role="img" aria-labelledby="title desc">
+  <title id="title">局域网同步：内容直达已配对设备</title>
+  <desc id="desc">虚构的演示电脑 A、B、C，展示可见性、配对设备和文本图片同步范围。文件引用仅本机保留。不含真实 IP、主机名或配对码。</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#10212a"/><stop offset="1" stop-color="#182027"/></linearGradient></defs>
+  <g font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+    <rect width="1200" height="610" rx="24" fill="url(#bg)"/>
+    <text x="36" y="42" fill="#68cbbb" font-size="12" font-weight="700" letter-spacing="2">LOCAL NETWORK / PAIRED, PRIVATE, DIRECT</text>
+    <rect x="35" y="68" width="470" height="494" rx="19" fill="#24282e" stroke="#505d67"/>
+    <text x="60" y="105" font-size="21" font-weight="650" fill="#f3f7fa">同步设备</text><text x="480" y="103" font-size="12" text-anchor="end" fill="#9eaab7">演示面板</text>
+    <path d="M36 124h468" stroke="#424b55"/>
+    <text x="60" y="157" fill="#a9b3c0" font-size="12">本机名称</text>
+    <rect x="60" y="172" width="420" height="39" rx="7" fill="#333b44"/>
+    <text x="73" y="197" fill="#eef4fa" font-size="15">演示电脑 A</text><text x="465" y="197" fill="#94a6bb" font-size="12" text-anchor="end">macOS</text>
+    <text x="60" y="247" font-size="14" fill="#e3eaf0">局域网可见</text><text x="60" y="271" font-size="12" fill="#92a1ae">短时可见，开启后允许附近设备发现</text>
+    <rect x="426" y="230" width="54" height="27" rx="14" fill="#2faf91"/><circle cx="466" cy="243.5" r="10" fill="#f0fffa"/>
+    <rect x="60" y="290" width="420" height="36" rx="7" fill="#263f3e"/>
+    <text x="75" y="313" font-size="12" fill="#a7dbce">可见倒计时　2:59</text><text x="466" y="313" font-size="12" fill="#a7dbce" text-anchor="end">示例状态</text>
+    <text x="60" y="363" font-size="13" fill="#a9b3c0">已配对设备</text>
+    <rect x="60" y="378" width="420" height="62" rx="8" fill="#2c333d"/>
+    <path d="M77 391h29v19H77Zm-4 24h37m-18-5v5" fill="none" stroke="#8fc8c1" stroke-width="1.6"/>
+    <text x="122" y="403" font-size="14" fill="#e6edf5">演示电脑 B</text><text x="122" y="424" font-size="12" fill="#97a7b8">Windows · 已配对</text>
+    <circle cx="422" cy="407" r="4" fill="#4dd4a5"/><text x="465" y="412" font-size="12" fill="#9bd9c3" text-anchor="end">在线</text>
+    <rect x="60" y="449" width="420" height="62" rx="8" fill="#2c333d"/>
+    <path d="M77 462h29v19H77Zm-4 24h37m-18-5v5" fill="none" stroke="#7f92a7" stroke-width="1.6"/>
+    <text x="122" y="474" font-size="14" fill="#e6edf5">演示电脑 C</text><text x="122" y="495" font-size="12" fill="#97a7b8">Linux · 已配对</text>
+    <circle cx="422" cy="478" r="4" fill="#78818e"/><text x="465" y="483" font-size="12" fill="#9aa5b6" text-anchor="end">离线</text>
+    <text x="60" y="540" font-size="11" fill="#818e9f">虚构设备名 · 无真实地址或配对凭据</text>
+    <text x="556" y="112" font-size="28" fill="#eff7f7" font-weight="650">让最近的内容，在设备间接续。</text>
+    <text x="556" y="145" font-size="15" fill="#9dafbc">6 位代码配对 · 端到端加密 · 无云端中转</text>
+    <rect x="556" y="177" width="602" height="133" rx="14" fill="#23343d" stroke="#365963"/>
+    <g fill="none" stroke="#77c6b4" stroke-width="2"><path d="M580 208h22l7 7v24h-29Zm22 0v8h7M586 224h15M586 230h12"/><path d="M634 226h39m-8-7 8 7-8 7M693 226h39m-8-7 8 7-8 7"/><rect x="752" y="209" width="33" height="25" rx="3"/><path d="M746 241h45"/></g>
+    <text x="812" y="228" fill="#d6f1e9" font-size="15" font-weight="600">最近 24 小时</text>
+    <text x="580" y="282" fill="#9db8c1" font-size="13">文本与图片同步到已配对设备；重新复制可让旧内容回到窗口。</text>
+    <rect x="556" y="332" width="290" height="146" rx="13" fill="#292f38" stroke="#46515f"/>
+    <text x="577" y="362" fill="#dfebf3" font-size="15" font-weight="600">内容卡片</text>
+    <g fill="none" stroke="#62ccb4" stroke-width="2"><path d="M580 389h24l-5-5m5 5-5 5M604 403h-24l5-5m-5 5 5 5"/></g>
+    <text x="616" y="399" font-size="13" fill="#c4dad8">来自演示电脑 B</text>
+    <text x="577" y="450" font-size="12" fill="#96a6b7">同步标识替代本机应用图标</text>
+    <rect x="866" y="332" width="292" height="146" rx="13" fill="#322f2b" stroke="#63533b"/>
+    <path d="M886 383h13l6 7h24v23h-43Z" fill="none" stroke="#d6af73" stroke-width="2"/>
+    <text x="887" y="362" fill="#f2dec2" font-size="15" font-weight="600">文件引用仅留在本机</text>
+    <text x="941" y="400" font-size="13" fill="#d2c3ad">不传输源文件</text>
+    <text x="887" y="450" font-size="12" fill="#ad9c86">设备之间不共享本地文件路径</text>
+    <text x="556" y="522" fill="#94a8b7" font-size="13">防火墙、网络隔离和系统权限可能影响发现与连接。</text>
+    <text x="556" y="547" fill="#94a8b7" font-size="13">具体网络环境与三端组合仍需实机验证。</text>
+    <text x="600" y="591" text-anchor="middle" fill="#78908f" font-size="11" letter-spacing="1">ILLUSTRATION · FICTIONAL DEVICES ONLY · NO SCREEN CAPTURE</text>
+  </g>
+</svg>
