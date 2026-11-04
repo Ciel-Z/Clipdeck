@@ -386,41 +386,27 @@ Item {
         Item {
             readonly property real footerHeight: Math.min(88, Math.max(72, card.side * 0.23))
             readonly property real previewHeight: card.expanded ? height - footerHeight : height
-            // The header floats over the preview (as on image cards), so the
-            // og:image gets the whole area above the footer.
-            Image {
+            // The og:image sits between the solid header and the footer. Same
+            // rule as image cards: close to the area's shape it fills it; an
+            // unusually shaped image is shown whole.
+            CardImage {
                 id: preview
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
                 height: parent.previewHeight
-                clip: true
                 visible: card.linkPreviewUrl !== ""
                 source: card.linkPreviewUrl
-                fillMode: Image.PreserveAspectCrop
-                asynchronous: true
-            }
-            // Keeps the white header text readable over light page images.
-            Rectangle {
-                visible: preview.visible
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: Math.min(parent.previewHeight, card.headerHeight + 18)
-                gradient: Gradient {
-                    GradientStop { position: 0; color: Qt.rgba(0, 0, 0, 0.42) }
-                    GradientStop { position: 1; color: "transparent" }
-                }
             }
             // No page image: the site icon (or its initial tile), centred in
-            // the space below the floating header.
+            // the space above the footer.
             LinkIcon {
                 visible: card.linkPreviewUrl === ""
                 size: card.expanded ? Math.round(Math.min(84, Math.max(48, card.side * 0.28))) : 36
                 iconUrl: card.linkIconUrl
                 host: card.linkHost
                 anchors.horizontalCenter: parent.horizontalCenter
-                y: card.expanded ? card.headerHeight + (parent.previewHeight - card.headerHeight - height) / 2
+                y: card.expanded ? (parent.previewHeight - height) / 2
                                  : (parent.height - height) / 2 + 9
             }
             Rectangle {

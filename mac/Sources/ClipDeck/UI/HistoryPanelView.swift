@@ -737,25 +737,22 @@ private struct ClipboardCardView: View {
     private func linkContent(showFooter: Bool) -> some View {
         if showFooter {
             VStack(spacing: 0) {
-                // The header floats over this area (usesImmersiveHeader), so the
-                // page image gets everything above the footer.
+                // The page image sits between the header and the footer.
                 GeometryReader { geometry in
                     if let data = item.linkPreviewData,
                        let image = ClipboardImageCache.image(key: "preview:\(item.id)", data: data) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFill()
+                        // Same rule as image cards: close to the card's shape it
+                        // fills it; a wide share image (often 2:1) is shown whole.
+                        CardImageView(
+                            image: image,
+                            angle: 0,
+                            pixelWidth: Int(image.size.width),
+                            pixelHeight: Int(image.size.height)
+                        )
                             .frame(width: geometry.size.width, height: geometry.size.height)
-                            .clipped()
-                            .overlay(alignment: .top) {
-                                // Keeps the white header text readable over light page images.
-                                LinearGradient(colors: [.black.opacity(0.42), .clear], startPoint: .top, endPoint: .bottom)
-                                    .frame(height: min(geometry.size.height, headerHeight + 18))
-                            }
                     } else {
                         linkIcon(size: min(84, max(48, height * 0.28)))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .padding(.top, headerHeight)
                     }
                 }
 
@@ -898,8 +895,6 @@ private struct ClipboardCardView: View {
 
     private var usesImmersiveHeader: Bool {
         if case .image = item.payload { return true }
-        // Links too: the page image fills the card under a floating header.
-        if item.webURL != nil { return true }
         return item.category?.previewLanguage?.lowercased() == "color"
     }
 

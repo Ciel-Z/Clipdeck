@@ -253,9 +253,8 @@ QString cardKind(const ClipboardItem &item) {
 }
 
 bool usesImmersiveHeader(const ClipboardItem &item) {
-    // Links too: the page image fills the card under a floating header.
-    return item.isImage() || item.previewLanguage.compare(QStringLiteral("color"), Qt::CaseInsensitive) == 0
-        || cardKind(item) == QLatin1String("link");
+    // Links keep a solid header; the page image sits between it and the footer.
+    return item.isImage() || item.previewLanguage.compare(QStringLiteral("color"), Qt::CaseInsensitive) == 0;
 }
 
 } // namespace DeckPresentation

@@ -132,8 +132,8 @@ void colorTests() {
               "header-tone-follows-rotation");
     }
     ClipboardItem link = textItem(QStringLiteral("https://example.com/page"));
-    check(DeckPresentation::cardKind(link) == QStringLiteral("link") && DeckPresentation::usesImmersiveHeader(link),
-          "link-card-header-is-immersive");
+    check(DeckPresentation::cardKind(link) == QStringLiteral("link") && !DeckPresentation::usesImmersiveHeader(link),
+          "link-card-header-is-solid");
     check(!DeckPresentation::usesImmersiveHeader(textItem(QStringLiteral("plain words"))), "text-card-header-is-solid");
     ClipboardItem notColor = textItem(QStringLiteral("not a colour"));
     notColor.previewLanguage = QStringLiteral("color");

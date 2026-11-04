@@ -1299,6 +1299,62 @@ QImage imageAtAngle(const QImage &image, int angle) {
     return image.transformed(transform, Qt::SmoothTransformation);
 }
 
+// Same rule as windows/qml/CardImage.qml: close to the card's shape (within
+// 1.34x) the image fills the area and loses a little at the edges; otherwise it
+// is fitted edge to edge over a dimmed, softened copy of itself. The
+// checkerboard sits only behind it. Used by image cards and link previews.
+void paintCardImage(QPainter &painter, const QRect &area, const QImage &image) {
+    auto paintChecker = [&painter](const QRect &target) {
+        const int checkerSize = 12;
+        painter.fillRect(target, QColor(26, 26, 28));
+        for (int y = target.y(); y < target.bottom(); y += checkerSize) {
+            for (int x = target.x(); x < target.right(); x += checkerSize) {
+                painter.fillRect(QRect(x, y, checkerSize, checkerSize).intersected(target),
+                    ((x / checkerSize + y / checkerSize) % 2 == 0)
+                        ? QColor(255, 255, 255, 14) : QColor(0, 0, 0, 30));
+            }
+        }
+    };
+    auto coverSource = [](const QImage &source, const QRect &target) {
+        QRect rect = source.rect();
+        const double targetAspect = target.width() / double(std::max(1, target.height()));
+        if (source.width() / double(std::max(1, source.height())) > targetAspect) {
+            const int width = qRound(source.height() * targetAspect);
+            rect.setLeft((source.width() - width) / 2);
+            rect.setWidth(width);
+        } else {
+            const int height = qRound(source.width() / targetAspect);
+            rect.setTop((source.height() - height) / 2);
+            rect.setHeight(height);
+        }
+        return rect;
+    };
+    const double frameAspect = area.width() / double(std::max(1, area.height()));
+    const double imageAspect = image.isNull() ? frameAspect
+        : image.width() / double(std::max(1, image.height()));
+    const bool fills = std::max(imageAspect / frameAspect, frameAspect / imageAspect) <= 1.34;
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    if (image.isNull()) {
+        paintChecker(area);
+    } else if (fills) {
+        paintChecker(area);
+        painter.drawImage(area, image, coverSource(image, area));
+    } else {
+        // A 16 px copy scaled up: a soft backdrop without a blur pass.
+        const QImage backdrop = image.scaled(qRound(16 * std::max(1.0, imageAspect)),
+                                             qRound(16 * std::max(1.0, 1 / imageAspect)),
+                                             Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        painter.drawImage(area, backdrop, coverSource(backdrop, area));
+        painter.fillRect(area, QColor(18, 18, 20, 140));
+        const QSize fitted = image.size().scaled(area.size(), Qt::KeepAspectRatio);
+        const QRect imageRect(area.center().x() - fitted.width() / 2 + 1,
+                              area.center().y() - fitted.height() / 2 + 1,
+                              fitted.width(), fitted.height());
+        paintChecker(imageRect);
+        painter.drawImage(imageRect, image, image.rect());
+    }
+}
+
 QSize imageSizeAtAngle(const QSize &size, int angle) {
     angle = normalizedImageAngle(angle);
     return angle == 90 || angle == 270 ? QSize(size.height(), size.width()) : size;
@@ -2659,7 +2715,8 @@ private:
                 parsedColor = QColor(value);
             }
             // Links too: the page image fills the card under a floating header.
-            const bool immersive = item.isImage() || parsedColor.isValid() || isLink;
+            // Links keep a solid header; the page image sits between it and the footer.
+            const bool immersive = item.isImage() || parsedColor.isValid();
             // Floating headers adapt to what is under them (ui/header_tone.h): dark
             // text over a calm light image top or a light colour swatch, a short
             // faint gradient only under a busy image top.
@@ -2694,61 +2751,9 @@ private:
                 if (filePaste_->feedback().itemID == item.databaseID) feedback = filePaste_->feedback();
                 paintFileCard(painter, fileContentRect(index), item.files, true, feedback);
             } else if (item.isImage()) {
-                // Same rule as windows/qml/CardImage.qml: close to the card's
-                // shape (within 1.34x) the image fills the card and loses a little
-                // at the edges; otherwise it is fitted edge to edge over a dimmed,
-                // softened copy of itself. The checkerboard sits only behind it.
                 const QImage thumbnail = cardThumbnail(item);
-                auto paintChecker = [&painter](const QRect &area) {
-                    const int checkerSize = 12;
-                    painter.fillRect(area, QColor(26, 26, 28));
-                    for (int y = area.y(); y < area.bottom(); y += checkerSize) {
-                        for (int x = area.x(); x < area.right(); x += checkerSize) {
-                            painter.fillRect(QRect(x, y, checkerSize, checkerSize).intersected(area),
-                                ((x / checkerSize + y / checkerSize) % 2 == 0)
-                                    ? QColor(255, 255, 255, 14) : QColor(0, 0, 0, 30));
-                        }
-                    }
-                };
-                auto coverSource = [](const QImage &image, const QRect &target) {
-                    QRect source = image.rect();
-                    const double targetAspect = target.width() / double(std::max(1, target.height()));
-                    if (image.width() / double(std::max(1, image.height())) > targetAspect) {
-                        const int width = qRound(image.height() * targetAspect);
-                        source.setLeft((image.width() - width) / 2);
-                        source.setWidth(width);
-                    } else {
-                        const int height = qRound(image.width() / targetAspect);
-                        source.setTop((image.height() - height) / 2);
-                        source.setHeight(height);
-                    }
-                    return source;
-                };
-                const double frameAspect = contentArea.width() / double(std::max(1, contentArea.height()));
-                const double imageAspect = thumbnail.isNull() ? frameAspect
-                    : thumbnail.width() / double(std::max(1, thumbnail.height()));
-                const bool fills = std::max(imageAspect / frameAspect, frameAspect / imageAspect) <= 1.34;
                 painter.save();
-                painter.setRenderHint(QPainter::SmoothPixmapTransform);
-                if (thumbnail.isNull()) {
-                    paintChecker(contentArea);
-                } else if (fills) {
-                    paintChecker(contentArea);
-                    painter.drawImage(contentArea, thumbnail, coverSource(thumbnail, contentArea));
-                } else {
-                    // A 16 px copy scaled up: a soft backdrop without a blur pass.
-                    const QImage backdrop = thumbnail.scaled(qRound(16 * std::max(1.0, imageAspect)),
-                                                       qRound(16 * std::max(1.0, 1 / imageAspect)),
-                                                       Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                    painter.drawImage(contentArea, backdrop, coverSource(backdrop, contentArea));
-                    painter.fillRect(contentArea, QColor(18, 18, 20, 140));
-                    const QSize fitted = thumbnail.size().scaled(contentArea.size(), Qt::KeepAspectRatio);
-                    const QRect imageRect(contentArea.center().x() - fitted.width() / 2 + 1,
-                                          contentArea.center().y() - fitted.height() / 2 + 1,
-                                          fitted.width(), fitted.height());
-                    paintChecker(imageRect);
-                    painter.drawImage(imageRect, thumbnail, thumbnail.rect());
-                }
+                paintCardImage(painter, contentArea, thumbnail);
                 if (imageTone == HeaderTone::Mixed) {
                     const int scrimHeight = expanded ? headerHeight + 8 : 36;
                     QLinearGradient scrim(contentArea.topLeft(), QPoint(contentArea.x(), contentArea.y() + scrimHeight));
@@ -2766,32 +2771,17 @@ private:
                     : contentArea;
                 const QImage linkPreview = decodedLinkAsset(item, false);
                 if (expanded && !linkPreview.isNull()) {
-                    const double targetAspect = previewArea.width() / double(previewArea.height());
-                    const double sourceAspect = linkPreview.width() / double(linkPreview.height());
-                    QRect source = linkPreview.rect();
-                    if (sourceAspect > targetAspect) {
-                        const int width = qRound(linkPreview.height() * targetAspect);
-                        source.setLeft((linkPreview.width() - width) / 2);
-                        source.setWidth(width);
-                    } else {
-                        const int height = qRound(linkPreview.width() / targetAspect);
-                        source.setTop((linkPreview.height() - height) / 2);
-                        source.setHeight(height);
-                    }
-                    painter.drawImage(previewArea, linkPreview, source);
-                    // Keeps the white header text readable over light page images.
-                    QLinearGradient scrim(previewArea.topLeft(),
-                                          QPoint(previewArea.x(), previewArea.y() + headerHeight + 18));
-                    scrim.setColorAt(0, QColor(0, 0, 0, 107));
-                    scrim.setColorAt(1, QColor(0, 0, 0, 0));
-                    painter.fillRect(QRect(previewArea.x(), previewArea.y(), previewArea.width(),
-                                           std::min(previewArea.height(), headerHeight + 18)), scrim);
+                    // Same rule as image cards: close to the area's shape it fills
+                    // it; an unusually shaped image is shown whole.
+                    painter.save();
+                    paintCardImage(painter, previewArea, linkPreview);
+                    painter.restore();
                 }
                 // No page image: the site icon (or its initial tile), centred in
-                // the space below the floating header.
+                // the space above the footer.
                 const int iconSize = expanded ? std::min(84, std::max(48, qRound(card.height() * 0.28))) : 36;
                 const int iconTop = expanded
-                    ? previewArea.y() + headerHeight + (previewArea.height() - headerHeight - iconSize) / 2
+                    ? previewArea.y() + (previewArea.height() - iconSize) / 2
                     : previewArea.center().y() - iconSize / 2 + 10;
                 const QRect iconRect(previewArea.center().x() - iconSize / 2, iconTop, iconSize, iconSize);
                 if (!expanded || linkPreview.isNull())
