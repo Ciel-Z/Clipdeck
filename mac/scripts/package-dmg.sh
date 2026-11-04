@@ -1,7 +1,7 @@
 #!/bin/zsh
 
-# Builds a Release ClipDeck.app and wraps it in a drag-to-Applications DMG:
-# dist/ClipDeck-<MARKETING_VERSION>-macos.dmg.
+# Builds a universal (Apple silicon + Intel) Release ClipDeck.app and wraps it
+# in a drag-to-Applications DMG: dist/ClipDeck-<MARKETING_VERSION>-macos.dmg.
 
 set -euo pipefail
 
@@ -14,6 +14,8 @@ xcodebuild \
   -scheme ClipDeck \
   -configuration Release \
   -derivedDataPath "$derived_data" \
+  ARCHS="arm64 x86_64" \
+  ONLY_ACTIVE_ARCH=NO \
   CODE_SIGN_IDENTITY=- \
   build
 
