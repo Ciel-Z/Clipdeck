@@ -18,6 +18,46 @@ final class PanelControllerTests: XCTestCase {
         XCTAssertFalse(panel.becomesKeyOnlyIfNeeded)
     }
 
+    func testTypingIntoTheDeckKeepsTheFirstLetterOnceTheSearchFieldTakesFocus() throws {
+        let store = InMemoryHistoryStore()
+        store.insert(ClipboardItem(
+            payload: .text(plainText: "index.html", rtfData: nil),
+            sourceApplication: SourceApplication(bundleIdentifier: nil, name: "Editor", iconData: nil)
+        ))
+        let controller = PanelController(store: store, onPaste: { _, _ in }, onManageCategories: {}, onSearch: { _ in })
+        controller.show(targetApplication: nil, targetsClipDeck: true)
+        defer { controller.hide() }
+        let panel = try XCTUnwrap(controller.window)
+        panel.makeKey()
+
+        func type(_ characters: String, keyCode: UInt16) throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: panel.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode
+            ))
+            panel.sendEvent(event)
+        }
+        // The first letter starts the search; then the field takes focus, and
+        // AppKit selects its text, before the next letter arrives. SwiftUI does
+        // not move focus inside a test run, so the test focuses the field itself.
+        try type("i", keyCode: 34)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        func textFields(in view: NSView) -> [NSTextField] {
+            view.subviews.flatMap { ($0 as? NSTextField).map { [$0] } ?? textFields(in: $0) }
+        }
+        let field = try XCTUnwrap(textFields(in: try XCTUnwrap(panel.contentView)).first { $0.isEditable })
+        XCTAssertTrue(panel.makeFirstResponder(field))
+        store.setSearchFieldFocused(true)
+        let editor = try XCTUnwrap(panel.firstResponder as? NSTextView)
+        XCTAssertEqual(editor.string, "i")
+        for (character, keyCode) in [("n", UInt16(45)), ("d", 2), ("e", 14), ("x", 7)] {
+            try type(character, keyCode: keyCode)
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(store.searchQuery, "index")
+    }
+
     func testDeckCanTargetClipDeckWithoutReusingAnExternalApplication() {
         let controller = PanelController(
             store: InMemoryHistoryStore(),

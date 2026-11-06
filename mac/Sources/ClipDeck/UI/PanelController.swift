@@ -26,6 +26,10 @@ private final class ClipDeckPanel: NSPanel {
     var isEditingContent: (() -> Bool)?
     var isPreviewingContent: (() -> Bool)?
     private var horizontalWheelTargetX: CGFloat?
+    /// Set when typing started a search: the field takes focus after that
+    /// first letter and AppKit then selects its text, so the next letter must
+    /// not replace it.
+    private var collapsesSearchSelection = false
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -44,6 +48,15 @@ private final class ClipDeckPanel: NSPanel {
         guard event.type == .keyDown else {
             super.sendEvent(event)
             return
+        }
+
+        if collapsesSearchSelection, isSearchEditing?() != true {
+            collapsesSearchSelection = false
+        } else if collapsesSearchSelection, isSearchFieldFocused?() == true {
+            collapsesSearchSelection = false
+            if let editor = firstResponder as? NSTextView, !editor.hasMarkedText() {
+                editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+            }
         }
 
         let commandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -178,6 +191,7 @@ private final class ClipDeckPanel: NSPanel {
 
         if isSearchFieldFocused?() != true,
            let characters = typeToSearchCharacters(from: event) {
+            collapsesSearchSelection = true
             onTypeToSearch?(characters)
             return
         }
